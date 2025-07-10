@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import rdkit.Chem as Chem
 
 bond_types = [
     "UNSPECIFIED", "SINGLE", "DOUBLE", "TRIPLE",
@@ -12,6 +13,31 @@ bond_types = [
 """
 Records the bond types used in the dataset
 """
+
+class SMILESToInputs:
+    """
+    A utility class to convert SMILES strings to atom type indices and edges.
+    """
+    @staticmethod
+    def convert(smiles):
+        atom_type_indices = []
+        edges = []
+        mol = Chem.MolFromSmiles(smiles)
+        if mol is None:
+            raise ValueError(f"Invalid SMILES string: {smiles}")
+        for atom in mol.GetAtoms():
+            atom_type_indices.append(atom.GetAtomicNum())
+        for bond in mol.GetBonds():
+            src = bond.GetBeginAtomIdx()
+            dst = bond.GetEndAtomIdx()
+            # Get the bond type and map it to an index in `bond_types`
+            bond_type = str(bond.GetBondType())
+            if bond_type not in bond_types:
+                raise ValueError(f"Unknown bond type: {bond_type}")
+            bond_type_index = bond_types.index(bond_type)
+            edges.append(((src, dst), bond_type_index))
+        return (atom_type_indices, edges), mol
+
 
 class AtomEmbedding(nn.Module):
     """
