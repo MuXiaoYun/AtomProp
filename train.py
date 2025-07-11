@@ -8,6 +8,10 @@ import torch.nn as nn
 
 data_path = "data/pubchem/pubchem-10m.txt"
 
+max_mass = 6000.0  # Maximum relative mass for normalization
+max_atom_num = 420  # Maximum number of atoms in a molecule for padding
+max_edge_size = 420  # Maximum number of edges in a molecule for padding
+
 if __name__ == "__main__":
     # load the data from the text file, each line is a SMILES string
     with open(data_path, 'r') as f:
@@ -15,18 +19,23 @@ if __name__ == "__main__":
     smiles_list = [line.strip() for line in lines if line.strip()]
     print("Number of SMILES strings:", len(smiles_list))
     molecules = []
-    atom_types = set()
-    bond_types = set()
+    # atom_types = set()
+    # bond_types = set()
     for i, smiles in enumerate(smiles_list):
         if i % 100 == 0:
             print(f"Processing {i}th SMILES: {smiles}")
-        if i > 10000:
+        if i > 1000:
             break
         # Convert SMILES to GeAT inputs
-        mol_input, mol = SMILESToInputs.convert(smiles)
+        mol_input, mol = SMILESToInputs.convert(smiles=smiles, context_length_node=max_atom_num, context_length_edge=max_edge_size)
+        # # Update maximum atomic number
+        # for atom_type_index in mol_input[0]:
+        #     if atom_type_index > max_atomic_num:
+        #         max_atomic_num = atom_type_index
         if mol is not None:
-            # Append the molecule and its relative mol mass
+            # Append the molecule and its mol mass
             molecules.append((mol_input, Descriptors.MolWt(mol)))
+    # print(f"Max atomic number in dataset: {max_atomic_num}")
 
     # model instance
     geatnet = GeATNet(atom_embedding_dim=config.atom_embedding_dim,
@@ -40,12 +49,14 @@ if __name__ == "__main__":
         def __len__(self):
             return len(self.molecules)
         def __getitem__(self, idx):
-            # Normalize relative mass to a range of 0-1
-            max_mass = max([m[1] for m in self.molecules])
-            print(f"Max mass in dataset: {max_mass}")
-            rel_mass = self.molecules[idx][1] / 6000.0
+            # max_atom_num = max(len(mol[0][0]) for mol in self.molecules)
+            # max_edge_size = max(len(mol[0][1]) for mol in self.molecules)
+            # print(f"Max atom number in dataset: {max_atom_num}")
+            # print(f"Max edge size in dataset: {max_edge_size}")
+            rel_mass = self.molecules[idx][1] / max_mass
             return self.molecules[idx][0], rel_mass
         
+    # Convert inputs to tensor and create the dataset 
     dataset = MoleculeDataset(molecules)
 
     # train geatnet with the dataset by using a 5-fold cross-validation and draw 2 loss curves
@@ -68,7 +79,7 @@ if __name__ == "__main__":
             geatnet.train()
             total_loss = 0
 
-            for atom_type_indices, edges, rel_mass in train_loader:
+            for (atom_type_indices, edges), rel_mass in train_loader:
                 optimizer.zero_grad()
                 outputs = geatnet(atom_type_indices, edges)
                 loss = loss_fn(outputs.squeeze(), rel_mass.float())

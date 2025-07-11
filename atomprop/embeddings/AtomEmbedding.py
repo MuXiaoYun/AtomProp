@@ -19,14 +19,21 @@ class SMILESToInputs:
     A utility class to convert SMILES strings to atom type indices and edges.
     """
     @staticmethod
-    def convert(smiles):
+    def convert(smiles: str, context_length_node: int = 420, context_length_edge: int = 420):
         atom_type_indices = []
         edges = []
+        # Create nodes with atom types
         mol = Chem.MolFromSmiles(smiles)
         if mol is None:
             raise ValueError(f"Invalid SMILES string: {smiles}")
         for atom in mol.GetAtoms():
             atom_type_indices.append(atom.GetAtomicNum())
+        # Pad atom_type_indices to context_length
+        if len(atom_type_indices) < context_length_node:
+            atom_type_indices += [0] * (context_length_node - len(atom_type_indices))
+        elif len(atom_type_indices) > context_length_node:
+            atom_type_indices = atom_type_indices[:context_length_node]
+        # Create edges with bond types
         for bond in mol.GetBonds():
             src = bond.GetBeginAtomIdx()
             dst = bond.GetEndAtomIdx()
@@ -36,6 +43,14 @@ class SMILESToInputs:
                 raise ValueError(f"Unknown bond type: {bond_type}")
             bond_type_index = bond_types.index(bond_type)
             edges.append(((src, dst), bond_type_index))
+        # Pad edges to context_length
+        if len(edges) < context_length_edge:
+            edges += [((-1, -1), -1)] * (context_length_edge - len(edges))
+        elif len(edges) > context_length_edge:
+            edges = edges[:context_length_edge]
+        # Convert all to tensors
+        atom_type_indices = torch.tensor(atom_type_indices, dtype=torch.long)
+        edges = [((torch.tensor(src, dtype=torch.long), torch.tensor(dst, dtype=torch.long)), torch.tensor(bond_type_index, dtype=torch.long)) for ((src, dst), bond_type_index) in edges]
         return (atom_type_indices, edges), mol
 
 
