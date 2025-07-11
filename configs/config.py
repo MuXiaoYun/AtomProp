@@ -3,7 +3,7 @@ AtomEmbedding configs
 """
 atom_embedding_dim = 64 
 """ Dimension of the atom embeddings """
-num_atom_types = 33
+num_atom_types = 54
 """ Number of unique atom types in the dataset """
 num_bond_types = 4
 """ Number of unique bond types in the dataset """

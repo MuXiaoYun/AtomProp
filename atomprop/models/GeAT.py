@@ -54,19 +54,25 @@ class GeATLayer(nn.Module):
         self.edge_attentions = nn.ModuleList([MultiHeadEdgeAttention(atom_embedding_dim, num_heads, hidden_dim, attention_num_layers, output_negative_slope) for _ in range(num_bond_types)])
         self.project = nn.Linear(atom_embedding_dim * num_heads, atom_embedding_dim)
 
-    def forward(self, embeddings, edges: list = [((-1, -1), -1)]):
+    def forward(self, embeddings, edges: list):
         node_num = embeddings.size(0)
         src_embeddings = self.Q_w(embeddings)
         dst_embeddings = self.K_w(embeddings)
         value_embeddings = self.V_w(embeddings)
         edge_attention_scores = torch.full((node_num, node_num), float('-inf'))
-        for (src, dst), bond_type in edges:
+        for (src, dst), bond_types in edges:
             # attention of src to dst
             src_embedding = src_embeddings[src]
             dst_embedding = dst_embeddings[dst]
-            edge_attention_scores[src, dst] = self.edge_attentions[bond_type](src_embedding, dst_embedding)
+            edge_attention_scores[src, dst] = torch.stack([self.edge_attentions[bond_type](src_embedding, dst_embedding) for bond_type in bond_types])
             # attention of dst to src
-            edge_attention_scores[dst, src] = self.edge_attentions[bond_type](dst_embedding, src_embedding)
+            edge_attention_scores[dst, src] = torch.stack([self.edge_attentions[bond_type](dst_embedding, src_embedding) for bond_type in bond_types])
+        # Mask padding parts
+        src_mask = (src == -1)
+        dst_mask = (dst == -1)
+        edge_attention_scores[:, src_mask] = -torch.inf
+        edge_attention_scores[dst_mask, :] = -torch.inf
+
         edge_attention_scores = torch.softmax(edge_attention_scores, dim=-1)
         weighed_value_embeddings = edge_attention_scores.unsqueeze(-1) * value_embeddings.unsqueeze(0)
         projected_value_embeddings = self.project(weighed_value_embeddings)
@@ -83,7 +89,7 @@ class GeATNet(nn.Module):
     def __init__(self, atom_embedding_dim: int, num_atom_types: int, num_bond_types: int, num_heads: int = 8, hidden_dim: int = 64, attention_num_layers: int = 2, output_negative_slope: float = 0.2, geat_num_layers: int = 2):
         super(GeATNet, self).__init__()
         self.atom_embedding = AtomEmbedding(atom_embedding_dim=atom_embedding_dim, num_atom_types=num_atom_types)
-        self.geat_layers = nn.ModuleList([GeATLayer(atom_embedding_dim, num_bond_types, num_heads, hidden_dim, attention_num_layers, output_negative_slope) for _ in range(3)])
+        self.geat_layers = nn.ModuleList([GeATLayer(atom_embedding_dim, num_bond_types, num_heads, hidden_dim, attention_num_layers, output_negative_slope) for _ in range(geat_num_layers)])
         self.global_attention = nn.MultiheadAttention(embed_dim=atom_embedding_dim, num_heads=num_heads)
         self.fc = nn.Linear(atom_embedding_dim, 1)
 
