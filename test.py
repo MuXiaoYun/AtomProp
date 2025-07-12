@@ -1,19 +1,22 @@
 from atomprop.models.GeAT import GeATNet
 import configs.config as config
 import rdkit.Chem as Chem
+import torch
 
 # data_path = "data/chemprop/regression/mol_multitask.csv"
 data_path = "data/pubchem/pubchem-10m.txt"
 
 if __name__ == "__main__":
-    # Use the default configurations
-    geatnet = GeATNet(atom_embedding_dim=config.atom_embedding_dim,
-                     num_atom_types=config.num_atom_types,
-                     num_bond_types=config.num_bond_types)
-    print(geatnet)
-    # Print param numbers
-    total_params = sum(p.numel() for p in geatnet.parameters() if p.requires_grad)
-    print(f"Total trainable parameters: {total_params}")
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Using device: {device}")
+    # # Use the default configurations
+    # geatnet = GeATNet(atom_embedding_dim=config.atom_embedding_dim,
+    #                  num_atom_types=config.num_atom_types,
+    #                  num_bond_types=config.num_bond_types)
+    # print(geatnet)
+    # # Print param numbers
+    # total_params = sum(p.numel() for p in geatnet.parameters() if p.requires_grad)
+    # print(f"Total trainable parameters: {total_params}")
 
     # # Load data from the CSV file
     # # headers are [smiles	mu	alpha	homo	lumo	gap	r2	zpve	cv	u0	u298	h298	g298]
