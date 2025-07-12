@@ -63,23 +63,26 @@ if __name__ == "__main__":
 
     # train geatnet with the dataset and draw training loss curve
     dataloader = torch.utils.data.DataLoader(dataset, batch_size=32, shuffle=True)
-    optimizer = torch.optim.Adam(geatnet.parameters(), lr=0.001)
     criterion = nn.MSELoss()
+    optimizer = torch.optim.Adam(geatnet.parameters(), lr=0.001)
     num_epochs = 10
     for epoch in range(num_epochs):
-        total_loss = 0.0
-        for batch_idx, (atom_embeddings, edges, rel_mass) in enumerate(dataloader):
+        geatnet.train()
+        running_loss = 0.0
+        for i, (atom_embeddings, edges, rel_mass) in enumerate(dataloader):
+            atom_embeddings = atom_embeddings.to(device)
+            edges = edges.to(device)
+            rel_mass = rel_mass.to(device)
+
             optimizer.zero_grad()
-            # Forward pass
             outputs = geatnet(atom_embeddings, edges)
-            # Calculate loss
-            loss = criterion(outputs.squeeze(), rel_mass.float())
-            # Backward pass and optimization
+            loss = criterion(outputs, rel_mass)
             loss.backward()
             optimizer.step()
-            total_loss += loss.item()
-        print(f"Epoch [{epoch+1}/{num_epochs}], Loss: {total_loss/len(dataloader):.4f}")
-    # Save the trained model
-    torch.save(geatnet.state_dict(), 'geatnet_model.pth')
-    print("Training complete.")
+
+            running_loss += loss.item()
+            if (i + 1) % 10 == 0:
+                print(f"Epoch [{epoch + 1}/{num_epochs}], Step [{i + 1}/{len(dataloader)}], Loss: {loss.item():.4f}")
+
+        print(f"Epoch [{epoch + 1}/{num_epochs}], Average Loss: {running_loss / len(dataloader):.4f}")
 

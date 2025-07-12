@@ -26,7 +26,10 @@ class EdgeAttention(nn.Module):
         # d for atom embedding dimension
         # Concat src and dst embeddings into n*n*2d
         N = src_embeddings.size(1)
-        input_concat = torch.cat([src_embeddings.repeat(1, 1, N).reshape(-1, N, N, 2*self.atom_d), dst_embeddings.repeat(1, N, 1).reshape(-1, N, N, 2*self.atom_d)], dim=-1)
+        src_expanded = src_embeddings.unsqueeze(2)  # [B, N, 1, embed_dim]
+        dst_expanded = dst_embeddings.unsqueeze(1)  # [B, 1, N, embed_dim]
+        input_concat = torch.cat([src_expanded.expand(-1, -1, N, -1), 
+                                dst_expanded.expand(-1, N, -1, -1)], dim=-1)
         # Sparse one-hot encoding
         *lead, n, l = input_concat.shape
         lt = self.num_bond_types * l
@@ -71,7 +74,10 @@ class MultiHeadEdgeAttention(nn.Module):
         # d for atom embedding dimension, e for edge embedding dimension
         # Concat src and dst embeddings into n*n*2d
         N = src_embeddings.size(1)
-        input_concat = torch.cat([src_embeddings.repeat(1, 1, N).reshape(-1, N, N, 2*self.atom_d), dst_embeddings.repeat(1, N, 1).reshape(-1, N, N, 2*self.atom_d)], dim=-1)
+        src_expanded = src_embeddings.unsqueeze(2)  # [B, N, 1, embed_dim]
+        dst_expanded = dst_embeddings.unsqueeze(1)  # [B, 1, N, embed_dim]
+        input_concat = torch.cat([src_expanded.expand(-1, -1, N, -1), 
+                                dst_expanded.expand(-1, N, -1, -1)], dim=-1)
         # Sparse one-hot encoding
         *lead, n, l = input_concat.shape
         lt = self.num_bond_types * l * self.num_heads
