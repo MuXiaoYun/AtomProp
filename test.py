@@ -7,16 +7,17 @@ import torch
 data_path = "data/pubchem/pubchem-10m.txt"
 
 if __name__ == "__main__":
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"Using device: {device}")
-    # # Use the default configurations
-    # geatnet = GeATNet(atom_embedding_dim=config.atom_embedding_dim,
-    #                  num_atom_types=config.num_atom_types,
-    #                  num_bond_types=config.num_bond_types)
-    # print(geatnet)
-    # # Print param numbers
-    # total_params = sum(p.numel() for p in geatnet.parameters() if p.requires_grad)
-    # print(f"Total trainable parameters: {total_params}")
+    # device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    # print(f"Using device: {device}")
+
+    # Use the default configurations
+    geatnet = GeATNet(atom_embedding_dim=config.atom_embedding_dim,
+                     num_atom_types=config.num_atom_types,
+                     num_bond_types=config.num_bond_types)
+    print(geatnet)
+    # Print param numbers
+    total_params = sum(p.numel() for p in geatnet.parameters() if p.requires_grad)
+    print(f"Total trainable parameters: {total_params}")
 
     # # Load data from the CSV file
     # # headers are [smiles	mu	alpha	homo	lumo	gap	r2	zpve	cv	u0	u298	h298	g298]
@@ -57,13 +58,19 @@ if __name__ == "__main__":
     # molecules = []
     # atom_types = set()
     # bond_types = set()
+    # # Count max number of atoms in a molecule
+    # max_atom_num = 0
     # for i, smiles in enumerate(smiles_list):
     #     if i % 100 == 0:
     #         print(f"Processing {i}th SMILES: {smiles}")
     #     if i > 200000:
     #         break
     #     mol = Chem.MolFromSmiles(smiles)
+    #     # remove all H atoms
     #     if mol is not None:
+    #         mol = Chem.RemoveHs(mol)
+    #         if mol.GetNumAtoms() > max_atom_num:
+    #             max_atom_num = mol.GetNumAtoms()
     #         molecules.append(mol)
     #         for atom in mol.GetAtoms():
     #             atom_types.add(atom.GetSymbol())
@@ -74,4 +81,5 @@ if __name__ == "__main__":
     # print("Atom types:", atom_types)
     # print("Number of bond types:", len(bond_types))
     # print("Bond types:", bond_types)
+    # print("Maximum number of atoms in a molecule:", max_atom_num)
     

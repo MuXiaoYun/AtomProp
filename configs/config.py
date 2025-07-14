@@ -3,7 +3,7 @@ AtomEmbedding configs
 """
 atom_embedding_dim = 64 
 """ Dimension of the atom embeddings """
-num_atom_types = 54
+num_atom_types = 86
 """ Number of unique atom types in the dataset """
 bond_embedding_dim = 128 
 """ Dimension of the bond embeddings """
@@ -25,3 +25,9 @@ geatnet_hidden_dim = 64
 """ Hidden dimension for the egeatnet feedforward network """
 geatnet_layers = 2
 """ Number of GeAT layers in the GeATNet"""
+
+
+"""
+Training configs
+"""
+context_length = 470

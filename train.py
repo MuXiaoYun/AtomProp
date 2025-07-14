@@ -9,7 +9,7 @@ import torch.nn as nn
 data_path = "data/pubchem/pubchem-10m.txt"
 
 max_mass = 6000.0  # Maximum relative mass for normalization
-max_atom_num = 420  # Maximum number of atoms in a molecule for padding
+max_atom_num = config.context_length  # Maximum number of atoms in a molecule for padding
 
 if __name__ == "__main__":
     # load the data from the text file, each line is a SMILES string
@@ -32,8 +32,8 @@ if __name__ == "__main__":
         #     if atom_type_index > max_atomic_num:
         #         max_atomic_num = atom_type_index
         if mol is not None:
-            # Append the molecule and its mol mass
-            molecules.append((atom_embeddings, edges, Descriptors.MolWt(mol)))
+            # Append the molecule and its mol mass with Hs
+            molecules.append((atom_embeddings, edges, Descriptors.MolWt(Chem.AddHs(mol))))
     # print(f"Max atomic number in dataset: {max_atomic_num}")
 
     # model instance
@@ -67,22 +67,28 @@ if __name__ == "__main__":
     optimizer = torch.optim.Adam(geatnet.parameters(), lr=0.001)
     num_epochs = 10
     for epoch in range(num_epochs):
-        geatnet.train()
-        running_loss = 0.0
-        for i, (atom_embeddings, edges, rel_mass) in enumerate(dataloader):
-            atom_embeddings = atom_embeddings.to(device)
-            edges = edges.to(device)
-            rel_mass = rel_mass.to(device)
+        try:
+            geatnet.train()
+            running_loss = 0.0
+            for i, (atom_embeddings, edges, rel_mass) in enumerate(dataloader):
+                atom_embeddings = atom_embeddings.to(device)
+                edges = edges.to(device)
+                rel_mass = rel_mass.to(device)
 
-            optimizer.zero_grad()
-            outputs = geatnet(atom_embeddings, edges)
-            loss = criterion(outputs, rel_mass)
-            loss.backward()
-            optimizer.step()
+                optimizer.zero_grad()
+                outputs = geatnet(atom_embeddings, edges)
+                loss = criterion(outputs, rel_mass)
+                loss.backward()
+                optimizer.step()
 
-            running_loss += loss.item()
-            if (i + 1) % 10 == 0:
-                print(f"Epoch [{epoch + 1}/{num_epochs}], Step [{i + 1}/{len(dataloader)}], Loss: {loss.item():.4f}")
+                running_loss += loss.item()
+                if (i + 1) % 10 == 0:
+                    print(f"Epoch [{epoch + 1}/{num_epochs}], Step [{i + 1}/{len(dataloader)}], Loss: {loss.item():.4f}")
 
-        print(f"Epoch [{epoch + 1}/{num_epochs}], Average Loss: {running_loss / len(dataloader):.4f}")
-
+            print(f"Epoch [{epoch + 1}/{num_epochs}], Average Loss: {running_loss / len(dataloader):.4f}")
+        except Exception as e:
+            # if it's not the first epoch and the first batch, save the model
+            if epoch > 0 or i > 0:
+                print(f"Error occurred: {e}. Saving model state.")
+                torch.save(geatnet.state_dict(), f"geatnet_epoch_{epoch + 1}_step_{i + 1}.pth")
+            raise e
