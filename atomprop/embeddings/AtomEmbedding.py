@@ -60,6 +60,7 @@ class SMILESToInputs:
         if mol is None:
             raise ValueError(f"Invalid SMILES string: {smiles}")
         
+        mol = Chem.RemoveHs(mol)  # Remove all H atoms
         # Get atom type indices
         atom_type_indices = [atom.GetAtomicNum() for atom in mol.GetAtoms()]
         atom_type_indices = torch.tensor(atom_type_indices, dtype=torch.long)
