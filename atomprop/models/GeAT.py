@@ -28,11 +28,11 @@ class EdgeAttention(nn.Module):
         B, N, d = src_embeddings.shape
         T = self.num_bond_types
         # attention = qT a k 
-        transformed_src = (src_embeddings @ self.a.view(d, d*T)).view(B, N, d, T).permute(0, 3, 1, 2)
-        attention_scores = (transformed_src @ dst_embeddings.transpose(1, 2)).permute(0, 2, 3, 1) # (B, N, N, T)
+        transformed_src = (src_embeddings @ self.a.view(d, d*T)).view(B, N, d, T) # (B, N, d, T)
+        attention_scores = (transformed_src.transpose(2, 3).reshape(B, N*T, d) @ dst_embeddings.transpose(1, 2)).transpose(1, 2).view(B, N, N, T) # (B, N, N, T)
         # Edge mask
         attention_scores = attention_scores.gather(-1, edges.clamp(min=0).unsqueeze(-1)).squeeze(-1) # (B, N, N)
-        attention_scores = attention_scores.masked_fill(edges == -1, float('-inf')) # (B, N, N)
+        attention_scores = attention_scores.masked_fill(edges==-1, -1e10) # (B, N, N)
         # Leaky ReLU activation
         attention_scores = torch.nn.functional.leaky_relu(attention_scores, negative_slope=self.output_negative_slope)
         return attention_scores 
@@ -47,7 +47,7 @@ class GeATLayer(nn.Module):
     To note, there's a hidden batch dimension in front of all inputs.
     """
 
-    def __init__(self, atom_embedding_dim: int, num_bond_types: int, num_heads: int = 8, output_negative_slope: float = 0.2, dropout: float = 0.1):
+    def __init__(self, atom_embedding_dim: int, num_bond_types: int, num_heads: int = 8, output_negative_slope: float = 0.2):
         super(GeATLayer, self).__init__()
         self.Q_w = nn.Linear(atom_embedding_dim, atom_embedding_dim*num_heads)
         self.K_w = nn.Linear(atom_embedding_dim, atom_embedding_dim*num_heads)
@@ -55,7 +55,6 @@ class GeATLayer(nn.Module):
         # for each bond type, we use a different attention mechanism
         self.edge_attentions = MultiHeadEdgeAttention(atom_embedding_dim, num_bond_types, num_heads, output_negative_slope)
         self.project = nn.Linear(atom_embedding_dim * num_heads, atom_embedding_dim)
-        self.dropout = nn.Dropout(dropout)
 
     def forward(self, atom_embeddings, edges = None):
         N = atom_embeddings.size(0)
@@ -64,9 +63,8 @@ class GeATLayer(nn.Module):
         value_embeddings = self.V_w(atom_embeddings)
         # Calculate attention scores
         attention_scores = self.edge_attentions(src_embeddings, dst_embeddings, edges)
-        # Softmax and dropout
+        # Softmax
         attention_scores = torch.nn.functional.softmax(attention_scores, dim=-1)
-        attention_scores = self.dropout(attention_scores)
         # Compute attention output, which is suppose to be (b, n, d*num_heads)
         attention_output = torch.matmul(attention_scores, value_embeddings.reshape(N, -1, self.num_heads, self.atom_embedding_dim).permute(0, 2, 1, 3)) # (b, num_heads, n, d)
         attention_output = attention_output.reshape(N, -1) # (b, n, d*num_heads)
@@ -82,25 +80,22 @@ class GeATLayerWithSingleHead(nn.Module):
     TEST MODULE. PLS DELETE AFTER DEVELOPMENT IS DONE.
     """
 
-    def __init__(self, atom_embedding_dim: int, num_bond_types: int, output_negative_slope: float = 0.2, dropout: float = 0.1):
+    def __init__(self, atom_embedding_dim: int, num_bond_types: int, output_negative_slope: float = 0.2):
         super(GeATLayerWithSingleHead, self).__init__()
         self.Q_w = nn.Linear(atom_embedding_dim, atom_embedding_dim)
         self.K_w = nn.Linear(atom_embedding_dim, atom_embedding_dim)
         self.V_w = nn.Linear(atom_embedding_dim, atom_embedding_dim)
         self.edge_attention = EdgeAttention(atom_embedding_dim, num_bond_types, output_negative_slope)
         self.project = nn.Linear(atom_embedding_dim, atom_embedding_dim)
-        self.dropout = nn.Dropout(dropout)
 
     def forward(self, atom_embeddings, edges = None):
-        N = atom_embeddings.size(0)
         src_embeddings = self.Q_w(atom_embeddings)
         dst_embeddings = self.K_w(atom_embeddings)
         value_embeddings = self.V_w(atom_embeddings)
         # Calculate attention scores
         attention_scores = self.edge_attention(src_embeddings, dst_embeddings, edges)
-        # Softmax and dropout
+        # Softmax
         attention_scores = torch.nn.functional.softmax(attention_scores, dim=-1)
-        attention_scores = self.dropout(attention_scores)
         # Compute attention output, which is suppose to be (b, n, d)
         attention_output = torch.matmul(attention_scores, value_embeddings)
         # Project to atom embedding dimension
@@ -116,12 +111,21 @@ class GeATNet(nn.Module):
     3. applies a feedforward network to predict the molecular property. 
     To note, there's a hidden batch dimension in front of all inputs.
     """
-    def __init__(self, atom_embedding_dim: int, num_atom_types: int, num_bond_types: int, num_heads: int = 8, output_negative_slope: float = 0.2, geat_num_layers: int = 3):
+    def __init__(self, atom_embedding_dim: int, num_atom_types: int, num_bond_types: int, num_heads: int = 8, hidden_dim: int = 64, output_negative_slope: float = 0.2, dropout: int = 0.1, geat_num_layers: int = 3):
         super(GeATNet, self).__init__()
+        self.hidden_dim = hidden_dim
         self.atom_embedding = AtomEmbedding(atom_embedding_dim=atom_embedding_dim, num_atom_types=num_atom_types)
-        self.geat_layers = nn.ModuleList([GeATLayerWithSingleHead(atom_embedding_dim, num_bond_types, num_heads, output_negative_slope) for _ in range(geat_num_layers)])
-        self.global_attention = nn.MultiheadAttention(embed_dim=atom_embedding_dim, num_heads=num_heads)
-        self.fc = nn.Linear(atom_embedding_dim, 1)
+        self.geat_layers = nn.ModuleList([GeATLayerWithSingleHead(atom_embedding_dim, num_bond_types, output_negative_slope) for _ in range(geat_num_layers)])
+        self.norm_layers = nn.ModuleList([nn.LayerNorm(atom_embedding_dim) for _ in range(geat_num_layers)])
+        self.global_attention = nn.MultiheadAttention(embed_dim=atom_embedding_dim, num_heads=num_heads, dropout=dropout)
+        self.Q_w_global = nn.Linear(atom_embedding_dim, atom_embedding_dim)
+        self.K_w_global = nn.Linear(atom_embedding_dim, atom_embedding_dim)
+        self.V_w_global = nn.Linear(atom_embedding_dim, atom_embedding_dim)
+        self.fc1 = nn.Linear(atom_embedding_dim, self.hidden_dim)
+        self.leaky_relu1 = nn.LeakyReLU(negative_slope=output_negative_slope)
+        self.fc2 = nn.Linear(self.hidden_dim, self.hidden_dim)
+        self.leaky_relu2 = nn.LeakyReLU(negative_slope=output_negative_slope)
+        self.output = nn.Linear(self.hidden_dim, 1)
 
     def forward(self, atoms, edges):
         """
@@ -131,9 +135,18 @@ class GeATNet(nn.Module):
         :return: Predicted property of shape (batch_size, 1)
         """
         atom_embeddings = self.atom_embedding(atoms)
-        for layer in self.geat_layers:
+        for i, layer in enumerate(self.geat_layers):
             atom_embeddings = atom_embeddings + layer(atom_embeddings, edges)
-            atom_embeddings = nn.LayerNorm(atom_embeddings.size()[1:])(atom_embeddings)
-        global_attention_output, _ = self.global_attention(atom_embeddings.unsqueeze(0), atom_embeddings.unsqueeze(0), atom_embeddings.unsqueeze(0))
-        global_attention_output = global_attention_output.squeeze(0)
-        return self.fc(global_attention_output)
+            atom_embeddings = self.norm_layers[i](atom_embeddings)
+        atom_embeddings = atom_embeddings.reshape(atom_embeddings.size(0), -1, atom_embeddings.size(-1))
+        global_q = self.Q_w_global(atom_embeddings)
+        global_k = self.K_w_global(atom_embeddings)
+        global_v = self.V_w_global(atom_embeddings)
+        global_attention_output, _ = self.global_attention(global_q, global_k, global_v)
+        global_attention_output = global_attention_output.mean(dim=1)
+        x = self.fc1(global_attention_output)
+        x = self.leaky_relu1(x)
+        x = self.fc2(x)
+        x = self.leaky_relu2(x)
+        x = self.output(x)
+        return x

@@ -49,37 +49,37 @@ if __name__ == "__main__":
     # print("Number of bond types:", len(bond_types))
     # print("Bond types:", bond_types)
 
-    # # load the data from the text file, each line is a SMILES string
-    # with open(data_path, 'r') as f:
-    #     lines = f.readlines()
-    # smiles_list = [line.strip() for line in lines if line.strip()]
-    # print("Number of SMILES strings:", len(smiles_list))
-    # # Use rdkit.chem to handle SMILES strings. Count how many kinds of atom types and bond types are in the dataset
-    # molecules = []
-    # atom_types = set()
-    # bond_types = set()
-    # # Count max number of atoms in a molecule
-    # max_atom_num = 0
-    # for i, smiles in enumerate(smiles_list):
-    #     if i % 100 == 0:
-    #         print(f"Processing {i}th SMILES: {smiles}")
-    #     if i > 200000:
-    #         break
-    #     mol = Chem.MolFromSmiles(smiles)
-    #     # remove all H atoms
-    #     if mol is not None:
-    #         mol = Chem.RemoveHs(mol)
-    #         if mol.GetNumAtoms() > max_atom_num:
-    #             max_atom_num = mol.GetNumAtoms()
-    #         molecules.append(mol)
-    #         for atom in mol.GetAtoms():
-    #             atom_types.add(atom.GetSymbol())
-    #         for bond in mol.GetBonds():
-    #             bond_types.add(bond.GetBondTypeAsDouble())
-    # print("Number of molecules:", len(molecules))
-    # print("Number of atom types:", len(atom_types))
-    # print("Atom types:", atom_types)
-    # print("Number of bond types:", len(bond_types))
-    # print("Bond types:", bond_types)
-    # print("Maximum number of atoms in a molecule:", max_atom_num)
+    # load the data from the text file, each line is a SMILES string
+    with open(data_path, 'r') as f:
+        lines = f.readlines()
+    smiles_list = [line.strip() for line in lines if line.strip()]
+    print("Number of SMILES strings:", len(smiles_list))
+    # Use rdkit.chem to handle SMILES strings. Count how many kinds of atom types and bond types are in the dataset
+    molecules = []
+    atom_types = set()
+    bond_types = set()
+    # Count max number of atoms in a molecule
+    max_atom_num = 0
+    for i, smiles in enumerate(smiles_list):
+        if i % 100 == 0:
+            print(f"Processing {i}th SMILES: {smiles}")
+        if i > 2000:
+            break
+        mol = Chem.MolFromSmiles(smiles)
+        # remove all H atoms
+        if mol is not None:
+            mol = Chem.RemoveHs(mol)
+            if mol.GetNumAtoms() > max_atom_num:
+                max_atom_num = mol.GetNumAtoms()
+            molecules.append(mol)
+            for atom in mol.GetAtoms():
+                atom_types.add(atom.GetSymbol())
+            for bond in mol.GetBonds():
+                bond_types.add(bond.GetBondTypeAsDouble())
+    print("Number of molecules:", len(molecules))
+    print("Number of atom types:", len(atom_types))
+    print("Atom types:", atom_types)
+    print("Number of bond types:", len(bond_types))
+    print("Bond types:", bond_types)
+    print("Maximum number of atoms in a molecule:", max_atom_num)
     
