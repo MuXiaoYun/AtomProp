@@ -7,7 +7,7 @@ num_atom_types = 86
 """ Number of unique atom types in the dataset """
 bond_embedding_dim = 128 
 """ Dimension of the bond embeddings """
-num_bond_types = 4
+num_bond_types = 13
 """ Number of unique bond types in the dataset """
 
 
@@ -30,4 +30,7 @@ geatnet_layers = 2
 """
 Training configs
 """
+batch_size = 128
+""" Batch size for training """
 context_length = 470
+""" Maximum number of atoms in a molecule for padding """

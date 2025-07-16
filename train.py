@@ -23,7 +23,7 @@ if __name__ == "__main__":
     for i, smiles in enumerate(smiles_list):
         if i % 100 == 0:
             print(f"Processing {i}th SMILES: {smiles}")
-        if i > 1000:
+        if i > 50000:
             break
         # Convert SMILES to GeAT inputs
         atom_embeddings, edges, mol = SMILESToInputs.convert(smiles=smiles, context_length=max_atom_num)
@@ -62,10 +62,11 @@ if __name__ == "__main__":
     dataset = MoleculeDataset(molecules)
 
     # train geatnet with the dataset and draw training loss curve
-    dataloader = torch.utils.data.DataLoader(dataset, batch_size=32, shuffle=True)
+    dataloader = torch.utils.data.DataLoader(dataset, batch_size=config.batch_size, shuffle=True)
+    # log-mse loss
     criterion = nn.MSELoss()
     optimizer = torch.optim.Adam(geatnet.parameters(), lr=0.001)
-    num_epochs = 10
+    num_epochs = 350
     for epoch in range(num_epochs):
         try:
             geatnet.train()
@@ -73,11 +74,11 @@ if __name__ == "__main__":
             for i, (atom_embeddings, edges, rel_mass) in enumerate(dataloader):
                 atom_embeddings = atom_embeddings.to(device)
                 edges = edges.to(device)
-                rel_mass = rel_mass.to(device)
+                rel_mass = rel_mass.float().to(device)
 
                 optimizer.zero_grad()
                 outputs = geatnet(atom_embeddings, edges)
-                loss = criterion(outputs, rel_mass)
+                loss = criterion(torch.log(outputs+1e-7), torch.log(rel_mass.unsqueeze(-1)+1e-7))  # Log-MSE loss
                 loss.backward()
                 optimizer.step()
 
@@ -90,5 +91,8 @@ if __name__ == "__main__":
             # if it's not the first epoch and the first batch, save the model
             if epoch > 0 or i > 0:
                 print(f"Error occurred: {e}. Saving model state.")
-                torch.save(geatnet.state_dict(), f"geatnet_epoch_{epoch + 1}_step_{i + 1}.pth")
+                torch.save(geatnet.state_dict(), f"trained_models/geatnet_epoch_{epoch + 1}_step_{i + 1}.pth")
             raise e
+        # Save the model state after each epoch
+        torch.save(geatnet.state_dict(), f"trained_models/geatnet_epoch_{epoch + 1}.pth")
+    print("Training complete. Model saved.")
