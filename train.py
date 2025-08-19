@@ -39,7 +39,10 @@ if __name__ == "__main__":
     # model instance
     geatnet = GeATNet(atom_embedding_dim=config.atom_embedding_dim,
                      num_atom_types=config.num_atom_types,
-                     num_bond_types=config.num_bond_types)
+                     num_bond_types=config.num_bond_types,
+                     num_heads=config.num_heads,
+                     global_num_heads=config.global_num_heads,
+                     )
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
     geatnet.to(device)

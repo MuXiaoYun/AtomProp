@@ -6,7 +6,6 @@ class EdgeAttention(nn.Module):
     """
     An :class:`EdgeAttention` is a module for computing attention scores between pairs of atom embeddings in :class:`GeAT`.
     This module uses a bilinear attentiom mechism to compute attention scores.
-    To note, there's a hidden batch dimension in front of all inputs.
     """
 
     def __init__(self, atom_embedding_dim: int, num_bond_types: int, output_negative_slope: float = 0.2):
@@ -38,17 +37,57 @@ class EdgeAttention(nn.Module):
         return attention_scores 
 
 class MultiHeadEdgeAttention(nn.Module):
-    pass
+    """
+    A :class:`MultiHeadEdgeAttention` is a module for computing multi-head attention scores between pairs of atom embeddings in :class:`GeATLayer`.
+    This module uses a bilinear attention mechanism to compute attention scores.
+    """
 
+    def __init__(self, atom_embedding_dim: int, num_bond_types: int, num_heads: int = 8, output_negative_slope: float = 0.2):
+        super(MultiHeadEdgeAttention, self).__init__()
+        self.num_heads = num_heads
+        self.atom_d = atom_embedding_dim
+        self.num_bond_types = num_bond_types
+        self.a = nn.Parameter(torch.Tensor(atom_embedding_dim * num_heads, atom_embedding_dim, num_bond_types))
+        self.output_negative_slope = output_negative_slope
+        nn.init.xavier_uniform_(self.a, gain=1.414)
+        
+    def forward(self, src_embeddings, dst_embeddings, edges):
+        """
+        Compute multi-head attention scores for edges between source and destination atom embeddings.
+        :param src_embeddings: Source atom embeddings of shape (batch_size, num_atoms, atom_embedding_dim * num_heads)
+        :param dst_embeddings: Destination atom embeddings of shape (batch_size, num_atoms, atom_embedding_dim * num_heads)
+        :param edges: Optional edges tensor of shape (batch_size, num_atoms, num_atoms), each number representing the bond type index
+        :return: Attention scores of shape (batch_size, num_heads, num_atoms, num_atoms)
+        """
+        B, N, d_ = src_embeddings.shape
+        d = d_ // self.num_heads
+        T = self.num_bond_types
+        # attention = qT a k
+        src_embeddings = src_embeddings.reshape(B, N, self.num_heads, d).permute(0, 2, 1, 3) # (B, num_heads, N, d)
+        dst_embeddings = dst_embeddings.reshape(B, N, self.num_heads, d).permute(0, 2, 1, 3) # (B, num_heads, N, d)
+        transformed_src = (src_embeddings @ self.a.view(self.num_heads, d, d*T)).view(B, self.num_heads, N, d, T) # (B, num_heads, N, d, T)
+        attention_scores = (transformed_src.transpose(3, 4).reshape(B, self.num_heads, N*T, d) @ dst_embeddings.transpose(2, 3)).transpose(2, 3).view(B, self.num_heads, N, N, T) # (B, num_heads, N, N, T)
+        # Edge mask
+        # expand edges to match the number of heads
+        edges = edges.unsqueeze(1).expand(-1, self.num_heads, -1, -1)  # (B, num_heads, N, N)
+        attention_scores = attention_scores.gather(-1, edges.clamp(min=0).unsqueeze(-1)).squeeze(-1) # (B, num_heads, N, N)
+        attention_scores = attention_scores.masked_fill(edges==-1, -1e10) # (B, num_heads, N, N)
+        # Leaky ReLU activation
+        attention_scores = torch.nn.functional.leaky_relu(attention_scores, negative_slope=self.output_negative_slope)
+        return attention_scores  # (B, num_heads, N, N)
+    
 class GeATLayer(nn.Module):
     """
     A :class:`GeAT` (Graph Edge Attention Transformer) for molecular property prediction.
     This model weighs the importance of only neighboring atoms.
-    To note, there's a hidden batch dimension in front of all inputs.
     """
 
     def __init__(self, atom_embedding_dim: int, num_bond_types: int, num_heads: int = 8, output_negative_slope: float = 0.2):
         super(GeATLayer, self).__init__()
+        self.num_heads = num_heads
+        self.atom_embedding_dim = atom_embedding_dim
+        self.num_bond_types = num_bond_types
+        # Linear layers for query, key, and value transformations
         self.Q_w = nn.Linear(atom_embedding_dim, atom_embedding_dim*num_heads)
         self.K_w = nn.Linear(atom_embedding_dim, atom_embedding_dim*num_heads)
         self.V_w = nn.Linear(atom_embedding_dim, atom_embedding_dim*num_heads)
@@ -57,7 +96,8 @@ class GeATLayer(nn.Module):
         self.project = nn.Linear(atom_embedding_dim * num_heads, atom_embedding_dim)
 
     def forward(self, atom_embeddings, edges = None):
-        N = atom_embeddings.size(0)
+        B = atom_embeddings.size(0)
+        N = atom_embeddings.size(1)
         src_embeddings = self.Q_w(atom_embeddings)
         dst_embeddings = self.K_w(atom_embeddings)
         value_embeddings = self.V_w(atom_embeddings)
@@ -66,8 +106,8 @@ class GeATLayer(nn.Module):
         # Softmax
         attention_scores = torch.nn.functional.softmax(attention_scores, dim=-1)
         # Compute attention output, which is suppose to be (b, n, d*num_heads)
-        attention_output = torch.matmul(attention_scores, value_embeddings.reshape(N, -1, self.num_heads, self.atom_embedding_dim).permute(0, 2, 1, 3)) # (b, num_heads, n, d)
-        attention_output = attention_output.reshape(N, -1) # (b, n, d*num_heads)
+        attention_output = torch.matmul(attention_scores, value_embeddings.reshape(B, -1, self.num_heads, self.atom_embedding_dim).permute(0, 2, 1, 3)) # (b, num_heads, n, d)
+        attention_output = attention_output.reshape(B, N, -1) # (b, n, d*num_heads)
         # Project to atom embedding dimension
         attention_output = self.project(attention_output)
         return attention_output
@@ -76,8 +116,6 @@ class GeATLayerWithSingleHead(nn.Module):
     """
     A :class:`GeATLayerWithSingleHead` is a simplified version of :class:`GeATLayer` that uses a single head for attention.
     This model weighs the importance of only neighboring atoms.
-    To note, there's a hidden batch dimension in front of all inputs.
-    TEST MODULE. PLS DELETE AFTER DEVELOPMENT IS DONE.
     """
 
     def __init__(self, atom_embedding_dim: int, num_bond_types: int, output_negative_slope: float = 0.2):
@@ -108,24 +146,24 @@ class GeATNet(nn.Module):
     :class:`GeATNet` follows 3 steps:
     1. uses multiple :class:`GeATLayer` instances to compute new embeddings for atoms based on their neighbors. To note, before each inner layer, the embeddings are residual added to the embeddings from the previous layer and then layer normalized.
     2. applies an extra global attention mechanism to aggregate the information from all atoms.
-    3. applies a feedforward network to predict the molecular property. 
-    To note, there's a hidden batch dimension in front of all inputs.
+    3. applies a feedforward network to predict the molecular property.
     """
-    def __init__(self, atom_embedding_dim: int, num_atom_types: int, num_bond_types: int, num_heads: int = 8, hidden_dim: int = 64, output_negative_slope: float = 0.2, dropout: int = 0.1, geat_num_layers: int = 3):
+    def __init__(self, atom_embedding_dim: int, num_atom_types: int, num_bond_types: int, num_heads: int = 8, global_num_heads = 8, hidden_dim: int = 64, output_negative_slope: float = 0.2, dropout: int = 0.1, geat_num_layers: int = 3):
         super(GeATNet, self).__init__()
         self.hidden_dim = hidden_dim
         self.atom_embedding = AtomEmbedding(atom_embedding_dim=atom_embedding_dim, num_atom_types=num_atom_types)
-        self.geat_layers = nn.ModuleList([GeATLayerWithSingleHead(atom_embedding_dim, num_bond_types, output_negative_slope) for _ in range(geat_num_layers)])
+        self.geat_layers = nn.ModuleList([GeATLayer(atom_embedding_dim=atom_embedding_dim, num_bond_types=num_bond_types, num_heads=num_heads, output_negative_slope=output_negative_slope) for _ in range(geat_num_layers)])
         self.norm_layers = nn.ModuleList([nn.LayerNorm(atom_embedding_dim) for _ in range(geat_num_layers)])
-        self.global_attention = nn.MultiheadAttention(embed_dim=atom_embedding_dim, num_heads=num_heads, dropout=dropout)
-        self.Q_w_global = nn.Linear(atom_embedding_dim, atom_embedding_dim)
-        self.K_w_global = nn.Linear(atom_embedding_dim, atom_embedding_dim)
-        self.V_w_global = nn.Linear(atom_embedding_dim, atom_embedding_dim)
-        self.fc1 = nn.Linear(atom_embedding_dim, self.hidden_dim)
+        self.global_attention = nn.MultiheadAttention(embed_dim=atom_embedding_dim*global_num_heads, num_heads=global_num_heads, dropout=dropout)
+        self.Q_w_global = nn.Linear(atom_embedding_dim, atom_embedding_dim*global_num_heads)
+        self.K_w_global = nn.Linear(atom_embedding_dim, atom_embedding_dim*global_num_heads)
+        self.V_w_global = nn.Linear(atom_embedding_dim, atom_embedding_dim*global_num_heads)
+        self.fc1 = nn.Linear(atom_embedding_dim*global_num_heads, self.hidden_dim)
         self.leaky_relu1 = nn.LeakyReLU(negative_slope=output_negative_slope)
         self.fc2 = nn.Linear(self.hidden_dim, self.hidden_dim)
         self.leaky_relu2 = nn.LeakyReLU(negative_slope=output_negative_slope)
         self.output = nn.Linear(self.hidden_dim, 1)
+        self.reluoutput = nn.ReLU()
 
     def forward(self, atoms, edges):
         """
@@ -149,4 +187,5 @@ class GeATNet(nn.Module):
         x = self.fc2(x)
         x = self.leaky_relu2(x)
         x = self.output(x)
+        x = self.reluoutput(x)
         return x

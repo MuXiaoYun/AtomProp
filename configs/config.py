@@ -16,6 +16,10 @@ Edge Attention configs
 """
 edge_attetion_output_negative_slope = 0.1
 """ Negative slope for the output of the edge attention feedforward network """
+num_heads = 2
+""" Number of attention heads """
+global_num_heads = 2
+""" Number of global attention heads """
 
 
 """
