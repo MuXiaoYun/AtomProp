@@ -5,11 +5,25 @@ import rdkit.Chem as Chem
 import rdkit.Chem.Descriptors as Descriptors
 import torch
 import torch.nn as nn
+import matplotlib.pyplot as plt
 
 data_path = "data/pubchem/pubchem-10m.txt"
 
 max_mass = 6000.0  # Maximum relative mass for normalization
 max_atom_num = config.context_length  # Maximum number of atoms in a molecule for padding
+
+def print_grad_norm(module: nn.Module, prefix: str = ""):
+    """
+    Recursively print the L2-norm of every trainable parameter's gradient
+    inside the given module.
+    """
+    for name, param in module.named_parameters(recurse=False):
+        if param.grad is not None:
+            grad_norm = param.grad.detach().norm(2).item()
+            print(f"{prefix}.{name}: {grad_norm:.6f}")
+    for child_name, child in module.named_children():
+        child_prefix = f"{prefix}.{child_name}" if prefix else child_name
+        print_grad_norm(child, prefix=child_prefix)
 
 if __name__ == "__main__":
     # load the data from the text file, each line is a SMILES string
@@ -20,10 +34,11 @@ if __name__ == "__main__":
     molecules = []
     # atom_types = set()
     # bond_types = set()
+    # safe train num: 117800
     for i, smiles in enumerate(smiles_list):
         if i % 100 == 0:
             print(f"Processing {i}th SMILES: {smiles}")
-        if i > 50000:
+        if i > 117800:
             break
         # Convert SMILES to GeAT inputs
         atom_embeddings, edges, mol = SMILESToInputs.convert(smiles=smiles, context_length=max_atom_num)
@@ -70,6 +85,8 @@ if __name__ == "__main__":
     criterion = nn.MSELoss()
     optimizer = torch.optim.Adam(geatnet.parameters(), lr=0.001)
     num_epochs = 350
+    losses = []
+    
     for epoch in range(num_epochs):
         try:
             geatnet.train()
@@ -81,21 +98,45 @@ if __name__ == "__main__":
 
                 optimizer.zero_grad()
                 outputs = geatnet(atom_embeddings, edges)
-                loss = criterion(torch.log(outputs+1e-7), torch.log(rel_mass.unsqueeze(-1)+1e-7))  # Log-MSE loss
+
+                # for last step of each epoch, calculate relative error between predicted and true mass
+                if i == len(dataloader) - 1:
+                    with torch.no_grad():
+                        pred_mass = outputs.squeeze(-1) * max_mass
+                        true_mass = rel_mass * max_mass
+                        relative_errors = torch.abs(pred_mass - true_mass) / true_mass
+                        avg_relative_error = torch.mean(relative_errors).item()
+                        print(f"Epoch [{epoch + 1}/{num_epochs}], Last Batch Average Relative Error: {avg_relative_error:.4f}")
+
+                loss = criterion(outputs, rel_mass.unsqueeze(-1))  # Log-MSE loss
                 loss.backward()
                 optimizer.step()
 
                 running_loss += loss.item()
                 if (i + 1) % 10 == 0:
                     print(f"Epoch [{epoch + 1}/{num_epochs}], Step [{i + 1}/{len(dataloader)}], Loss: {loss.item():.4f}")
+                    # print_grad_norm(geatnet, prefix=f"Epoch {epoch + 1}, Step {i + 1}")
 
             print(f"Epoch [{epoch + 1}/{num_epochs}], Average Loss: {running_loss / len(dataloader):.4f}")
+            losses.append(running_loss / len(dataloader))
         except Exception as e:
             # if it's not the first epoch and the first batch, save the model
             if epoch > 0 or i > 0:
                 print(f"Error occurred: {e}. Saving model state.")
                 torch.save(geatnet.state_dict(), f"trained_models/geatnet_epoch_{epoch + 1}_step_{i + 1}.pth")
+                # plot the loss curve
+                plt.plot(range(1, len(losses) + 1), losses)
+                plt.xlabel("Epoch")
+                plt.ylabel("Average Loss")
+                plt.title("Training Loss Curve")
+                plt.savefig("training_loss_curve.png")
             raise e
         # Save the model state after each epoch
         torch.save(geatnet.state_dict(), f"trained_models/geatnet_epoch_{epoch + 1}.pth")
     print("Training complete. Model saved.")
+    # plot the loss curve
+    plt.plot(range(1, len(losses) + 1), losses)
+    plt.xlabel("Epoch")
+    plt.ylabel("Average Loss")
+    plt.title("Training Loss Curve")
+    plt.savefig("training_loss_curve.png")
