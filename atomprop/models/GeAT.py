@@ -163,8 +163,7 @@ class GeATNet(nn.Module):
         self.fc2 = nn.Linear(self.hidden_dim, self.hidden_dim)
         self.leaky_relu2 = nn.LeakyReLU(negative_slope=output_negative_slope)
         self.output = nn.Linear(self.hidden_dim, 1)
-        self.reluoutput = nn.ReLU()
-
+        
     def forward(self, atoms, edges):
         """
         Forward pass of the GeATNet.
@@ -187,5 +186,4 @@ class GeATNet(nn.Module):
         x = self.fc2(x)
         x = self.leaky_relu2(x)
         x = self.output(x)
-        x = self.reluoutput(x)
         return x

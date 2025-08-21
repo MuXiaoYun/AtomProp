@@ -16,9 +16,9 @@ Edge Attention configs
 """
 edge_attetion_output_negative_slope = 0.1
 """ Negative slope for the output of the edge attention feedforward network """
-num_heads = 2
+num_heads = 4
 """ Number of attention heads """
-global_num_heads = 2
+global_num_heads = 4
 """ Number of global attention heads """
 
 
@@ -34,7 +34,7 @@ geatnet_layers = 2
 """
 Training configs
 """
-batch_size = 128
+batch_size = 64
 """ Batch size for training """
 context_length = 470
 """ Maximum number of atoms in a molecule for padding """

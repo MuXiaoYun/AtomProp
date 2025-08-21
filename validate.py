@@ -7,13 +7,16 @@ import torch
 import torch.nn as nn
 
 #load geatnet model from model_path
-model_path = "trained_models/geatnet_epoch_6.pth"
+model_path = "trained_models/geatnet_epoch_10.pth"
 
 max_mass = 6000.0  # Maximum relative mass for normalization
 #load model from dict
 geatnet = GeATNet(atom_embedding_dim=config.atom_embedding_dim,
-                 num_atom_types=config.num_atom_types,
-                 num_bond_types=config.num_bond_types)
+                     num_atom_types=config.num_atom_types,
+                     num_bond_types=config.num_bond_types,
+                     num_heads=config.num_heads,
+                     global_num_heads=config.global_num_heads,
+                     )
 device = torch.device("cpu")
 print(f"Using device: {device}")
 geatnet.to(device)
@@ -29,11 +32,22 @@ geatnet.eval()
 atom_list = [
     6,7,8,9,14,16,17,35
 ]
-# Predict 3 SMILES strings
+# Predict 14 SMILES strings
 smiles_list = [
     "CCO",  # Ethanol
     "C1=CC=CC=C1",  # Benzene
-    "Oc1cc(c2ccccc2)c(N=Nc2ccccc2)cc1n1cnc2ccccc21"  # A complex aromatic compound
+    "Oc1cc(c2ccccc2)c(N=Nc2ccccc2)cc1n1cnc2ccccc21",  # A complex aromatic compound
+    "CCCCCC=CCC=CCC=CCC=CCC=CCCC(=O)OCC(COC(=O)CCCCCCCCCC=CCCCCCCCC)OC(=O)CCCCCCCCCC=CCC=CCCCCC",
+    "CCc1ccc(c2ccc(c3ccc(OC)cc3)c(c3ccc(CC)cc3)[s+]2)cc1",
+    "COc1ccc(CNc2ccc(C)c(F)c2)c(O)c1",
+    "O=C1NCc2c(Cl)ccc(c3cc4cc(C(=O)N5CCCCC5CCO)ccc4[nH]3)c21",
+    "C=CCOc1cc(C)ccc1C(=O)C=CC[NH+](C)C",
+    "CCOc1cc(C(=O)Nc2nc(c3ccc(I)cc3)cs2)cc(OCC)c1OCC",
+    "Cn1cnc2cc3c(cc21)CC1N(C(=O)c2ccc4c(c2)CC=N4)CCC3(C)C1(C)C",
+    "CCC(C)(CC)Oc1ccc(C2(c3ccc(OC(=O)c4ccccc4)c(C(F)(F)F)c3)CCCCC2)cc1C(F)(F)F",
+    "COc1cc(C(C#N)=Cc2ccccc2[N+](=O)[O-])ccc1[N+](=O)[O-]",
+    "CNc1nccc(N2CCC(CC(=O)NCc3ccc(F)cc3)CC2)n1",
+    "CCCCc1nc(COC)c(C[NH2+]CCC)s1",
 ]
 molecules = []
 for i, smiles in enumerate(smiles_list):
@@ -62,7 +76,7 @@ class MoleculeDataset(torch.utils.data.Dataset):
         return self.molecules[idx][0], self.molecules[idx][1], rel_mass
     
 # store key embeddings
-fc1_input = None # 3 molecule embeddings with shape (3, 64), labels are smiles_list
+fc1_input = None # 14 molecule embeddings with shape (14, 64), labels are smiles_list
 
 def fc1_hook(module, input, output):
     global fc1_input
