@@ -86,7 +86,7 @@ hook_fc1 = geatnet.fc1.register_forward_hook(fc1_hook)
 
 # Create a dataset and dataloader
 dataset = MoleculeDataset(molecules)
-dataloader = torch.utils.data.DataLoader(dataset, batch_size=3, shuffle=False)
+dataloader = torch.utils.data.DataLoader(dataset, batch_size=14, shuffle=False)
 # Evaluate the model on the dataset
 for i, (atom_indices, edges, rel_mass) in enumerate(dataloader):
     atom_indices = atom_indices.to(device)
@@ -96,38 +96,42 @@ for i, (atom_indices, edges, rel_mass) in enumerate(dataloader):
     print("mass:", rel_mass*max_mass)
     print("predicts:", outputs.squeeze(-1)*max_mass)
 
-print("fc1_input shape:", fc1_input.shape)
 hook_fc1.remove()
 
 atom_indices_tensor = torch.tensor(atom_list).reshape(8, 1, -1)
-atom_embeddings = geatnet.atom_embedding(atom_indices_tensor).reshape(8, 64) # 8 atom embeddings with shape (8, 64), labels are ["C", "N", "O", "F", "Si", "S", "Cl", "Br"] 
+atom_embeddings = geatnet.atom_embedding(atom_indices_tensor).reshape(8, 64) # 8 atom embeddings with shape (8, 64), labels are ["C", "N", "O", "F", "Si", "S", "Cl", "Br"]
 print("shape of atom embeddings: ", atom_embeddings.shape)
-print("shape of molecule embeddings: ", fc1_input.shape)
 
-# use t-SNE to visualize the 8 atom embeddings and the 3 molecule embeddings in one 3D plot
+# use t-SNE to visualize the 8 atom embeddings in one 3D plot
 # label the atom symbol or molecule SMILES beside each point
 import matplotlib.pyplot as plt
 from sklearn.manifold import TSNE
 atom_labels = ["C", "N", "O", "F", "Si", "S", "Cl", "Br"]
-molecule_labels = smiles_list
 tsne = TSNE(n_components=3, perplexity=5, random_state=42)
-# mark the atom embeddings with blue color and molecule embeddings with red color
-embeddings = torch.cat((atom_embeddings, fc1_input), dim=0)
-tsne_embeddings = tsne.fit_transform(embeddings.detach().numpy())
+tsne_embeddings = tsne.fit_transform(atom_embeddings.detach().numpy())
 fig = plt.figure()
 ax = fig.add_subplot(111, projection='3d')
 for i, label in enumerate(atom_labels):
-    ax.scatter(tsne_embeddings[i, 0], tsne_embeddings[i, 1], tsne_embeddings[i, 2], color='blue', label=label)
-for i, label in enumerate(molecule_labels):
-    ax.scatter(tsne_embeddings[i + len(atom_labels), 0], tsne_embeddings[i + len(atom_labels), 1], tsne_embeddings[i + len(atom_labels), 2], color='red', label=label)
-# Add labels to each point
-for i, label in enumerate(atom_labels):
-    ax.text(tsne_embeddings[i, 0], tsne_embeddings[i, 1], tsne_embeddings[i, 2], label, color='blue')
-for i, label in enumerate(molecule_labels):
-    ax.text(tsne_embeddings[i + len(atom_labels), 0], tsne_embeddings[i + len(atom_labels), 1], tsne_embeddings[i + len(atom_labels), 2], label, color='red')
+    ax.scatter(tsne_embeddings[i, 0], tsne_embeddings[i, 1], tsne_embeddings[i, 2], label=label, s=50)
+    # set label beside each point
+    ax.text(tsne_embeddings[i, 0], tsne_embeddings[i, 1], tsne_embeddings[i, 2], label, fontsize=12)
 ax.set_xlabel('X')
 ax.set_ylabel('Y')
 ax.set_zlabel('Z')
 ax.set_title('t-SNE Visualization of Atom and Molecule Embeddings')
+plt.legend()
+plt.show()
+
+# 2D plot
+tsne_2d = TSNE(n_components=2, perplexity=5, random_state=42)
+tsne_embeddings_2d = tsne_2d.fit_transform(atom_embeddings.detach().numpy())
+fig, ax = plt.subplots()
+for i, label in enumerate(atom_labels):
+    ax.scatter(tsne_embeddings_2d[i, 0], tsne_embeddings_2d[i, 1], label=label, s=50)
+    # set label beside each point
+    ax.text(tsne_embeddings_2d[i, 0], tsne_embeddings_2d[i, 1], label, fontsize=12)
+ax.set_xlabel('X')
+ax.set_ylabel('Y')
+ax.set_title('t-SNE Visualization of Atom and Molecule Embeddings (2D)')
 plt.legend()
 plt.show()
