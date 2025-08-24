@@ -1,6 +1,12 @@
+"""
+Module for Graph Edge Attention Transformer (GeAT) for molecular property prediction.
+"""
+
 import torch
 import torch.nn as nn
-from atomprop.embeddings.AtomEmbedding import AtomEmbedding   
+from atomprop.embeddings.AtomEmbedding import AtomEmbedding
+from atomprop.utils.mlp import MLP
+import atomprop.embeddings.PositionEmbedding as PE
 
 class EdgeAttention(nn.Module):
     """
@@ -204,9 +210,8 @@ class GeATNet(nn.Module):
     2. applies an extra global attention mechanism to aggregate the information from all atoms.
     3. applies a feedforward network to predict the molecular property.
     """
-    def __init__(self, atom_embedding_dim: int, num_atom_types: int, num_bond_types: int, num_heads: int = 8, global_num_heads = 8, hidden_dim: int = 64, output_negative_slope: float = 0.2, dropout: int = 0.1, geat_num_layers: int = 3):
+    def __init__(self, atom_embedding_dim: int, num_atom_types: int, num_bond_types: int, num_heads: int = 8, global_num_heads = 8, mlp_hidden_dim: int = 64, output_negative_slope: float = 0.2, dropout: int = 0.1, geat_num_layers: int = 3, mlp_num_layers: int = 2):
         super(GeATNet, self).__init__()
-        self.hidden_dim = hidden_dim
         self.atom_embedding = AtomEmbedding(atom_embedding_dim=atom_embedding_dim, num_atom_types=num_atom_types)
         self.geat_layers = nn.ModuleList([GeATLayer(atom_embedding_dim=atom_embedding_dim, num_bond_types=num_bond_types, num_heads=num_heads, output_negative_slope=output_negative_slope) for _ in range(geat_num_layers)])
         self.norm_layers = nn.ModuleList([nn.LayerNorm(atom_embedding_dim) for _ in range(geat_num_layers)])
@@ -214,11 +219,7 @@ class GeATNet(nn.Module):
         self.Q_w_global = nn.Linear(atom_embedding_dim, atom_embedding_dim*global_num_heads)
         self.K_w_global = nn.Linear(atom_embedding_dim, atom_embedding_dim*global_num_heads)
         self.V_w_global = nn.Linear(atom_embedding_dim, atom_embedding_dim*global_num_heads)
-        self.fc1 = nn.Linear(atom_embedding_dim*global_num_heads, self.hidden_dim)
-        self.leaky_relu1 = nn.LeakyReLU(negative_slope=output_negative_slope)
-        self.fc2 = nn.Linear(self.hidden_dim, self.hidden_dim)
-        self.leaky_relu2 = nn.LeakyReLU(negative_slope=output_negative_slope)
-        self.output = nn.Linear(self.hidden_dim, 1)
+        self.output_mlp = MLP(input_dim=atom_embedding_dim*global_num_heads, hidden_dim=mlp_hidden_dim, output_dim=1, num_layers=mlp_num_layers, output_activation=False, dropout=dropout, negative_slope=output_negative_slope)
         
     def forward(self, atoms, edges):
         """
@@ -237,9 +238,5 @@ class GeATNet(nn.Module):
         global_v = self.V_w_global(atom_embeddings)
         global_attention_output, _ = self.global_attention(global_q, global_k, global_v)
         global_attention_output = global_attention_output.mean(dim=1)
-        x = self.fc1(global_attention_output)
-        x = self.leaky_relu1(x)
-        x = self.fc2(x)
-        x = self.leaky_relu2(x)
-        x = self.output(x)
+        x = self.output_mlp(global_attention_output)
         return x
