@@ -1,3 +1,7 @@
+"""
+Library module for embedding atom types and processing SMILES.
+"""
+
 import torch
 import torch.nn as nn
 import rdkit.Chem as Chem
