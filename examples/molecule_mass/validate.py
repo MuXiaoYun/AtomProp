@@ -1,5 +1,5 @@
 from atomprop.models.GeAT import GeATNet
-from atomprop.embeddings.AtomEmbedding import SMILESToInputs
+from atomprop.dataloader.dataloader import SMILESToInputs
 import configs.config as config
 import rdkit.Chem as Chem
 import rdkit.Chem.Descriptors as Descriptors

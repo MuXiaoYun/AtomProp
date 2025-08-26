@@ -3,7 +3,9 @@ import configs.config as config
 import rdkit.Chem as Chem
 import torch
 
-data_path = "data/nabladft/summary.csv"
+data_path = "data/moleculenet/qm9/gdb9.sdf"
+check_data = False
+target_label = "DFT TOTAL ENERGY"
 
 if __name__ == "__main__":
     # device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -27,47 +29,82 @@ if __name__ == "__main__":
     total_params = sum(p.numel() for p in geatnet.parameters() if p.requires_grad)
     print(f"Total trainable parameters: {total_params}")
 
-    # Load data from the CSV file
-    # smiles for input and the rest for regression targets
-    
-    import pandas as pd
-    df = pd.read_csv(data_path)
-    print(df.head())
-    # Print the columns
-    print("Columns in the dataset:", df.columns.tolist())
-    # Use rdkit.chem to handle SMILES strings. Count how many kinds of atom types and bond types are in the dataset
-    smiles_list = df['SMILES'].tolist()
-    print("Number of SMILES strings:", len(smiles_list))
+    if not check_data:
+        exit(0)
+    # Judge file type
+    if data_path.endswith(".csv"):
+        # Load data from the CSV file
+        # smiles for input and the rest for regression targets
+        
+        import pandas as pd
+        df = pd.read_csv(data_path)
+        print(df.head())
+        # Print the columns
+        print("Columns in the dataset:", df.columns.tolist())
+        # Use rdkit.chem to handle SMILES strings. Count how many kinds of atom types and bond types are in the dataset
+        smiles_list = df['SMILES'].tolist()
+        target_label_list = df[target_label].tolist()
+        print("Number of SMILES strings:", len(smiles_list))
 
-    atom_types = set()
-    bond_types = set()
+        atom_types = set()
+        bond_types = set()
 
-    max_num = -1
+        max_num = -1
 
-    for i, smiles in enumerate(smiles_list):
-        if i % 100 == 0:
-            print(f"Processing {i}th SMILES: {smiles}")
-        mol = Chem.MolFromSmiles(smiles)
-        if mol is not None:
-            for atom in mol.GetAtoms():
-                atom_types.add(atom.GetSymbol())
-            for bond in mol.GetBonds():
-                bond_types.add(bond.GetBondTypeAsDouble())
-            atom_num = mol.GetNumAtoms()
-            if atom_num > max_num:
-                max_num = atom_num
-        else:
-            print(f"Invalid SMILES string at index {i}: {smiles}")
-    
-    for mol in molecules:
-        if mol is not None:
-            for atom in mol.GetAtoms():
-                atom_types.add(atom.GetSymbol())
-            for bond in mol.GetBonds():
-                bond_types.add(bond.GetBondTypeAsDouble())
-    print("Number of atom types:", len(atom_types))
-    print("Atom types:", atom_types)
-    print("Number of bond types:", len(bond_types))
-    print("Bond types:", bond_types)
-    print("Maximum number of atoms in a molecule:", max_num)
+        for i, smiles in enumerate(smiles_list):
+            if i % 100 == 0:
+                print(f"Processing {i}th SMILES: {smiles}")
+            mol = Chem.MolFromSmiles(smiles)
+            if mol is not None:
+                for atom in mol.GetAtoms():
+                    atom_types.add(atom.GetSymbol())
+                for bond in mol.GetBonds():
+                    bond_types.add(bond.GetBondTypeAsDouble())
+                atom_num = mol.GetNumAtoms()
+                if atom_num > max_num:
+                    max_num = atom_num
+            else:
+                print(f"Invalid SMILES string at index {i}: {smiles}")
+
+        max_label = max(target_label_list)
+        min_label = min(target_label_list)
+        
+        print("Number of atom types:", len(atom_types))
+        print("Atom types:", atom_types)
+        print("Number of bond types:", len(bond_types))
+        print("Bond types:", bond_types)
+        print("Maximum number of atoms in a molecule:", max_num)
+        print(f"Max {target_label}: {max_label}, Min {target_label}: {min_label}")
+
+    elif data_path.endswith(".sdf"):
+        # Load data from the SDF file
+        from atomprop.dataloader.dataloader import SDFToInputs
+        sdf_path = data_path
+        results = SDFToInputs.convert(sdf_path, context_length=config.context_length)
+        print(f"Number of molecules in the SDF file: {len(results)}")
+
+        atom_types = set()
+        bond_types = set()
+
+        max_num = -1
+
+        for i, (atom_type_indices, adj_matrix, mol) in enumerate(results):
+            if i % 100 == 0:
+                print(f"Processing {i}th molecule")
+            if mol is not None:
+                for atom in mol.GetAtoms():
+                    atom_types.add(atom.GetSymbol())
+                for bond in mol.GetBonds():
+                    bond_types.add(bond.GetBondTypeAsDouble())
+                atom_num = mol.GetNumAtoms()
+                if atom_num > max_num:
+                    max_num = atom_num
+            else:
+                print(f"Invalid molecule at index {i}")
+        
+        print("Number of atom types:", len(atom_types))
+        print("Atom types:", atom_types)
+        print("Number of bond types:", len(bond_types))
+        print("Bond types:", bond_types)
+        print("Maximum number of atoms in a molecule:", max_num)
     
