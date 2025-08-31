@@ -1,12 +1,10 @@
 """
 AtomEmbedding configs
 """
-atom_embedding_dim = 64 
+atom_embedding_dim = 256
 """ Dimension of the atom embeddings """
 num_atom_types = 36
 """ Number of unique atom types in the dataset """
-bond_embedding_dim = 128 
-""" Dimension of the bond embeddings """
 num_bond_types = 4
 """ Number of unique bond types in the dataset """
 
@@ -16,7 +14,7 @@ Edge Attention configs
 """
 edge_attetion_output_negative_slope = 0.1
 """ Negative slope for the output of the edge attention feedforward network """
-num_heads = 6
+num_heads = 4
 """ Number of attention heads """
 global_num_heads = 4
 """ Number of global attention heads """
@@ -44,5 +42,5 @@ Training configs
 """
 batch_size = 128
 """ Batch size for training """
-context_length = 30
+context_length = 32
 """ Maximum number of atoms in a molecule for padding """
