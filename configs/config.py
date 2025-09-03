@@ -1,7 +1,7 @@
 """
 AtomEmbedding configs
 """
-atom_embedding_dim = 256
+atom_embedding_dim = 128
 """ Dimension of the atom embeddings """
 num_atom_types = 36
 """ Number of unique atom types in the dataset """
@@ -40,7 +40,7 @@ parallel_between_bondtypes = True
 """
 Training configs
 """
-batch_size = 128
+batch_size = 256
 """ Batch size for training """
 context_length = 32
 """ Maximum number of atoms in a molecule for padding """

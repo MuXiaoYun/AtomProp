@@ -25,34 +25,39 @@ class Learned3DPositionEmbedding(nn.Module):
         """
         return self.mlp(relative_positions)
 
-
-def Sinusoidal3DPositionEmbedding(num_pos_feats: int, temperature: int = 10000, scale: float = 2 * math.pi):
+class Sinusoidal3DPositionEmbedding:
     """
-    This function generates sinusoidal position embeddings for 3D coordinates.
+    A :class:`Sinusoidal3DPositionEmbedding` is a module that implements sinusoidal position embeddings for 3D coordinates.
+    It uses sine and cosine functions of different frequencies to encode the positions.
     """
-    if num_pos_feats % 3 != 0:
-        raise ValueError("num_pos_feats should be divisible by 3")
-    num_feats = num_pos_feats // 3
-    dim_t = torch.arange(num_feats, dtype=torch.float32)
-    dim_t = temperature ** (2 * (dim_t // 2) / num_feats)
 
-    def embed(positions):
-        if positions.dim() == 2:
-            x, y, z = positions[:, 0], positions[:, 1], positions[:, 2]
-        elif positions.dim() == 3:
-            x, y, z = positions[:, :, 0], positions[:, :, 1], positions[:, :, 2]
-        else:
-            raise ValueError("positions should be of shape (N, 3) or (N, M, 3)")
+    def __init__(self, num_pos_feats: int, temperature: int = 10000, scale: float = 2 * math.pi):
+        self.num_pos_feats = num_pos_feats
+        self.temperature = temperature
+        self.scale = scale
 
-        x = x[:, None] / dim_t
-        y = y[:, None] / dim_t
-        z = z[:, None] / dim_t
+    def __call__(self, positions: torch.Tensor):
+        """
+        Embed the input positions using sinusoidal functions. Clip the output to num_pos_feats.
+        :param positions: Input positions of shape (batch_size, num_atoms, 3)
+        :return: Sinusoidal position embeddings of shape (batch_size, num_atoms, num_pos_feats)
+        """
+        assert positions.dim() == 3 and positions.size(-1) == 3, "Input positions must be of shape (batch_size, num_atoms, 3)"
+        batch_size, num_atoms, _ = positions.size()
+        dim_t = torch.arange(self.num_pos_feats, dtype=torch.float32, device=positions.device)
+        dim_t = self.temperature ** (2 * (dim_t // 2) / self.num_pos_feats)
 
-        pos_x = torch.stack((x.sin(), x.cos()), dim=-1).flatten(-2)
-        pos_y = torch.stack((y.sin(), y.cos()), dim=-1).flatten(-2)
-        pos_z = torch.stack((z.sin(), z.cos()), dim=-1).flatten(-2)
+        pos_x = positions[:, :, 0] * self.scale
+        pos_y = positions[:, :, 1] * self.scale
+        pos_z = positions[:, :, 2] * self.scale
 
-        pos = torch.cat((pos_x, pos_y, pos_z), dim=-1)
-        return pos * scale
+        pos_x = pos_x[:, :, None] / dim_t
+        pos_y = pos_y[:, :, None] / dim_t
+        pos_z = pos_z[:, :, None] / dim_t
 
-    return embed
+        pos_x = torch.stack((pos_x.sin(), pos_x.cos()), dim=3).flatten(2)
+        pos_y = torch.stack((pos_y.sin(), pos_y.cos()), dim=3).flatten(2)
+        pos_z = torch.stack((pos_z.sin(), pos_z.cos()), dim=3).flatten(2)
+
+        pos = torch.cat((pos_x, pos_y, pos_z), dim=2)
+        return pos[:, :, :self.num_pos_feats]

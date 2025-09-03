@@ -28,6 +28,16 @@ if __name__ == "__main__":
     # Print param numbers
     total_params = sum(p.numel() for p in geatnet.parameters() if p.requires_grad)
     print(f"Total trainable parameters: {total_params}")
+    # Print param numbers of each part
+    # Backbone
+    backbone_params = sum(p.numel() for p in geatnet.backbone.parameters() if p.requires_grad)
+    print(f"Backbone trainable parameters: {backbone_params}")
+    # Neck
+    neck_params = sum(p.numel() for p in geatnet.neck.parameters() if p.requires_grad)
+    print(f"Neck trainable parameters: {neck_params}")
+    # Head
+    head_params = sum(p.numel() for p in geatnet.head.parameters() if p.requires_grad)
+    print(f"Head trainable parameters: {head_params}")
 
     if not check_data:
         exit(0)
