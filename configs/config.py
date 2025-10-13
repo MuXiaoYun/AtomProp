@@ -31,7 +31,7 @@ head_dropout = 0.1
 """ Dropout rate for the GeAT head """
 geatnet_hidden_dim = 64
 """ Hidden dimension for the egeatnet feedforward network """
-geatnet_layers = 3
+geatnet_layers = 6
 """ Number of GeAT layers in the GeATNet"""
 parallel_between_bondtypes = True
 """ Whether to use parallel attention mechanisms for different bond types """
