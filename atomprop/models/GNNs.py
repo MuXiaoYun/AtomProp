@@ -4,6 +4,7 @@ Module for GNNs, including GCN, GAT, GraphSAGE, GIN
 
 import torch
 import torch.nn as nn
+import torch_geometric
 from torch_geometric.nn import MessagePassing
 
 class GCNconv(MessagePassing):
@@ -174,8 +175,24 @@ class GINconv(MessagePassing):
     def message(self, x_j):
         return x_j
 
+class Embedder(nn.Module):
+    """
+    A module for embedding atom types.
+    """
+    def __init__(self, num_atom_types, embed_dim):
+        super(Embedder, self).__init__()
+        self.embedding = nn.Embedding(num_atom_types, embed_dim)
+        self.reset_parameters()
+
+    def reset_parameters(self):
+        nn.init.xavier_uniform_(self.embedding.weight)
+
+    def forward(self, atom_type_indices):
+        # atom_type_indices has shape [N]
+        return self.embedding(atom_type_indices)  # Shape [N, embed_dim]
+
 class GNN(nn.Module):
-    def __init__(self, gnn_type='gcn', num_layers, embed_dim, JK='last', dropout, **kwargs):
+    def __init__(self, num_layers, embed_dim, dropout, gnn_type='gcn', JK='last', **kwargs):
         """
         A module for stacking multiple GNN layers.
         :param gnn_type: The type of GNN layer to use ('gcn', 'gat', 'graphsage', 'gin').
@@ -245,4 +262,4 @@ class GNN(nn.Module):
         else:
             raise ValueError("Invalid JK type. Choose from 'last', 'sum', 'max', 'concat'.")
         
-        return out
+        return out # Shape [N, embed_dim]

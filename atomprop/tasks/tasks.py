@@ -15,16 +15,10 @@ class NodeAttrPrediction:
         self.preds = None
         self.labels = None
 
-    def run_pred(self, data, pmodel, fmodel):
+    def set_pred(self, preds):
         """
-        Process a batch of data and generate predictions.
-        pmodel: pre-trained model (frozen)
-        fmodel: downstream model (trainable)
+        Set predictions.
         """
-        pmodel.eval()
-        fmodel.train()
-        embs = pmodel(data)
-        preds = fmodel(embs)
         self.preds = preds
         return
 

@@ -93,13 +93,13 @@ class atomFeaturize:
         return [int(hybridization == s) for s in allowable_set] + [0]
 
     @staticmethod
-    def atom_chirality_onehot(atom, allowable_set=(Chem.rdchem.ChiralType.ALLENE,
-                                                    Chem.rdchem.ChiralType.OCTAHEDRAL,
-                                                    Chem.rdchem.ChiralType.SQUAREPLANAR,
-                                                    Chem.rdchem.ChiralType.TETRAHEDRAL,
-                                                    Chem.rdchem.ChiralType.TETRAHEDRAL_CCW,
-                                                    Chem.rdchem.ChiralType.TETRAHEDRAL_CW,
-                                                    Chem.rdchem.ChiralType.TRIGONALBIPYRAMIDAL), include_unknown=True):
+    def atom_chirality_onehot(atom, allowable_set=(Chem.rdchem.ChiralType.CHI_ALLENE,
+                                                    Chem.rdchem.ChiralType.CHI_OCTAHEDRAL,
+                                                    Chem.rdchem.ChiralType.CHI_SQUAREPLANAR,
+                                                    Chem.rdchem.ChiralType.CHI_TETRAHEDRAL,
+                                                    Chem.rdchem.ChiralType.CHI_TETRAHEDRAL_CCW,
+                                                    Chem.rdchem.ChiralType.CHI_TETRAHEDRAL_CW,
+                                                    Chem.rdchem.ChiralType.CHI_TRIGONALBIPYRAMIDAL), include_unknown=True):
         """
         One-hot encoding for atom chirality.
         :param atom: RDKit atom object.

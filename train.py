@@ -60,9 +60,9 @@ def process_smiles_chunk(chunk_data, max_atom_num):
     
     for i, (smiles, target_label) in enumerate(zip(smiles_list, target_label_list)):
         # Convert SMILES string to GeATNet input format (atom embeddings + edges)
-        atom_embeddings, edges, mol = SMILESToInputs.convert(smiles=smiles, context_length=max_atom_num)
+        atom_indices, edges, mol = SMILESToInputs.convert(smiles=smiles, context_length=max_atom_num)
         if mol is not None:  # Only yield if SMILES conversion is successful
-            yield (atom_embeddings, edges, target_label)
+            yield (atom_indices, edges, target_label)
         else:
             print(f"Invalid SMILES string: {smiles}")
             continue
@@ -156,7 +156,7 @@ class ChunkDataLoader:
             target_label = self.current_chunk_data.iloc[local_idx]['DFT TOTAL ENERGY']
 
             # Convert SMILES to GeATNet input format
-            atom_embeddings, edges, mol = SMILESToInputs.convert(
+            atom_indices, edges, mol = SMILESToInputs.convert(
                 smiles=smiles,
                 context_length=self.max_atom_num
             )
@@ -168,7 +168,7 @@ class ChunkDataLoader:
                 continue
 
             # Add valid sample to batch collections
-            batch_atom_emb.append(atom_embeddings)
+            batch_atom_emb.append(atom_indices)
             batch_edges.append(edges)
             batch_labels.append(target_label)
             # Move to next index in split indices
@@ -269,9 +269,9 @@ if __name__ == "__main__":
                              desc=f"Epoch {epoch+1}/{num_epochs} - Training")
             
             # Iterate over batches from train loader with progress bar
-            for batch_idx, (atom_embeddings, edges, target_labels) in train_pbar:
+            for batch_idx, (atom_indices, edges, target_labels) in train_pbar:
                 # Move batch data to computing device
-                atom_embeddings = atom_embeddings.to(device)
+                atom_indices = atom_indices.to(device)
                 edges = edges.to(device)
                 # Normalize target labels (scale to [0,1] range)
                 target_labels = (target_labels - min_label) / (max_label - min_label)
@@ -280,7 +280,7 @@ if __name__ == "__main__":
                 # Reset gradients from previous iteration
                 optimizer.zero_grad()
                 # Forward pass: model predicts energy from atom embeddings and edges
-                outputs = geatnet(atom_embeddings, edges)
+                outputs = geatnet(atom_indices, edges)
                 # Calculate loss between predictions and normalized labels
                 loss = criterion(outputs.squeeze(), target_labels)
                 # Backward pass: compute gradients
@@ -289,7 +289,7 @@ if __name__ == "__main__":
                 optimizer.step()
                 
                 # Accumulate total training loss and sample count
-                batch_size_current = atom_embeddings.size(0)
+                batch_size_current = atom_indices.size(0)
                 total_train_loss += loss.item() * batch_size_current
                 train_sample_count += batch_size_current
                 
@@ -313,21 +313,21 @@ if __name__ == "__main__":
             # Disable gradient computation for validation (save memory and speed up)
             with torch.no_grad():
                 # Iterate over batches from validation loader with progress bar
-                for batch_idx, (atom_embeddings, edges, target_labels) in val_pbar:
+                for batch_idx, (atom_indices, edges, target_labels) in val_pbar:
                     # Move batch data to computing device
-                    atom_embeddings = atom_embeddings.to(device)
+                    atom_indices = atom_indices.to(device)
                     edges = edges.to(device)
                     # Normalize target labels (same scaling as training)
                     target_labels = (target_labels - min_label) / (max_label - min_label)
                     target_labels = target_labels.to(device)
                     
                     # Forward pass: model prediction
-                    outputs = geatnet(atom_embeddings, edges)
+                    outputs = geatnet(atom_indices, edges)
                     # Calculate validation loss
                     loss = criterion(outputs.squeeze(), target_labels)
                     
                     # Accumulate total validation loss and sample count
-                    batch_size_current = atom_embeddings.size(0)
+                    batch_size_current = atom_indices.size(0)
                     total_val_loss += loss.item() * batch_size_current
                     val_sample_count += batch_size_current
                     

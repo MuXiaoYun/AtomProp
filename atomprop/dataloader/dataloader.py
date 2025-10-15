@@ -11,7 +11,7 @@ class SMILESToInputs:
     A utility class to convert SMILES strings to atom type indices and edges.
     """
     @staticmethod
-    def convert(smiles: str, context_length: int = 420, edge_output_type = 'adj_matrix'):
+    def convert(smiles: str, context_length: int = 420, edge_output_type = 'edge_list'):
         """
         Convert a SMILES string to atom type indices and edges.
         :param smiles: The SMILES string to convert.
@@ -64,7 +64,7 @@ class SMILESToInputs:
                 atom_type_indices = torch.cat([atom_type_indices, torch.zeros(context_length - len(atom_type_indices), dtype=torch.long)])
             else:
                 atom_type_indices = atom_type_indices[:context_length]
-            return atom_type_indices, edges, mol
+            return atom_type_indices, torch.tensor(edges, dtype=torch.long), mol
         else:
             raise ValueError(f"Invalid edge_output_type: {edge_output_type}. Must be 'adj_matrix' or 'edge_list'.")
 
@@ -73,7 +73,7 @@ class SDFToInputs:
     A utility class to convert SDF files to atom type indices and edges.
     """
     @staticmethod
-    def convert(sdf_path: str, context_length: int = 420, edge_output_type = 'adj_matrix'):
+    def convert(sdf_path: str, context_length: int = 420, edge_output_type = 'edge_list'):
         """
         Convert an SDF file to atom type indices and edges.
         :param sdf_path: The path to the SDF file.
@@ -107,22 +107,32 @@ class SDFToInputs:
                 bond_type_index = BondTypes.get_bond_types().index(str(bond.GetBondType()))
                 edges.append((start_idx, end_idx, bond_type_index))
             
-            # Create adjacency matrix
-            adj_matrix = torch.zeros((context_length, context_length), dtype=torch.long) - 1
-            for start_idx, end_idx, bond_type_index in edges:
-                adj_matrix[start_idx, end_idx] = bond_type_index
-                adj_matrix[end_idx, start_idx] = bond_type_index
-            # Pad atom type indices and adjacency matrix
-            if len(atom_type_indices) < context_length:
-                atom_type_indices = torch.cat([atom_type_indices, torch.zeros(context_length - len(atom_type_indices), dtype=torch.long)])
+            if edge_output_type == 'adj_matrix':
+                # Create adjacency matrix
+                adj_matrix = torch.zeros((context_length, context_length), dtype=torch.long) - 1
+                for start_idx, end_idx, bond_type_index in edges:
+                    adj_matrix[start_idx, end_idx] = bond_type_index
+                    adj_matrix[end_idx, start_idx] = bond_type_index
+                # Pad atom type indices and adjacency matrix
+                if len(atom_type_indices) < context_length:
+                    atom_type_indices = torch.cat([atom_type_indices, torch.zeros(context_length - len(atom_type_indices), dtype=torch.long)])
+                else:
+                    atom_type_indices = atom_type_indices[:context_length]
+                if adj_matrix.size(0) < context_length:
+                    adj_matrix = torch.cat([adj_matrix, torch.zeros(context_length - adj_matrix.size(0), context_length, dtype=torch.long) - 1], dim=0)
+                    adj_matrix = torch.cat([adj_matrix, torch.zeros(context_length, context_length - adj_matrix.size(1), dtype=torch.long) - 1], dim=1)
+                else:
+                    adj_matrix = adj_matrix[:context_length, :context_length]
+                results.append((atom_type_indices, adj_matrix, mol))
+            elif edge_output_type == 'edge_list':
+                # Pad atom type indices to context length with zeros
+                if len(atom_type_indices) < context_length:
+                    atom_type_indices = torch.cat([atom_type_indices, torch.zeros(context_length - len(atom_type_indices), dtype=torch.long)])
+                else:
+                    atom_type_indices = atom_type_indices[:context_length]
+                results.append((atom_type_indices, torch.tensor(edges, dtype=torch.long), mol))
             else:
-                atom_type_indices = atom_type_indices[:context_length]
-            if adj_matrix.size(0) < context_length:
-                adj_matrix = torch.cat([adj_matrix, torch.zeros(context_length - adj_matrix.size(0), context_length, dtype=torch.long) - 1], dim=0)
-                adj_matrix = torch.cat([adj_matrix, torch.zeros(context_length, context_length - adj_matrix.size(1), dtype=torch.long) - 1], dim=1)
-            else:
-                adj_matrix = adj_matrix[:context_length, :context_length]
-            results.append((atom_type_indices, adj_matrix, mol))
+                raise ValueError(f"Invalid edge_output_type: {edge_output_type}. Must be 'adj_matrix' or 'edge_list'.")
         return results
 
 class MoleculeDataset(torch.utils.data.Dataset):
