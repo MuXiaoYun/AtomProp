@@ -12,7 +12,7 @@ class MLP(nn.Module):
     A :class:`MLP` is a module that implements a multi-layer perceptron.
     """
 
-    def __init__(self, input_dim: int, hidden_dim: int, output_dim: int, num_layers: int, output_activation: bool = False, dropout: float = 0.0, negative_slope: float = 0.2):
+    def __init__(self, input_dim: int, hidden_dim: int, output_dim: int, num_layers: int, dropout: float = 0.0, output_activation = nn.Sigmoid()):
         super(MLP, self).__init__()
         self.input_dim = input_dim
         self.hidden_dim = hidden_dim
@@ -20,7 +20,6 @@ class MLP(nn.Module):
         self.num_layers = num_layers
         self.output_activation = output_activation
         self.dropout = dropout
-        self.negative_slope = negative_slope
 
         layers = []
         if num_layers == 1:
@@ -32,7 +31,6 @@ class MLP(nn.Module):
             layers.append(nn.Linear(hidden_dim, output_dim))
 
         self.layers = nn.ModuleList(layers)
-        self.activation = nn.LeakyReLU(negative_slope)
 
     def forward(self, x: torch.Tensor):
         """
@@ -46,8 +44,10 @@ class MLP(nn.Module):
         """
         for i in range(self.num_layers):
             x = self.layers[i](x)
-            if i != self.num_layers - 1 or self.output_activation:
-                x = self.activation(x)
+            if i != self.num_layers - 1:
+                x = F.relu(x)
                 if self.dropout > 0:
                     x = F.dropout(x, p=self.dropout, training=self.training)
+        if self.output_activation is not None:
+            x = self.output_activation(x)
         return x

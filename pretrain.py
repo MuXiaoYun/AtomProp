@@ -11,9 +11,9 @@ import numpy as np
 from tqdm import tqdm
 from torch_geometric.data import Data, Batch, DataLoader
 
-backbone = Embedder(num_atom_types=120, embed_dim=128)
-neck = GNN(num_layers=3, embed_dim=128, gnn_type='gcn', JK='last', dropout=0.1)
-head = MLP(input_dim=128, hidden_dim=256, output_dim=15, num_layers=2, dropout=0.1, output_activation=None)
+backbone = Embedder(num_atom_types=120, embed_dim=512)
+neck = GNN(num_layers=6, embed_dim=512, gnn_type='gcn', JK='last', dropout=0.1)
+head = MLP(input_dim=512, hidden_dim=256, output_dim=157, num_layers=1, dropout=0.1)
 task = NodeAttrPrediction(criterion=torch.nn.CrossEntropyLoss())
 
 data_path = "data/nabladft/summary.csv"
@@ -21,6 +21,37 @@ dataset_size = 100000
 chunk_size = 65536
 max_atom_num = 128
 batch_size = 32
+
+# Component-specific optimizer and scheduler settings. Adjust cls/kwargs as needed.
+optimizer_configs = {
+    "backbone": {
+        "cls": torch.optim.Adam,
+        "kwargs": {"lr": 5e-5, "weight_decay": 1e-5}
+    },
+    "neck": {
+        "cls": torch.optim.AdamW,
+        "kwargs": {"lr": 1e-4, "weight_decay": 5e-4}
+    },
+    "head": {
+        "cls": torch.optim.Adam,
+        "kwargs": {"lr": 2e-4, "weight_decay": 1e-6}
+    }
+}
+
+scheduler_configs = {
+    "backbone": {
+        "cls": torch.optim.lr_scheduler.ReduceLROnPlateau,
+        "kwargs": {"mode": "min", "factor": 0.7, "patience": 4, "min_lr": 1e-6}
+    },
+    "neck": {
+        "cls": torch.optim.lr_scheduler.CosineAnnealingLR,
+        "kwargs": {"T_max": 20, "eta_min": 1e-6}
+    },
+    "head": {
+        "cls": torch.optim.lr_scheduler.StepLR,
+        "kwargs": {"step_size": 10, "gamma": 0.5}
+    }
+}
 
 def get_dataset_info(data_path):
     """
@@ -47,9 +78,6 @@ def create_data_splits(total_size):
     return train_indices, val_indices, test_indices
 
 def smiles_to_pyg_data(smiles, max_atom_num=None):
-    """
-    Convert SMILES to PyG Data object
-    """
     atom_indices, edges, mol = SMILESToInputs.convert(
         smiles=smiles,
         context_length=max_atom_num
@@ -61,14 +89,20 @@ def smiles_to_pyg_data(smiles, max_atom_num=None):
     num_atoms = len(mol.GetAtoms())
     
     x = atom_indices[:num_atoms]
+    if x.dim() == 1:
+        x = x.unsqueeze(-1)
     
-    return Data(x=x, edge_index=edges, smiles=smiles, mol=mol)
+    if edges.dim() == 2 and edges.size(1) == 3:
+        edge_index = edges[:, :2].t().contiguous()
+        edge_attr = edges[:, 2].unsqueeze(-1)
+    else:
+        edge_index = edges
+        edge_attr = torch.ones(edges.size(1), 1) if edges.dim() == 2 else torch.ones(1, 1)
+    
+    return Data(x=x, edge_index=edge_index, edge_attr=edge_attr, smiles=smiles, mol=mol)
 
 
 class PyGChunkDataLoader:
-    """
-    Custom data loader that processes data in chunks on-the-fly and yields PyG Data objects
-    """
     def __init__(self, data_path, split_indices, chunk_size=65536, max_atom_num=128, batch_size=32):
         self.data_path = data_path
         self.split_indices = split_indices
@@ -154,9 +188,35 @@ if __name__ == "__main__":
     neck.to(device)
     head.to(device)
 
-    model_parameters = list(backbone.parameters()) + list(neck.parameters()) + list(head.parameters())
-    optimizer = torch.optim.Adam(model_parameters, lr=1e-4, weight_decay=1e-5)
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.7, patience=3)
+    #print info of 3 networks, especially parameter num
+    print(backbone.__class__.__name__, f"Parameters: {sum(p.numel() for p in backbone.parameters() if p.requires_grad)}")
+    print(neck.__class__.__name__, f"Parameters: {sum(p.numel() for p in neck.parameters() if p.requires_grad)}")
+    print(head.__class__.__name__, f"Parameters: {sum(p.numel() for p in head.parameters() if p.requires_grad)}")
+
+    components = {
+        "backbone": backbone,
+        "neck": neck,
+        "head": head
+    }
+
+    optimizers = {}
+    schedulers = {}
+
+    for name, module in components.items():
+        opt_conf = optimizer_configs.get(name)
+        if opt_conf is None:
+            raise ValueError(f"Missing optimizer configuration for component '{name}'")
+
+        opt_cls = opt_conf.get("cls")
+        opt_kwargs = opt_conf.get("kwargs", {})
+        optimizers[name] = opt_cls(module.parameters(), **opt_kwargs)
+
+        sched_conf = scheduler_configs.get(name)
+        if sched_conf is not None:
+            sched_cls = sched_conf.get("cls")
+            sched_kwargs = sched_conf.get("kwargs", {})
+            schedulers[name] = sched_cls(optimizers[name], **sched_kwargs)
+
     criterion = nn.MSELoss()
     
     train_loader = PyGChunkDataLoader(
@@ -194,18 +254,32 @@ if __name__ == "__main__":
             for batch_idx, (batch_data, mols) in train_pbar:
                 batch_data = batch_data.to(device)
                 
-                optimizer.zero_grad()
+                for opt in optimizers.values():
+                    opt.zero_grad()
                 
-                atom_emb = backbone(batch_data.x, batch_data.edge_index, batch_data.edge_attr)
-                graph_emb = neck(atom_emb, batch_data.edge_index, batch_data.edge_attr)
+                print("=== BACKBONE Data Inspection ===")
+                print(f"batch_data.x shape: {batch_data.x.shape}, dtype: {batch_data.x.dtype}")
+                # size of batch_data.x is [B_N, 1]
+                atom_emb = backbone(batch_data.x) # size [B_N, 1, embed_dim]
+
+                print("=== NECK Data Inspection ===")
+                print(f"atom_emb shape: {atom_emb.shape}, dtype: {atom_emb.dtype}")
+                print(f"edge_index shape: {batch_data.edge_index.shape}, dtype: {batch_data.edge_index.dtype}")
+                graph_emb = neck(atom_emb, batch_data.edge_index)
+                graph_emb = graph_emb.view(-1, graph_emb.size(-1))
+
+                print("=== HEAD Data Inspection ===")
+                print(f"graph_emb shape: {graph_emb.shape}, dtype: {graph_emb.dtype}")
                 outputs = head(graph_emb)
+                outputs = outputs.view(-1, outputs.size(-1))
                 
                 task.set_pred(outputs)
                 task.run_label(mols)
                 loss = task.compute_loss()
                 
                 loss.backward()
-                optimizer.step()
+                for opt in optimizers.values():
+                    opt.step()
                 
                 if batch_idx == train_loader.total_batches - 1:
                     metrics = task.get_metrics()
@@ -235,7 +309,7 @@ if __name__ == "__main__":
                 for batch_idx, (batch_data, mols) in val_pbar:
                     batch_data = batch_data.to(device)
                     
-                    atom_emb = backbone(batch_data.x, batch_data.edge_index, batch_data.edge_attr)
+                    atom_emb = backbone(batch_data.x, batch_data.edge_index, batch_data.edge_attr) #shape [B, 
                     graph_emb = neck(atom_emb, batch_data.edge_index, batch_data.edge_attr)
                     outputs = head(graph_emb)
                     
@@ -256,7 +330,11 @@ if __name__ == "__main__":
             avg_val_loss = total_val_loss / val_sample_count
             val_losses.append(avg_val_loss)
             
-            scheduler.step(avg_val_loss)
+            for name, scheduler in schedulers.items():
+                if isinstance(scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
+                    scheduler.step(avg_val_loss)
+                else:
+                    scheduler.step()
             
             print(f"Epoch {epoch+1}/{num_epochs} Summary: Train Loss = {avg_train_loss:.6f}, Val Loss = {avg_val_loss:.6f}")
             
@@ -266,7 +344,8 @@ if __name__ == "__main__":
                     'backbone_state_dict': backbone.state_dict(),
                     'neck_state_dict': neck.state_dict(),
                     'head_state_dict': head.state_dict(),
-                    'optimizer_state_dict': optimizer.state_dict(),
+                    'optimizer_state_dict': {name: opt.state_dict() for name, opt in optimizers.items()},
+                    'scheduler_state_dict': {name: sch.state_dict() for name, sch in schedulers.items()},
                     'epoch': epoch,
                     'best_val_loss': best_val_loss
                 }, 'best_model.pth')
@@ -277,7 +356,8 @@ if __name__ == "__main__":
                 'backbone_state_dict': backbone.state_dict(),
                 'neck_state_dict': neck.state_dict(),
                 'head_state_dict': head.state_dict(),
-                'optimizer_state_dict': optimizer.state_dict(),
+                'optimizer_state_dict': {name: opt.state_dict() for name, opt in optimizers.items()},
+                'scheduler_state_dict': {name: sch.state_dict() for name, sch in schedulers.items()},
                 'epoch': epoch,
                 'best_val_loss': best_val_loss
             }, 'interrupted_model.pth')

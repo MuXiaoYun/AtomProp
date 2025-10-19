@@ -5,6 +5,7 @@ Module for hand-made features for atoms and molecules.
 import rdkit
 from rdkit import Chem
 import torch
+import numpy as np
 
 class atomFeaturize:
     """
@@ -160,4 +161,5 @@ class atomFeaturize:
             features += atomFeaturize.atom_num_hydrogens_onehot(atom)
             features += atomFeaturize.atom_mass(atom)
             atom_features.append(features)
-        return atom_features
+        atom_features_np = torch.tensor(atom_features, dtype=torch.float32)
+        return atom_features_np # dimension of each atom feature is 119+8+7+8+8+6+1=157

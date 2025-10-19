@@ -12,7 +12,7 @@ class GCNconv(MessagePassing):
     GCN layer.
     """
     def __init__(self, embed_dim, aggr='add'):
-        super(GCNconv, self).__init__()
+        super(GCNconv, self).__init__(aggr=aggr)
         self.lin = nn.Linear(embed_dim, embed_dim)
         self.root_emb = nn.Parameter(torch.zeros(embed_dim))
         self.reset_parameters()
@@ -39,7 +39,8 @@ class GCNconv(MessagePassing):
         edge_index, _ = torch_geometric.utils.add_self_loops(edge_index, num_nodes=num_nodes)
         norm = self.normalize(edge_index, num_nodes)  # Shape [E]
         x = self.lin(x)  # Shape [N, embed_dim]
-        out = self.propagate(self.aggr, edge_index, x=x, norm=norm)  # Shape [N, embed_dim]
+        edge_index = edge_index.long()
+        out = self.propagate(aggr=self.aggr, edge_index=edge_index, x=x, norm=norm)  # Shape [N, embed_dim]
         out = out + self.root_emb * x  # Add skip connection
         return out
 
@@ -59,7 +60,7 @@ class GATconv(MessagePassing):
     2. 'global': softmax over all nodes
     """
     def __init__(self, embed_dim, output_negative_slope=0.2, aggr='add', att='concat_linear', attt='local'):
-        super(GATconv, self).__init__()
+        super(GATconv, self).__init__(aggr=aggr)
         self.att_type = att
         self.att_scope = attt
         self.embed_dim = embed_dim
@@ -88,7 +89,7 @@ class GATconv(MessagePassing):
         # x has shape [N, embed_dim]
         # edge_index has shape [2, E]
         x = self.lin(x)  # Shape [N, embed_dim]
-        out = self.propagate(self.aggr, edge_index, x=x)  # Shape [N, embed_dim]
+        out = self.propagate(aggr=self.aggr, edge_index=edge_index, x=x)  # Shape [N, embed_dim]
         out = out + self.root_emb * x  # Add skip connection
         return out
 
@@ -119,7 +120,7 @@ class GraphSAGEconv(MessagePassing):
     GraphSAGE layer.
     """
     def __init__(self, embed_dim, aggr='mean', sample=False):
-        super(GraphSAGEconv, self).__init__()
+        super(GraphSAGEconv, self).__init__(aggr=aggr)
         self.lin = nn.Linear(2 * embed_dim, embed_dim)
         self.root_emb = nn.Parameter(torch.zeros(embed_dim))
         self.reset_parameters()
@@ -133,7 +134,7 @@ class GraphSAGEconv(MessagePassing):
     def forward(self, x, edge_index):
         # x has shape [N, embed_dim]
         # edge_index has shape [2, E]
-        out = self.propagate(self.aggr, edge_index, x=x)  # Shape [N, embed_dim]
+        out = self.propagate(aggr=self.aggr, edge_index=edge_index, x=x)  # Shape [N, embed_dim]
         out = torch.cat([out, x], dim=-1)  # Shape [N, 2*embed_dim]
         out = self.lin(out)  # Shape [N, embed_dim]
         out = out + self.root_emb * x  # Add skip connection
@@ -147,7 +148,7 @@ class GINconv(MessagePassing):
     GIN layer.
     """
     def __init__(self, embed_dim, aggr='add'):
-        super(GINconv, self).__init__()
+        super(GINconv, self).__init__(aggr=aggr)
         self.mlp = nn.Sequential(
             nn.Linear(embed_dim, 2 * embed_dim),
             nn.ReLU(),
@@ -167,7 +168,7 @@ class GINconv(MessagePassing):
     def forward(self, x, edge_index):
         # x has shape [N, embed_dim]
         # edge_index has shape [2, E]
-        out = self.propagate(self.aggr, edge_index, x=x)  # Shape [N, embed_dim]
+        out = self.propagate(aggr=self.aggr, edge_index=edge_index, x=x)  # Shape [N, embed_dim]
         out = (1 + self.eps) * x + out  # Shape [N, embed_dim]
         out = self.mlp(out)  # Shape [N, embed_dim]
         return out

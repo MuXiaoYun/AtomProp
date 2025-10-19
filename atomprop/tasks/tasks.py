@@ -26,7 +26,7 @@ class NodeAttrPrediction:
         """
         Process a batch of data and generate labels.
         """
-        self.labels = torch.tensor([atomFeaturize.featurize(mol) for mol in data])
+        self.labels = torch.tensor([atomFeaturize.featurize(mol) for mol in data]) # shape [B, N, f]
         return
 
     def compute_loss(self):
