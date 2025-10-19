@@ -16,7 +16,6 @@ class GCNconv(MessagePassing):
         self.lin = nn.Linear(embed_dim, embed_dim)
         self.root_emb = nn.Parameter(torch.zeros(embed_dim))
         self.reset_parameters()
-        self.aggr = aggr
 
     def reset_parameters(self):
         nn.init.xavier_uniform_(self.lin.weight)
@@ -33,14 +32,13 @@ class GCNconv(MessagePassing):
         return norm
 
     def forward(self, x, edge_index):
-        # x has shape [N, embed_dim]
+        # x has shape [B_N, embed_dim]
         # edge_index has shape [2, E]
         num_nodes = x.size(0)
         edge_index, _ = torch_geometric.utils.add_self_loops(edge_index, num_nodes=num_nodes)
         norm = self.normalize(edge_index, num_nodes)  # Shape [E]
-        x = self.lin(x)  # Shape [N, embed_dim]
-        edge_index = edge_index.long()
-        out = self.propagate(aggr=self.aggr, edge_index=edge_index, x=x, norm=norm)  # Shape [N, embed_dim]
+        x = self.lin(x)  # Shape [B_N, embed_dim]
+        out = self.propagate(edge_index=edge_index, x=x, norm=norm)  # Shape [B_N, embed_dim]
         out = out + self.root_emb * x  # Add skip connection
         return out
 
@@ -76,7 +74,6 @@ class GATconv(MessagePassing):
         self.leaky_relu = nn.LeakyReLU(negative_slope=output_negative_slope)
         self.root_emb = nn.Parameter(torch.zeros(embed_dim))
         self.reset_parameters()
-        self.aggr = aggr
 
     def reset_parameters(self):
         nn.init.xavier_uniform_(self.lin.weight)
@@ -86,10 +83,10 @@ class GATconv(MessagePassing):
         nn.init.zeros_(self.root_emb)
 
     def forward(self, x, edge_index):
-        # x has shape [N, embed_dim]
+        # x has shape [B_N, embed_dim]
         # edge_index has shape [2, E]
-        x = self.lin(x)  # Shape [N, embed_dim]
-        out = self.propagate(aggr=self.aggr, edge_index=edge_index, x=x)  # Shape [N, embed_dim]
+        x = self.lin(x)  # Shape [B_N, embed_dim]
+        out = self.propagate(edge_index=edge_index, x=x)  # Shape [B_N, embed_dim]
         out = out + self.root_emb * x  # Add skip connection
         return out
 
@@ -107,9 +104,9 @@ class GATconv(MessagePassing):
         alpha = self.leaky_relu(alpha)
 
         if self.att_scope == 'local':
-            alpha = torch.softmax(alpha, index, ptr, size_i)  # Softmax over neighbors of i
+            alpha = torch_geometric.utils.softmax(alpha, index, ptr, size_i)  # Softmax over neighbors of i
         elif self.att_scope == 'global':
-            alpha = torch.softmax(alpha, dim=0)  # Softmax over all nodes
+            alpha = torch_geometric.nn.softmax(alpha, index)  # Softmax over all nodes
         else:
             raise ValueError("Invalid attention scope. Choose 'local' or 'global'.")
 
@@ -124,7 +121,6 @@ class GraphSAGEconv(MessagePassing):
         self.lin = nn.Linear(2 * embed_dim, embed_dim)
         self.root_emb = nn.Parameter(torch.zeros(embed_dim))
         self.reset_parameters()
-        self.aggr = aggr
 
     def reset_parameters(self):
         nn.init.xavier_uniform_(self.lin.weight)
@@ -132,11 +128,11 @@ class GraphSAGEconv(MessagePassing):
         nn.init.zeros_(self.root_emb)
 
     def forward(self, x, edge_index):
-        # x has shape [N, embed_dim]
+        # x has shape [B_N, embed_dim]
         # edge_index has shape [2, E]
-        out = self.propagate(aggr=self.aggr, edge_index=edge_index, x=x)  # Shape [N, embed_dim]
+        out = self.propagate(edge_index=edge_index, x=x)  # Shape [B_N, embed_dim]
         out = torch.cat([out, x], dim=-1)  # Shape [N, 2*embed_dim]
-        out = self.lin(out)  # Shape [N, embed_dim]
+        out = self.lin(out)  # Shape [B_N, embed_dim]
         out = out + self.root_emb * x  # Add skip connection
         return out
 
@@ -156,7 +152,6 @@ class GINconv(MessagePassing):
         )
         self.eps = nn.Parameter(torch.zeros(1))
         self.reset_parameters()
-        self.aggr = aggr
 
     def reset_parameters(self):
         for layer in self.mlp:
@@ -166,11 +161,11 @@ class GINconv(MessagePassing):
         nn.init.zeros_(self.eps)
 
     def forward(self, x, edge_index):
-        # x has shape [N, embed_dim]
+        # x has shape [B_N, embed_dim]
         # edge_index has shape [2, E]
-        out = self.propagate(aggr=self.aggr, edge_index=edge_index, x=x)  # Shape [N, embed_dim]
-        out = (1 + self.eps) * x + out  # Shape [N, embed_dim]
-        out = self.mlp(out)  # Shape [N, embed_dim]
+        out = self.propagate(edge_index=edge_index, x=x)  # Shape [B_N, embed_dim]
+        out = (1 + self.eps) * x + out  # Shape [B_N, embed_dim]
+        out = self.mlp(out)  # Shape [B_N, embed_dim]
         return out
 
     def message(self, x_j):
@@ -190,7 +185,7 @@ class Embedder(nn.Module):
 
     def forward(self, atom_type_indices):
         # atom_type_indices has shape [N]
-        return self.embedding(atom_type_indices)  # Shape [N, embed_dim]
+        return self.embedding(atom_type_indices)  # Shape [B_N, embed_dim]
 
 class GNN(nn.Module):
     def __init__(self, num_layers, embed_dim, dropout, gnn_type='gcn', JK='last', **kwargs):
@@ -241,12 +236,14 @@ class GNN(nn.Module):
             nn.init.xavier_uniform_(self.jump.weight)
             nn.init.zeros_(self.jump.bias)
         
-    def forward(self, x, edge_index):
-        # x has shape [N, embed_dim]
+    def forward(self, data):
+        # x has shape [B_N, embed_dim]
         # edge_index has shape [2, E]
+        x = data.x
+        edge_index = data.edge_index
         layer_outputs = []
         for conv in self.convs:
-            x = conv(x, edge_index)  # Shape [N, embed_dim]
+            x = conv(x, edge_index)  # Shape [B_N, embed_dim]
             x = torch.relu(x)
             x = torch.dropout(x, p=self.dropout, train=self.training)
             layer_outputs.append(x)
@@ -259,8 +256,8 @@ class GNN(nn.Module):
             out = torch.stack(layer_outputs, dim=0).max(dim=0)[0]
         elif self.JK == 'concat':
             out = torch.cat(layer_outputs, dim=-1)  # Shape [N, num_layers * embed_dim]
-            out = self.jump(out)  # Shape [N, embed_dim]
+            out = self.jump(out)  # Shape [B_N, embed_dim]
         else:
             raise ValueError("Invalid JK type. Choose from 'last', 'sum', 'max', 'concat'.")
         
-        return out # Shape [N, embed_dim]
+        return out # Shape [B_N, embed_dim]

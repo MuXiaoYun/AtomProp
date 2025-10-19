@@ -3,6 +3,7 @@ Module for pretraining tasks for GNNs.
 """
 
 from atomprop.utils.features import atomFeaturize  
+import torch
 
 class NodeAttrPrediction:
     """
@@ -22,18 +23,18 @@ class NodeAttrPrediction:
         self.preds = preds
         return
 
-    def run_label(self, data):
+    def run_label(self, data, device):
         """
         Process a batch of data and generate labels.
         """
-        self.labels = torch.tensor([atomFeaturize.featurize(mol) for mol in data]) # shape [B, N, f]
+        self.labels = torch.cat([atomFeaturize.featurize(mol) for mol in data], dim=0).to(device)
         return
 
     def compute_loss(self):
         """
         Compute the loss for the task.
         """
-        loss = self.criterion(preds_tensor, labels_tensor)
+        loss = self.criterion(self.preds, self.labels)
         return loss
 
     def get_metrics(self):

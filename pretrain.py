@@ -9,7 +9,9 @@ import torch
 import torch.nn as nn
 import numpy as np
 from tqdm import tqdm
-from torch_geometric.data import Data, Batch, DataLoader
+from torch_geometric.data import Data, Batch
+from torch.nn import DataParallel
+from torch_geometric.nn import DataParallel as PyGDataParallel
 
 backbone = Embedder(num_atom_types=120, embed_dim=512)
 neck = GNN(num_layers=6, embed_dim=512, gnn_type='gcn', JK='last', dropout=0.1)
@@ -21,6 +23,9 @@ dataset_size = 100000
 chunk_size = 65536
 max_atom_num = 128
 batch_size = 32
+
+parallel = True
+gpu_num = 8
 
 # Component-specific optimizer and scheduler settings. Adjust cls/kwargs as needed.
 optimizer_configs = {
@@ -169,20 +174,29 @@ class PyGChunkDataLoader:
         batch = Batch.from_data_list(data_list)
         return batch, mols_list
 
+
 if __name__ == "__main__":
     total_rows, columns = get_dataset_info(data_path)
     print(f"Total rows in dataset: {total_rows}")
     print(f"Dataset columns: {columns}")
-    
+
     if dataset_size > 0:
         total_rows = min(total_rows, dataset_size)
-    
+
     train_indices, val_indices, test_indices = create_data_splits(total_rows)
     print(f"Train set size: {len(train_indices)}, Val set size: {len(val_indices)}, Test set size: {len(test_indices)}")
-    
+
     BondTypes.set_bond_types(["SINGLE", "DOUBLE", "TRIPLE", 'AROMATIC'])
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    if parallel:
+        assert torch.cuda.device_count() >= gpu_num, "GPU NUM ERROR!!!"
+        device = torch.device("cuda:0")
+        backbone = DataParallel(backbone, device_ids=list(range(gpu_num)))
+        neck = PyGDataParallel(neck, device_ids=list(range(gpu_num)))
+        head = DataParallel(head, device_ids=list(range(gpu_num)))
+        print(f"Using DataParallel on {gpu_num} GPUs!")
+    else:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using computing device: {device}")
     backbone.to(device)
     neck.to(device)
@@ -209,7 +223,10 @@ if __name__ == "__main__":
 
         opt_cls = opt_conf.get("cls")
         opt_kwargs = opt_conf.get("kwargs", {})
-        optimizers[name] = opt_cls(module.parameters(), **opt_kwargs)
+        if parallel:
+            optimizers[name] = opt_cls(module.module.parameters(), **opt_kwargs)
+        else:
+            optimizers[name] = opt_cls(module.parameters(), **opt_kwargs)
 
         sched_conf = scheduler_configs.get(name)
         if sched_conf is not None:
@@ -257,24 +274,18 @@ if __name__ == "__main__":
                 for opt in optimizers.values():
                     opt.zero_grad()
                 
-                print("=== BACKBONE Data Inspection ===")
-                print(f"batch_data.x shape: {batch_data.x.shape}, dtype: {batch_data.x.dtype}")
                 # size of batch_data.x is [B_N, 1]
-                atom_emb = backbone(batch_data.x) # size [B_N, 1, embed_dim]
+                atom_emb = backbone(batch_data.x).squeeze() # size [B_N, embed_dim]
 
-                print("=== NECK Data Inspection ===")
-                print(f"atom_emb shape: {atom_emb.shape}, dtype: {atom_emb.dtype}")
-                print(f"edge_index shape: {batch_data.edge_index.shape}, dtype: {batch_data.edge_index.dtype}")
-                graph_emb = neck(atom_emb, batch_data.edge_index)
+                embedded_data = Data(x=atom_emb, edge_index=batch_data.edge_index)
+                graph_emb = neck(embedded_data)
                 graph_emb = graph_emb.view(-1, graph_emb.size(-1))
 
-                print("=== HEAD Data Inspection ===")
-                print(f"graph_emb shape: {graph_emb.shape}, dtype: {graph_emb.dtype}")
                 outputs = head(graph_emb)
                 outputs = outputs.view(-1, outputs.size(-1))
                 
                 task.set_pred(outputs)
-                task.run_label(mols)
+                task.run_label(mols, device)
                 loss = task.compute_loss()
                 
                 loss.backward()
@@ -309,12 +320,18 @@ if __name__ == "__main__":
                 for batch_idx, (batch_data, mols) in val_pbar:
                     batch_data = batch_data.to(device)
                     
-                    atom_emb = backbone(batch_data.x, batch_data.edge_index, batch_data.edge_attr) #shape [B, 
-                    graph_emb = neck(atom_emb, batch_data.edge_index, batch_data.edge_attr)
-                    outputs = head(graph_emb)
+                    # follows the pattern in training loop
+                    atom_emb = backbone(batch_data.x).squeeze()
                     
+                    embedded_data = Data(x=atom_emb, edge_index=batch_data.edge_index)
+                    graph_emb = neck(embedded_data)
+                    graph_emb = graph_emb.view(-1, graph_emb.size(-1))
+
+                    outputs = head(graph_emb)
+                    outputs = outputs.view(-1, outputs.size(-1))
+
                     task.set_pred(outputs)
-                    task.run_label(mols)
+                    task.run_label(mols, device)
                     loss = task.compute_loss()
                     
                     if batch_idx == val_loader.total_batches - 1:
