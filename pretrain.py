@@ -23,8 +23,7 @@ dataset_size = -1
 chunk_size = 65536
 max_atom_num = 128
 batch_size = 1024
-
-save_every_x_batch = 100 # if negative, save every epoch
+num_epochs = 4
 
 parallel = True
 device = torch.device("cuda:0") if torch.cuda.is_available() else torch.device("cpu")
@@ -268,7 +267,6 @@ if __name__ == "__main__":
             batch_size=batch_size,
         )
         
-        num_epochs = 100
         best_val_loss = float('inf')
         train_losses = []
         val_losses = []
@@ -383,7 +381,7 @@ if __name__ == "__main__":
                         'scheduler_state_dict': {name: sch.state_dict() for name, sch in schedulers.items()},
                         'epoch': epoch,
                         'best_val_loss': best_val_loss
-                    }, 'best_model.pth')
+                    }, 'trained_models/best_model.pth')
                     print(f"Best model saved at epoch {epoch+1} with Val Loss = {best_val_loss:.6f}")
 
             except KeyboardInterrupt:
@@ -395,7 +393,7 @@ if __name__ == "__main__":
                     'scheduler_state_dict': {name: sch.state_dict() for name, sch in schedulers.items()},
                     'epoch': epoch,
                     'best_val_loss': best_val_loss
-                }, 'interrupted_model.pth')
+                }, 'trained_models/interrupted_model.pth')
                 print("Training interrupted. Model state saved to 'interrupted_model.pth'.")
                 # draw current loss curves
                 plt.figure(figsize=(10, 5))
@@ -538,7 +536,7 @@ if __name__ == "__main__":
                         'scheduler_state_dict': scheduler.state_dict(),
                         'epoch': epoch,
                         'best_val_loss': best_val_loss
-                    }, 'best_model_parallel.pth')
+                    }, 'trained_models/best_model_parallel.pth')
                     print(f"Best model saved at epoch {epoch+1} with Val Loss = {best_val_loss:.6f}")
 
             except KeyboardInterrupt:
@@ -548,7 +546,7 @@ if __name__ == "__main__":
                     'scheduler_state_dict': scheduler.state_dict(),
                     'epoch': epoch,
                     'best_val_loss': best_val_loss
-                }, 'interrupted_model_parallel.pth')
+                }, 'trained_models/interrupted_model_parallel.pth')
                 print("Training interrupted. Model state saved to 'interrupted_model_parallel.pth'.")
                 
                 plt.figure(figsize=(10, 5))

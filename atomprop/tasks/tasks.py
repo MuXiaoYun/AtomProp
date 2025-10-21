@@ -41,7 +41,8 @@ class NodeAttrPrediction:
         """
         Compute metrics for the task.
         In this case, we compute relative accuracy.
+        ra(label, pred) = 1 - (||label - pred||) / ||label||
         """
         return {
-            'relative_accuracy': (self.preds == self.labels).sum().item() / len(self.labels)
+            'relative_accuracy': 1 - torch.mean(torch.norm(self.labels - self.preds) / (torch.norm(self.labels) + 1e-16)).item()
         }
