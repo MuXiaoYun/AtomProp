@@ -5,6 +5,7 @@ import torch
 import torch.nn as nn
 import rdkit.Chem as Chem
 from atomprop.embeddings.AtomEmbedding import BondTypes
+from torch_geometric.data import Data, Batch
 
 class SMILESToInputs:
     """

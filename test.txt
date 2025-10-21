@@ -1,5 +1,0 @@
-Number of atom types: 5
-Atom types: {'H', 'F', 'N', 'O', 'C'}
-Number of bond types: 4
-Bond types: {1.0, 2.0, 3.0, 1.5}
-Maximum number of atoms in a molecule: 12

@@ -11,7 +11,7 @@ import numpy as np
 from tqdm import tqdm
 from torch_geometric.data import Data, Batch
 from torch.nn import DataParallel
-from torch_geometric.nn import DataParallel as PyGDataParallel
+from torch_geometric.nn import DataParallel as GeoDataParallel
 
 backbone = Embedder(num_atom_types=120, embed_dim=512)
 neck = GNN(num_layers=6, embed_dim=512, gnn_type='gcn', JK='last', dropout=0.1)
@@ -19,13 +19,14 @@ head = MLP(input_dim=512, hidden_dim=256, output_dim=157, num_layers=1, dropout=
 task = NodeAttrPrediction(criterion=torch.nn.CrossEntropyLoss())
 
 data_path = "data/nabladft/summary.csv"
-dataset_size = 100000
+dataset_size = -1
 chunk_size = 65536
 max_atom_num = 128
-batch_size = 32
+batch_size = 4096
 
-parallel = True
-gpu_num = 8
+parallel = False
+device = torch.device("cuda:0") if torch.cuda.is_available() else torch.device("cpu")
+device_ids = [0,1,2,3,4,5,6,7]
 
 # Component-specific optimizer and scheduler settings. Adjust cls/kwargs as needed.
 optimizer_configs = {
@@ -107,8 +108,8 @@ def smiles_to_pyg_data(smiles, max_atom_num=None):
     return Data(x=x, edge_index=edge_index, edge_attr=edge_attr, smiles=smiles, mol=mol)
 
 
-class PyGChunkDataLoader:
-    def __init__(self, data_path, split_indices, chunk_size=65536, max_atom_num=128, batch_size=32):
+class PyGChunkDataListLoader:
+    def __init__(self, data_path, split_indices, chunk_size=65536, max_atom_num=128, batch_size=32, device=None):
         self.data_path = data_path
         self.split_indices = split_indices
         self.chunk_size = chunk_size
@@ -118,6 +119,7 @@ class PyGChunkDataLoader:
         self.current_chunk_data = None
         self.current_chunk_start = 0
         self.headers = pd.read_csv(data_path, nrows=0).columns.tolist()
+        self.device = device
         
         self.sorted_indices = np.sort(split_indices)
         
@@ -137,8 +139,7 @@ class PyGChunkDataLoader:
         while len(data_list) < self.batch_size:
             if self.current_chunk_idx >= len(self.sorted_indices):
                 if len(data_list) > 0:
-                    batch = Batch.from_data_list(data_list)
-                    return batch, mols_list
+                    return data_list, mols_list
                 else:
                     raise StopIteration
 
@@ -167,12 +168,14 @@ class PyGChunkDataLoader:
                 self.current_chunk_idx += 1
                 continue
 
+            if self.device is not None:
+                data = data.to(self.device)
+
             data_list.append(data)
             mols_list.append(data.mol)
             self.current_chunk_idx += 1
 
-        batch = Batch.from_data_list(data_list)
-        return batch, mols_list
+        return data_list, mols_list
 
 
 if __name__ == "__main__":
@@ -188,15 +191,11 @@ if __name__ == "__main__":
 
     BondTypes.set_bond_types(["SINGLE", "DOUBLE", "TRIPLE", 'AROMATIC'])
 
-    if parallel:
-        assert torch.cuda.device_count() >= gpu_num, "GPU NUM ERROR!!!"
-        device = torch.device("cuda:0")
-        backbone = DataParallel(backbone, device_ids=list(range(gpu_num)))
-        neck = PyGDataParallel(neck, device_ids=list(range(gpu_num)))
-        head = DataParallel(head, device_ids=list(range(gpu_num)))
-        print(f"Using DataParallel on {gpu_num} GPUs!")
-    else:
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    if parallel: # use all devices in device_ids
+        backbone = DataParallel(backbone, device_ids=device_ids)
+        neck = GeoDataParallel(neck, device_ids=device_ids)
+        head = DataParallel(head, device_ids=device_ids)
+        print(f"Using DataParallel on {len(device_ids)} GPUs!")
     print(f"Using computing device: {device}")
     backbone.to(device)
     neck.to(device)
@@ -236,127 +235,144 @@ if __name__ == "__main__":
 
     criterion = nn.MSELoss()
     
-    train_loader = PyGChunkDataLoader(
-        data_path=data_path,
-        split_indices=train_indices,
-        chunk_size=chunk_size,
-        max_atom_num=max_atom_num,
-        batch_size=batch_size
-    )
-    val_loader = PyGChunkDataLoader(
-        data_path=data_path,
-        split_indices=val_indices,
-        chunk_size=chunk_size,
-        max_atom_num=max_atom_num,
-        batch_size=batch_size
-    )
-    
-    num_epochs = 100
-    best_val_loss = float('inf')
-    train_losses = []
-    val_losses = []
-    
-    for epoch in range(num_epochs):
-        try:
-            backbone.train()
-            neck.train()
-            head.train()
-            total_train_loss = 0.0
-            train_sample_count = 0
-            
-            train_pbar = tqdm(enumerate(train_loader), 
-                             total=train_loader.total_batches, 
-                             desc=f"Epoch {epoch+1}/{num_epochs} - Training")
-            
-            for batch_idx, (batch_data, mols) in train_pbar:
-                batch_data = batch_data.to(device)
+    if parallel == False:
+        """
+        ----------------------------------------------Training on Single GPU----------------------------------------------
+        """
+        train_loader = PyGChunkDataListLoader(
+            data_path=data_path,
+            split_indices=train_indices,
+            chunk_size=chunk_size,
+            max_atom_num=max_atom_num,
+            batch_size=batch_size,
+        )
+        val_loader = PyGChunkDataListLoader(
+            data_path=data_path,
+            split_indices=val_indices,
+            chunk_size=chunk_size,
+            max_atom_num=max_atom_num,
+            batch_size=batch_size,
+        )
+        
+        num_epochs = 100
+        best_val_loss = float('inf')
+        train_losses = []
+        val_losses = []
+        
+        for epoch in range(num_epochs):
+            try:
+                backbone.train()
+                neck.train()
+                head.train()
+                total_train_loss = 0.0
+                train_sample_count = 0
                 
-                for opt in optimizers.values():
-                    opt.zero_grad()
+                train_pbar = tqdm(enumerate(train_loader), 
+                                total=train_loader.total_batches, 
+                                desc=f"Epoch {epoch+1}/{num_epochs} - Training")
                 
-                # size of batch_data.x is [B_N, 1]
-                atom_emb = backbone(batch_data.x).squeeze() # size [B_N, embed_dim]
-
-                embedded_data = Data(x=atom_emb, edge_index=batch_data.edge_index)
-                graph_emb = neck(embedded_data)
-                graph_emb = graph_emb.view(-1, graph_emb.size(-1))
-
-                outputs = head(graph_emb)
-                outputs = outputs.view(-1, outputs.size(-1))
-                
-                task.set_pred(outputs)
-                task.run_label(mols, device)
-                loss = task.compute_loss()
-                
-                loss.backward()
-                for opt in optimizers.values():
-                    opt.step()
-                
-                if batch_idx == train_loader.total_batches - 1:
-                    metrics = task.get_metrics()
-                    print(f"Batch {batch_idx+1}/{train_loader.total_batches} Metrics: {metrics}")
-                
-                batch_size_current = len(mols)
-                total_train_loss += loss.item() * batch_size_current
-                train_sample_count += batch_size_current
-                
-                train_pbar.set_postfix({"Batch Loss": f"{loss.item():.6f}"})
-            
-            avg_train_loss = total_train_loss / train_sample_count
-            train_losses.append(avg_train_loss)
-
-            backbone.eval()
-            neck.eval()
-            head.eval()
-
-            total_val_loss = 0.0
-            val_sample_count = 0
-            
-            val_pbar = tqdm(enumerate(val_loader),
-                                total=val_loader.total_batches, 
-                                desc=f"Epoch {epoch+1}/{num_epochs} - Validation")
-            
-            with torch.no_grad():
-                for batch_idx, (batch_data, mols) in val_pbar:
-                    batch_data = batch_data.to(device)
+                for batch_idx, (data_list, mols) in train_pbar:
+                    batch_data = Batch.from_data_list(data_list).to(device)
                     
-                    # follows the pattern in training loop
-                    atom_emb = backbone(batch_data.x).squeeze()
+                    for opt in optimizers.values():
+                        opt.zero_grad()
                     
+                    # size of batch_data.x is [B_N, 1]
+                    atom_emb = backbone(batch_data.x).squeeze() # size [B_N, embed_dim]
+
                     embedded_data = Data(x=atom_emb, edge_index=batch_data.edge_index)
+
                     graph_emb = neck(embedded_data)
                     graph_emb = graph_emb.view(-1, graph_emb.size(-1))
 
                     outputs = head(graph_emb)
                     outputs = outputs.view(-1, outputs.size(-1))
-
+                    
                     task.set_pred(outputs)
                     task.run_label(mols, device)
                     loss = task.compute_loss()
                     
-                    if batch_idx == val_loader.total_batches - 1:
+                    loss.backward()
+                    for opt in optimizers.values():
+                        opt.step()
+                    
+                    if batch_idx == train_loader.total_batches - 1:
                         metrics = task.get_metrics()
-                        print(f"Batch {batch_idx+1}/{val_loader.total_batches} Metrics: {metrics}")
+                        print(f"Batch {batch_idx+1}/{train_loader.total_batches} Metrics: {metrics}")
                     
                     batch_size_current = len(mols)
-                    total_val_loss += loss.item() * batch_size_current
-                    val_sample_count += batch_size_current
+                    total_train_loss += loss.item() * batch_size_current
+                    train_sample_count += batch_size_current
                     
-                    val_pbar.set_postfix({"Batch Loss": f"{loss.item():.6f}"})
-            
-            avg_val_loss = total_val_loss / val_sample_count
-            val_losses.append(avg_val_loss)
-            
-            for name, scheduler in schedulers.items():
-                if isinstance(scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
-                    scheduler.step(avg_val_loss)
-                else:
-                    scheduler.step()
-            
-            print(f"Epoch {epoch+1}/{num_epochs} Summary: Train Loss = {avg_train_loss:.6f}, Val Loss = {avg_val_loss:.6f}")
-            
-            if avg_val_loss < best_val_loss:
-                best_val_loss = avg_val_loss
+                    train_pbar.set_postfix({"Batch Loss": f"{loss.item():.6f}"})
+                
+                avg_train_loss = total_train_loss / train_sample_count
+                train_losses.append(avg_train_loss)
+
+                backbone.eval()
+                neck.eval()
+                head.eval()
+
+                total_val_loss = 0.0
+                val_sample_count = 0
+                
+                val_pbar = tqdm(enumerate(val_loader),
+                                    total=val_loader.total_batches, 
+                                    desc=f"Epoch {epoch+1}/{num_epochs} - Validation")
+                
+                with torch.no_grad():
+                    for batch_idx, (data_list, mols) in val_pbar:
+                        batch_data = Batch.from_data_list(data_list).to(device)
+                        
+                        # follows the pattern in training loop
+                        atom_emb = backbone(batch_data.x).squeeze()
+                        
+                        embedded_data = Data(x=atom_emb, edge_index=batch_data.edge_index)
+                        graph_emb = neck(embedded_data)
+                        graph_emb = graph_emb.view(-1, graph_emb.size(-1))
+
+                        outputs = head(graph_emb)
+                        outputs = outputs.view(-1, outputs.size(-1))
+
+                        task.set_pred(outputs)
+                        task.run_label(mols, device)
+                        loss = task.compute_loss()
+                        
+                        if batch_idx == val_loader.total_batches - 1:
+                            metrics = task.get_metrics()
+                            print(f"Batch {batch_idx+1}/{val_loader.total_batches} Metrics: {metrics}")
+                        
+                        batch_size_current = len(mols)
+                        total_val_loss += loss.item() * batch_size_current
+                        val_sample_count += batch_size_current
+                        
+                        val_pbar.set_postfix({"Batch Loss": f"{loss.item():.6f}"})
+                
+                avg_val_loss = total_val_loss / val_sample_count
+                val_losses.append(avg_val_loss)
+                
+                for name, scheduler in schedulers.items():
+                    if isinstance(scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
+                        scheduler.step(avg_val_loss)
+                    else:
+                        scheduler.step()
+                
+                print(f"Epoch {epoch+1}/{num_epochs} Summary: Train Loss = {avg_train_loss:.6f}, Val Loss = {avg_val_loss:.6f}")
+                
+                if avg_val_loss < best_val_loss:
+                    best_val_loss = avg_val_loss
+                    torch.save({
+                        'backbone_state_dict': backbone.state_dict(),
+                        'neck_state_dict': neck.state_dict(),
+                        'head_state_dict': head.state_dict(),
+                        'optimizer_state_dict': {name: opt.state_dict() for name, opt in optimizers.items()},
+                        'scheduler_state_dict': {name: sch.state_dict() for name, sch in schedulers.items()},
+                        'epoch': epoch,
+                        'best_val_loss': best_val_loss
+                    }, 'best_model.pth')
+                    print(f"Best model saved at epoch {epoch+1} with Val Loss = {best_val_loss:.6f}")
+
+            except KeyboardInterrupt:
                 torch.save({
                     'backbone_state_dict': backbone.state_dict(),
                     'neck_state_dict': neck.state_dict(),
@@ -365,31 +381,208 @@ if __name__ == "__main__":
                     'scheduler_state_dict': {name: sch.state_dict() for name, sch in schedulers.items()},
                     'epoch': epoch,
                     'best_val_loss': best_val_loss
-                }, 'best_model.pth')
-                print(f"Best model saved at epoch {epoch+1} with Val Loss = {best_val_loss:.6f}")
-
-        except KeyboardInterrupt:
-            torch.save({
-                'backbone_state_dict': backbone.state_dict(),
-                'neck_state_dict': neck.state_dict(),
-                'head_state_dict': head.state_dict(),
-                'optimizer_state_dict': {name: opt.state_dict() for name, opt in optimizers.items()},
-                'scheduler_state_dict': {name: sch.state_dict() for name, sch in schedulers.items()},
-                'epoch': epoch,
-                'best_val_loss': best_val_loss
-            }, 'interrupted_model.pth')
-            print("Training interrupted. Model state saved to 'interrupted_model.pth'.")
-            break
+                }, 'interrupted_model.pth')
+                print("Training interrupted. Model state saved to 'interrupted_model.pth'.")
+                # draw current loss curves
+                plt.figure(figsize=(10, 5))
+                plt.plot(range(1, len(train_losses) + 1), train_losses, label='Training Loss', linewidth=2)
+                plt.plot(range(1, len(val_losses) + 1), val_losses, label='Validation Loss', linewidth=2)
+                plt.xlabel('Epochs', fontsize=12)
+                plt.ylabel('MSE Loss', fontsize=12)
+                plt.yscale('log')
+                plt.title('Training & Validation Loss Curves', fontsize=14)
+                plt.legend(fontsize=10)
+                plt.grid(True, alpha=0.3)
+                plt.savefig('interrupted_loss_curve.png', dpi=300, bbox_inches='tight')
+                break
             
     
-    plt.figure(figsize=(10, 5))
-    plt.plot(range(1, len(train_losses) + 1), train_losses, label='Training Loss', linewidth=2)
-    plt.plot(range(1, len(val_losses) + 1), val_losses, label='Validation Loss', linewidth=2)
-    plt.xlabel('Epochs', fontsize=12)
-    plt.ylabel('MSE Loss', fontsize=12)
-    plt.yscale('log')
-    plt.title('Training & Validation Loss Curves', fontsize=14)
-    plt.legend(fontsize=10)
-    plt.grid(True, alpha=0.3)
-    plt.savefig('loss_curve.png', dpi=300, bbox_inches='tight')
-    plt.show()
+        plt.figure(figsize=(10, 5))
+        plt.plot(range(1, len(train_losses) + 1), train_losses, label='Training Loss', linewidth=2)
+        plt.plot(range(1, len(val_losses) + 1), val_losses, label='Validation Loss', linewidth=2)
+        plt.xlabel('Epochs', fontsize=12)
+        plt.ylabel('MSE Loss', fontsize=12)
+        plt.yscale('log')
+        plt.title('Training & Validation Loss Curves', fontsize=14)
+        plt.legend(fontsize=10)
+        plt.grid(True, alpha=0.3)
+        plt.savefig('loss_curve.png', dpi=300, bbox_inches='tight')
+        plt.show()
+
+    elif parallel == True:
+        """
+        ----------------------------------------------Training on Multiple GPUs----------------------------------------------
+        """
+        print("Starting parallel training...")
+        
+        train_loader = PyGChunkDataListLoader(
+            data_path=data_path,
+            split_indices=train_indices,
+            chunk_size=chunk_size,
+            max_atom_num=max_atom_num,
+            batch_size=batch_size,
+        )
+        val_loader = PyGChunkDataListLoader(
+            data_path=data_path,
+            split_indices=val_indices,
+            chunk_size=chunk_size,
+            max_atom_num=max_atom_num,
+            batch_size=batch_size,
+        )
+        
+        num_epochs = 100
+        best_val_loss = float('inf')
+        train_losses = []
+        val_losses = []
+        
+        for epoch in range(num_epochs):
+            try:
+                backbone.train()
+                neck.train()
+                head.train()
+                total_train_loss = 0.0
+                train_sample_count = 0
+                
+                train_pbar = tqdm(enumerate(train_loader), 
+                                total=train_loader.total_batches, 
+                                desc=f"Epoch {epoch+1}/{num_epochs} - Training")
+                
+                for batch_idx, (data_list, mols) in train_pbar: 
+                    batch_data = Batch.from_data_list(data_list)
+                    
+                    for opt in optimizers.values():
+                        opt.zero_grad()
+                    
+                    atom_emb = backbone(batch_data.x).squeeze()
+
+                    for i, data in enumerate(data_list):
+                        data.x = atom_emb[batch_data.ptr[i]:batch_data.ptr[i+1]].cpu()
+
+                    graph_emb = neck(data_list)
+                    graph_emb = graph_emb.view(-1, graph_emb.size(-1))
+
+                    outputs = head(graph_emb)
+                    outputs = outputs.view(-1, outputs.size(-1))
+                    
+                    task.set_pred(outputs)
+                    task.run_label(mols, device)
+                    loss = task.compute_loss()
+                    
+                    loss.backward()
+                    for opt in optimizers.values():
+                        opt.step()
+                    
+                    if batch_idx == train_loader.total_batches - 1:
+                        metrics = task.get_metrics()
+                        print(f"Batch {batch_idx+1}/{train_loader.total_batches} Metrics: {metrics}")
+                    
+                    batch_size_current = len(mols)
+                    total_train_loss += loss.item() * batch_size_current
+                    train_sample_count += batch_size_current
+                    
+                    train_pbar.set_postfix({"Batch Loss": f"{loss.item():.6f}"})
+                
+                avg_train_loss = total_train_loss / train_sample_count
+                train_losses.append(avg_train_loss)
+
+                backbone.eval()
+                neck.eval()
+                head.eval()
+
+                total_val_loss = 0.0
+                val_sample_count = 0
+                
+                val_pbar = tqdm(enumerate(val_loader),
+                                    total=val_loader.total_batches, 
+                                    desc=f"Epoch {epoch+1}/{num_epochs} - Validation")
+                
+                with torch.no_grad():
+                    for batch_idx, (data_list, mols) in val_pbar:
+                        batch_data = Batch.from_data_list(data_list)
+
+                        # follows the pattern in training loop
+                        atom_emb = backbone(batch_data.x).squeeze()
+                        for i, data in enumerate(data_list):
+                            data.x = atom_emb[batch_data.ptr[i]:batch_data.ptr[i+1]].cpu()
+
+                        graph_emb = neck(data_list) 
+                        graph_emb = graph_emb.view(-1, graph_emb.size(-1))
+
+                        outputs = head(graph_emb)
+                        outputs = outputs.view(-1, outputs.size(-1))
+
+                        task.set_pred(outputs)
+                        task.run_label(mols, device)
+                        loss = task.compute_loss()
+                        
+                        if batch_idx == val_loader.total_batches - 1:
+                            metrics = task.get_metrics()
+                            print(f"Batch {batch_idx+1}/{val_loader.total_batches} Metrics: {metrics}")
+                        
+                        batch_size_current = len(mols)
+                        total_val_loss += loss.item() * batch_size_current
+                        val_sample_count += batch_size_current
+                        
+                        val_pbar.set_postfix({"Batch Loss": f"{loss.item():.6f}"})
+                
+                avg_val_loss = total_val_loss / val_sample_count
+                val_losses.append(avg_val_loss)
+                
+                for name, scheduler in schedulers.items():
+                    if isinstance(scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
+                        scheduler.step(avg_val_loss)
+                    else:
+                        scheduler.step()
+                
+                print(f"Epoch {epoch+1}/{num_epochs} Summary: Train Loss = {avg_train_loss:.6f}, Val Loss = {avg_val_loss:.6f}")
+                
+                if avg_val_loss < best_val_loss:
+                    best_val_loss = avg_val_loss
+                    torch.save({
+                        'backbone_state_dict': backbone.module.state_dict(),
+                        'neck_state_dict': neck.module.state_dict(),
+                        'head_state_dict': head.module.state_dict(),
+                        'optimizer_state_dict': {name: opt.state_dict() for name, opt in optimizers.items()},
+                        'scheduler_state_dict': {name: sch.state_dict() for name, sch in schedulers.items()},
+                        'epoch': epoch,
+                        'best_val_loss': best_val_loss
+                    }, 'best_model.pth')
+                    print(f"Best model saved at epoch {epoch+1} with Val Loss = {best_val_loss:.6f}")
+
+            except KeyboardInterrupt:
+                torch.save({
+                    'backbone_state_dict': backbone.module.state_dict(),
+                    'neck_state_dict': neck.module.state_dict(),
+                    'head_state_dict': head.module.state_dict(),
+                    'optimizer_state_dict': {name: opt.state_dict() for name, opt in optimizers.items()},
+                    'scheduler_state_dict': {name: sch.state_dict() for name, sch in schedulers.items()},
+                    'epoch': epoch,
+                    'best_val_loss': best_val_loss
+                }, 'interrupted_model.pth')
+                print("Training interrupted. Model state saved to 'interrupted_model.pth'.")
+                # draw current loss curves
+                plt.figure(figsize=(10, 5))
+                plt.plot(range(1, len(train_losses) + 1), train_losses, label='Training Loss', linewidth=2)
+                plt.plot(range(1, len(val_losses) + 1), val_losses, label='Validation Loss', linewidth=2)
+                plt.xlabel('Epochs', fontsize=12)
+                plt.ylabel('MSE Loss', fontsize=12)
+                plt.yscale('log')
+                plt.title('Training & Validation Loss Curves', fontsize=14)
+                plt.legend(fontsize=10)
+                plt.grid(True, alpha=0.3)
+                plt.savefig('interrupted_loss_curve.png', dpi=300, bbox_inches='tight')
+                break
+            
+    
+        plt.figure(figsize=(10, 5))
+        plt.plot(range(1, len(train_losses) + 1), train_losses, label='Training Loss', linewidth=2)
+        plt.plot(range(1, len(val_losses) + 1), val_losses, label='Validation Loss', linewidth=2)
+        plt.xlabel('Epochs', fontsize=12)
+        plt.ylabel('MSE Loss', fontsize=12)
+        plt.yscale('log')
+        plt.title('Training & Validation Loss Curves', fontsize=14)
+        plt.legend(fontsize=10)
+        plt.grid(True, alpha=0.3)
+        plt.savefig('loss_curve.png', dpi=300, bbox_inches='tight')
+        plt.show()
+                    
