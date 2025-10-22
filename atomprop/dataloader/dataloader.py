@@ -132,25 +132,3 @@ class SDFToInputs:
             else:
                 raise ValueError(f"Invalid edge_output_type: {edge_output_type}. Must be 'adj_matrix' or 'edge_list'.")
         return results
-
-class MoleculeDataset(torch.utils.data.Dataset):
-    """
-    A PyTorch dataset for molecules.
-    :param molecules: A list of tuples, each containing the atom embeddings, edges (adj matrix), and label.
-    :param min_label: The minimum label value for normalization (optional).
-    :param max_label: The maximum label value for normalization (optional).
-    """
-    def __init__(self, molecules, min_label=None, max_label=None):
-        self.molecules = molecules
-        self.min_label = min_label
-        self.max_label = max_label
-
-    def __len__(self):
-        return len(self.molecules)
-
-    def __getitem__(self, idx):
-        if self.min_label is not None and self.max_label is not None:
-            label = (self.molecules[idx][2] - self.min_label) / (self.max_label - self.min_label)
-            return self.molecules[idx][0], self.molecules[idx][1], label
-        else:
-            return self.molecules[idx][0], self.molecules[idx][1], self.molecules[idx][2]

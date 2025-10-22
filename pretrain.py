@@ -1,7 +1,8 @@
-from atomprop.tasks.tasks import NodeAttrPrediction
+from atomprop.tasks.tasks import NodeAttrPrediction, MaskedNodePrediction
 from atomprop.dataloader.dataloader import SMILESToInputs
 from atomprop.models.GNNs import Embedder, GNN
 from atomprop.utils.mlp import MLP
+from atomprop.utils.mask import MolGraphMask
 from atomprop.embeddings.AtomEmbedding import BondTypes
 import matplotlib.pyplot as plt
 import pandas as pd
@@ -10,13 +11,16 @@ import torch.nn as nn
 import numpy as np
 from tqdm import tqdm
 from torch_geometric.data import Data, Batch
-from torch.nn import DataParallel
-from torch_geometric.nn import DataParallel as GeoDataParallel
 
-backbone = Embedder(num_atom_types=120, embed_dim=512)
-neck = GNN(num_layers=6, embed_dim=512, gnn_type='gcn', JK='last', dropout=0.1)
-head = MLP(input_dim=512, hidden_dim=256, output_dim=157, num_layers=1, dropout=0.1)
-task = NodeAttrPrediction(criterion=torch.nn.CrossEntropyLoss())
+embed_dim = 512
+
+backbone = Embedder(num_atom_types=120, embed_dim=embed_dim)
+neck = GNN(num_layers=6, embed_dim=embed_dim, gnn_type='gcn', JK='last', dropout=0.1)
+head = MLP(input_dim=512, hidden_dim=256, output_dim=157, num_layers=1, dropout=0.1) # used for atom attr pred
+head1 = MLP(input_dim=512, hidden_dim=256, output_dim=512, num_layers=2, dropout=0.1) # used for masked atom pred
+
+task = NodeAttrPrediction()
+task1 = MaskedNodePrediction()
 
 data_path = "data/nabladft/summary.csv"
 dataset_size = -1
@@ -25,9 +29,7 @@ max_atom_num = 128
 batch_size = 1024
 num_epochs = 4
 
-parallel = True
 device = torch.device("cuda:0") if torch.cuda.is_available() else torch.device("cpu")
-device_ids = [0,1,2,3,4,5,6,7]
 
 # Component-specific optimizer and scheduler settings. Adjust cls/kwargs as needed.
 optimizer_configs = {
@@ -40,6 +42,10 @@ optimizer_configs = {
         "kwargs": {"lr": 1e-4, "weight_decay": 5e-4}
     },
     "head": {
+        "cls": torch.optim.Adam,
+        "kwargs": {"lr": 2e-4, "weight_decay": 1e-6}
+    },
+    "head1": {
         "cls": torch.optim.Adam,
         "kwargs": {"lr": 2e-4, "weight_decay": 1e-6}
     }
@@ -55,6 +61,10 @@ scheduler_configs = {
         "kwargs": {"T_max": 20, "eta_min": 1e-6}
     },
     "head": {
+        "cls": torch.optim.lr_scheduler.StepLR,
+        "kwargs": {"step_size": 10, "gamma": 0.5}
+    },
+    "head1": {
         "cls": torch.optim.lr_scheduler.StepLR,
         "kwargs": {"step_size": 10, "gamma": 0.5}
     }
@@ -107,24 +117,6 @@ def smiles_to_pyg_data(smiles, max_atom_num=None):
         edge_attr = torch.ones(edges.size(1), 1) if edges.dim() == 2 else torch.ones(1, 1)
     
     return Data(x=x, edge_index=edge_index, edge_attr=edge_attr, smiles=smiles, mol=mol)
-
-class UnifiedModelForParallelTraining(nn.Module):
-    def __init__(self, backbone, neck, head):
-        super(UnifiedModelForParallelTraining, self).__init__()
-        self.backbone = backbone
-        self.neck = neck
-        self.head = head
-
-    def forward(self, data):
-        atom_emb = self.backbone(data.x).squeeze()
-
-        graph_emb = self.neck(Data(x=atom_emb, edge_index=data.edge_index))
-        graph_emb = graph_emb.view(-1, graph_emb.size(-1))
-
-        outputs = self.head(graph_emb)
-        outputs = outputs.view(-1, outputs.size(-1))
-
-        return outputs
 
 class PyGChunkDataListLoader:
     def __init__(self, data_path, split_indices, chunk_size=65536, max_atom_num=128, batch_size=32, device=None):
@@ -209,13 +201,11 @@ if __name__ == "__main__":
 
     BondTypes.set_bond_types(["SINGLE", "DOUBLE", "TRIPLE", 'AROMATIC'])
 
-    if parallel: # use all devices in device_ids
-        ufm = GeoDataParallel(UnifiedModelForParallelTraining(backbone, neck, head), device_ids=device_ids)
-        print(f"Using DataParallel on {len(device_ids)} GPUs!")
     print(f"Using computing device: {device}")
     backbone.to(device)
     neck.to(device)
     head.to(device)
+    head1.to(device)
 
     #print info of 3 networks, especially parameter num
     print(backbone.__class__.__name__, f"Parameters: {sum(p.numel() for p in backbone.parameters() if p.requires_grad)}")
@@ -245,146 +235,145 @@ if __name__ == "__main__":
             sched_cls = sched_conf.get("cls")
             sched_kwargs = sched_conf.get("kwargs", {})
             schedulers[name] = sched_cls(optimizers[name], **sched_kwargs)
-
-    criterion = nn.MSELoss()
     
-    if parallel == False:
-        """
-        ----------------------------------------------Training on Single GPU----------------------------------------------
-        """
-        train_loader = PyGChunkDataListLoader(
-            data_path=data_path,
-            split_indices=train_indices,
-            chunk_size=chunk_size,
-            max_atom_num=max_atom_num,
-            batch_size=batch_size,
-        )
-        val_loader = PyGChunkDataListLoader(
-            data_path=data_path,
-            split_indices=val_indices,
-            chunk_size=chunk_size,
-            max_atom_num=max_atom_num,
-            batch_size=batch_size,
-        )
-        
-        best_val_loss = float('inf')
-        train_losses = []
-        val_losses = []
-        
-        for epoch in range(num_epochs):
-            try:
-                backbone.train()
-                neck.train()
-                head.train()
-                total_train_loss = 0.0
-                train_sample_count = 0
+    """
+    ----------------------------------------------Training on Single GPU----------------------------------------------
+    """
+    train_loader = PyGChunkDataListLoader(
+        data_path=data_path,
+        split_indices=train_indices,
+        chunk_size=chunk_size,
+        max_atom_num=max_atom_num,
+        batch_size=batch_size,
+    )
+    val_loader = PyGChunkDataListLoader(
+        data_path=data_path,
+        split_indices=val_indices,
+        chunk_size=chunk_size,
+        max_atom_num=max_atom_num,
+        batch_size=batch_size,
+    )
+    
+    best_val_loss = float('inf')
+    train_losses = []
+    val_losses = []
+    
+    for epoch in range(num_epochs):
+        try:
+            backbone.train()
+            neck.train()
+            head.train()
+            total_train_loss = 0.0
+            train_sample_count = 0
+            
+            train_pbar = tqdm(enumerate(train_loader), 
+                            total=train_loader.total_batches, 
+                            desc=f"Epoch {epoch+1}/{num_epochs} - Training")
+            
+            for batch_idx, (data_list, mols) in train_pbar:
+                batch_data = Batch.from_data_list(data_list).to(device)
                 
-                train_pbar = tqdm(enumerate(train_loader), 
-                                total=train_loader.total_batches, 
-                                desc=f"Epoch {epoch+1}/{num_epochs} - Training")
+                for opt in optimizers.values():
+                    opt.zero_grad()
                 
-                for batch_idx, (data_list, mols) in train_pbar:
+                # size of batch_data.x is [B_N, 1]
+                atom_emb = backbone(batch_data.x).squeeze() # size [B_N, embed_dim]
+
+                embedded_data = Data(x=atom_emb, edge_index=batch_data.edge_index)
+
+                graph_emb = neck(embedded_data)
+                graph_emb = graph_emb.view(-1, graph_emb.size(-1))
+
+                outputs = head(graph_emb)
+                outputs = outputs.view(-1, outputs.size(-1))
+                
+                task.set_pred(outputs)
+                task.run_label(mols, device)
+                loss = task.compute_loss()
+                
+                mask_indices = MolGraphMask.select_mask_indices(batch_data.x)
+                masked_atom_emb = MolGraphMask.mask_atoms(atom_emb, mask_indices, torch.zeros(embed_dim), modify=False)
+
+                masked_embedded_data = Data(x=masked_atom_emb, edge_index=batch_data.edge_index)
+                graph_emb1 = neck(masked_embedded_data)
+                graph_emb1 = graph_emb1.view(-1, graph_emb1.size(-1))[mask_indices]
+
+                outputs1 = head1(graph_emb1)
+                outputs1 = outputs1.view(-1, outputs1.size(-1))
+
+                task1.set_pred(outputs1)
+                task1.set_label(graph_emb[mask_indices])
+                loss = task1.compute_loss()
+
+                loss.backward()
+                for opt in optimizers.values():
+                    opt.step()
+                
+                if batch_idx == train_loader.total_batches - 1:
+                    metrics = task.get_metrics()
+                    print(f"Batch {batch_idx+1}/{train_loader.total_batches} Metrics: {metrics}")
+                
+                batch_size_current = len(mols)
+                total_train_loss += loss.item() * batch_size_current
+                train_sample_count += batch_size_current
+                
+                train_pbar.set_postfix({"Batch Loss": f"{loss.item():.6f}"})
+            
+            avg_train_loss = total_train_loss / train_sample_count
+            train_losses.append(avg_train_loss)
+
+            backbone.eval()
+            neck.eval()
+            head.eval()
+
+            total_val_loss = 0.0
+            val_sample_count = 0
+            
+            val_pbar = tqdm(enumerate(val_loader),
+                                total=val_loader.total_batches, 
+                                desc=f"Epoch {epoch+1}/{num_epochs} - Validation")
+            
+            with torch.no_grad():
+                for batch_idx, (data_list, mols) in val_pbar:
                     batch_data = Batch.from_data_list(data_list).to(device)
                     
-                    for opt in optimizers.values():
-                        opt.zero_grad()
+                    # follows the pattern in training loop
+                    atom_emb = backbone(batch_data.x).squeeze()
                     
-                    # size of batch_data.x is [B_N, 1]
-                    atom_emb = backbone(batch_data.x).squeeze() # size [B_N, embed_dim]
-
                     embedded_data = Data(x=atom_emb, edge_index=batch_data.edge_index)
-
                     graph_emb = neck(embedded_data)
                     graph_emb = graph_emb.view(-1, graph_emb.size(-1))
 
                     outputs = head(graph_emb)
                     outputs = outputs.view(-1, outputs.size(-1))
-                    
+
                     task.set_pred(outputs)
                     task.run_label(mols, device)
                     loss = task.compute_loss()
                     
-                    loss.backward()
-                    for opt in optimizers.values():
-                        opt.step()
-                    
-                    if batch_idx == train_loader.total_batches - 1:
+                    if batch_idx == val_loader.total_batches - 1:
                         metrics = task.get_metrics()
-                        print(f"Batch {batch_idx+1}/{train_loader.total_batches} Metrics: {metrics}")
+                        print(f"Batch {batch_idx+1}/{val_loader.total_batches} Metrics: {metrics}")
                     
                     batch_size_current = len(mols)
-                    total_train_loss += loss.item() * batch_size_current
-                    train_sample_count += batch_size_current
+                    total_val_loss += loss.item() * batch_size_current
+                    val_sample_count += batch_size_current
                     
-                    train_pbar.set_postfix({"Batch Loss": f"{loss.item():.6f}"})
-                
-                avg_train_loss = total_train_loss / train_sample_count
-                train_losses.append(avg_train_loss)
-
-                backbone.eval()
-                neck.eval()
-                head.eval()
-
-                total_val_loss = 0.0
-                val_sample_count = 0
-                
-                val_pbar = tqdm(enumerate(val_loader),
-                                    total=val_loader.total_batches, 
-                                    desc=f"Epoch {epoch+1}/{num_epochs} - Validation")
-                
-                with torch.no_grad():
-                    for batch_idx, (data_list, mols) in val_pbar:
-                        batch_data = Batch.from_data_list(data_list).to(device)
-                        
-                        # follows the pattern in training loop
-                        atom_emb = backbone(batch_data.x).squeeze()
-                        
-                        embedded_data = Data(x=atom_emb, edge_index=batch_data.edge_index)
-                        graph_emb = neck(embedded_data)
-                        graph_emb = graph_emb.view(-1, graph_emb.size(-1))
-
-                        outputs = head(graph_emb)
-                        outputs = outputs.view(-1, outputs.size(-1))
-
-                        task.set_pred(outputs)
-                        task.run_label(mols, device)
-                        loss = task.compute_loss()
-                        
-                        if batch_idx == val_loader.total_batches - 1:
-                            metrics = task.get_metrics()
-                            print(f"Batch {batch_idx+1}/{val_loader.total_batches} Metrics: {metrics}")
-                        
-                        batch_size_current = len(mols)
-                        total_val_loss += loss.item() * batch_size_current
-                        val_sample_count += batch_size_current
-                        
-                        val_pbar.set_postfix({"Batch Loss": f"{loss.item():.6f}"})
-                
-                avg_val_loss = total_val_loss / val_sample_count
-                val_losses.append(avg_val_loss)
-                
-                for name, scheduler in schedulers.items():
-                    if isinstance(scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
-                        scheduler.step(avg_val_loss)
-                    else:
-                        scheduler.step()
-                
-                print(f"Epoch {epoch+1}/{num_epochs} Summary: Train Loss = {avg_train_loss:.6f}, Val Loss = {avg_val_loss:.6f}")
-                
-                if avg_val_loss < best_val_loss:
-                    best_val_loss = avg_val_loss
-                    torch.save({
-                        'backbone_state_dict': backbone.state_dict(),
-                        'neck_state_dict': neck.state_dict(),
-                        'head_state_dict': head.state_dict(),
-                        'optimizer_state_dict': {name: opt.state_dict() for name, opt in optimizers.items()},
-                        'scheduler_state_dict': {name: sch.state_dict() for name, sch in schedulers.items()},
-                        'epoch': epoch,
-                        'best_val_loss': best_val_loss
-                    }, 'trained_models/best_model.pth')
-                    print(f"Best model saved at epoch {epoch+1} with Val Loss = {best_val_loss:.6f}")
-
-            except KeyboardInterrupt:
+                    val_pbar.set_postfix({"Batch Loss": f"{loss.item():.6f}"})
+            
+            avg_val_loss = total_val_loss / val_sample_count
+            val_losses.append(avg_val_loss)
+            
+            for name, scheduler in schedulers.items():
+                if isinstance(scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
+                    scheduler.step(avg_val_loss)
+                else:
+                    scheduler.step()
+            
+            print(f"Epoch {epoch+1}/{num_epochs} Summary: Train Loss = {avg_train_loss:.6f}, Val Loss = {avg_val_loss:.6f}")
+            
+            if avg_val_loss < best_val_loss:
+                best_val_loss = avg_val_loss
                 torch.save({
                     'backbone_state_dict': backbone.state_dict(),
                     'neck_state_dict': neck.state_dict(),
@@ -393,182 +382,42 @@ if __name__ == "__main__":
                     'scheduler_state_dict': {name: sch.state_dict() for name, sch in schedulers.items()},
                     'epoch': epoch,
                     'best_val_loss': best_val_loss
-                }, 'trained_models/interrupted_model.pth')
-                print("Training interrupted. Model state saved to 'interrupted_model.pth'.")
-                # draw current loss curves
-                plt.figure(figsize=(10, 5))
-                plt.plot(range(1, len(train_losses) + 1), train_losses, label='Training Loss', linewidth=2)
-                plt.plot(range(1, len(val_losses) + 1), val_losses, label='Validation Loss', linewidth=2)
-                plt.xlabel('Epochs', fontsize=12)
-                plt.ylabel('MSE Loss', fontsize=12)
-                plt.yscale('log')
-                plt.title('Training & Validation Loss Curves', fontsize=14)
-                plt.legend(fontsize=10)
-                plt.grid(True, alpha=0.3)
-                plt.savefig('interrupted_loss_curve.png', dpi=300, bbox_inches='tight')
-                break
-            
+                }, 'trained_models/best_model.pth')
+                print(f"Best model saved at epoch {epoch+1} with Val Loss = {best_val_loss:.6f}")
+
+        except KeyboardInterrupt:
+            torch.save({
+                'backbone_state_dict': backbone.state_dict(),
+                'neck_state_dict': neck.state_dict(),
+                'head_state_dict': head.state_dict(),
+                'optimizer_state_dict': {name: opt.state_dict() for name, opt in optimizers.items()},
+                'scheduler_state_dict': {name: sch.state_dict() for name, sch in schedulers.items()},
+                'epoch': epoch,
+                'best_val_loss': best_val_loss
+            }, 'trained_models/interrupted_model.pth')
+            print("Training interrupted. Model state saved to 'interrupted_model.pth'.")
+            # draw current loss curves
+            plt.figure(figsize=(10, 5))
+            plt.plot(range(1, len(train_losses) + 1), train_losses, label='Training Loss', linewidth=2)
+            plt.plot(range(1, len(val_losses) + 1), val_losses, label='Validation Loss', linewidth=2)
+            plt.xlabel('Epochs', fontsize=12)
+            plt.ylabel('MSE Loss', fontsize=12)
+            plt.yscale('log')
+            plt.title('Training & Validation Loss Curves', fontsize=14)
+            plt.legend(fontsize=10)
+            plt.grid(True, alpha=0.3)
+            plt.savefig('interrupted_loss_curve.png', dpi=300, bbox_inches='tight')
+            break
+        
     
-        plt.figure(figsize=(10, 5))
-        plt.plot(range(1, len(train_losses) + 1), train_losses, label='Training Loss', linewidth=2)
-        plt.plot(range(1, len(val_losses) + 1), val_losses, label='Validation Loss', linewidth=2)
-        plt.xlabel('Epochs', fontsize=12)
-        plt.ylabel('MSE Loss', fontsize=12)
-        plt.yscale('log')
-        plt.title('Training & Validation Loss Curves', fontsize=14)
-        plt.legend(fontsize=10)
-        plt.grid(True, alpha=0.3)
-        plt.savefig('loss_curve.png', dpi=300, bbox_inches='tight')
-        plt.show()
-
-    elif parallel == True:
-        """
-        ----------------------------------------------Training on Multiple GPUs----------------------------------------------
-        """
-        print("Starting parallel training...")
-        
-        optimizer = torch.optim.AdamW(
-            ufm.parameters(),
-            lr=1e-4,
-            weight_decay=1e-5
-        )
-        
-        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-            optimizer, T_max=20, eta_min=1e-6
-        )
-        
-        train_loader = PyGChunkDataListLoader(
-            data_path=data_path,
-            split_indices=train_indices,
-            chunk_size=chunk_size,
-            max_atom_num=max_atom_num,
-            batch_size=batch_size,
-        )
-        val_loader = PyGChunkDataListLoader(
-            data_path=data_path,
-            split_indices=val_indices,
-            chunk_size=chunk_size,
-            max_atom_num=max_atom_num,
-            batch_size=batch_size,
-        )
-        
-        num_epochs = 100
-        best_val_loss = float('inf')
-        train_losses = []
-        val_losses = []
-        
-        for epoch in range(num_epochs):
-            try:
-                ufm.train()
-                total_train_loss = 0.0
-                train_sample_count = 0
-                
-                train_pbar = tqdm(enumerate(train_loader), 
-                                total=train_loader.total_batches, 
-                                desc=f"Epoch {epoch+1}/{num_epochs} - Training")
-                
-                for batch_idx, (data_list, mols) in train_pbar: 
-                    
-                    optimizer.zero_grad()
-                    
-                    outputs = ufm(data_list)
-                    outputs = outputs.view(-1, outputs.size(-1))
-                    
-                    task.set_pred(outputs)
-                    task.run_label(mols, device)
-                    loss = task.compute_loss()
-                    
-                    loss.backward()
-                    optimizer.step()
-                    
-                    if batch_idx == train_loader.total_batches - 1:
-                        metrics = task.get_metrics()
-                        print(f"Batch {batch_idx+1}/{train_loader.total_batches} Metrics: {metrics}")
-                    
-                    batch_size_current = len(mols)
-                    total_train_loss += loss.item() * batch_size_current
-                    train_sample_count += batch_size_current
-                    
-                    train_pbar.set_postfix({"Batch Loss": f"{loss.item():.6f}"})
-                
-                avg_train_loss = total_train_loss / train_sample_count
-                train_losses.append(avg_train_loss)
-
-                ufm.eval()
-                total_val_loss = 0.0
-                val_sample_count = 0
-                
-                val_pbar = tqdm(enumerate(val_loader),
-                                    total=val_loader.total_batches, 
-                                    desc=f"Epoch {epoch+1}/{num_epochs} - Validation")
-                
-                with torch.no_grad():
-                    for batch_idx, (data_list, mols) in val_pbar:
-                        outputs = ufm(data_list)
-                        outputs = outputs.view(-1, outputs.size(-1))
-
-                        task.set_pred(outputs)
-                        task.run_label(mols, device)
-                        loss = task.compute_loss()
-                        
-                        if batch_idx == val_loader.total_batches - 1:
-                            metrics = task.get_metrics()
-                            print(f"Batch {batch_idx+1}/{val_loader.total_batches} Metrics: {metrics}")
-                        
-                        batch_size_current = len(mols)
-                        total_val_loss += loss.item() * batch_size_current
-                        val_sample_count += batch_size_current
-                        
-                        val_pbar.set_postfix({"Batch Loss": f"{loss.item():.6f}"})
-                
-                avg_val_loss = total_val_loss / val_sample_count
-                val_losses.append(avg_val_loss)
-                
-                scheduler.step()
-                
-                print(f"Epoch {epoch+1}/{num_epochs} Summary: Train Loss = {avg_train_loss:.6f}, Val Loss = {avg_val_loss:.6f}")
-                
-                if avg_val_loss < best_val_loss:
-                    best_val_loss = avg_val_loss
-                    torch.save({
-                        'model_state_dict': ufm.module.state_dict(),
-                        'optimizer_state_dict': optimizer.state_dict(),
-                        'scheduler_state_dict': scheduler.state_dict(),
-                        'epoch': epoch,
-                        'best_val_loss': best_val_loss
-                    }, 'trained_models/best_model_parallel.pth')
-                    print(f"Best model saved at epoch {epoch+1} with Val Loss = {best_val_loss:.6f}")
-
-            except KeyboardInterrupt:
-                torch.save({
-                    'model_state_dict': ufm.module.state_dict(),
-                    'optimizer_state_dict': optimizer.state_dict(),
-                    'scheduler_state_dict': scheduler.state_dict(),
-                    'epoch': epoch,
-                    'best_val_loss': best_val_loss
-                }, 'trained_models/interrupted_model_parallel.pth')
-                print("Training interrupted. Model state saved to 'interrupted_model_parallel.pth'.")
-                
-                plt.figure(figsize=(10, 5))
-                plt.plot(range(1, len(train_losses) + 1), train_losses, label='Training Loss', linewidth=2)
-                plt.plot(range(1, len(val_losses) + 1), val_losses, label='Validation Loss', linewidth=2)
-                plt.xlabel('Epochs', fontsize=12)
-                plt.ylabel('MSE Loss', fontsize=12)
-                plt.yscale('log')
-                plt.title('Training & Validation Loss Curves (Parallel)', fontsize=14)
-                plt.legend(fontsize=10)
-                plt.grid(True, alpha=0.3)
-                plt.savefig('interrupted_loss_curve_parallel.png', dpi=300, bbox_inches='tight')
-                break
-            
-        plt.figure(figsize=(10, 5))
-        plt.plot(range(1, len(train_losses) + 1), train_losses, label='Training Loss', linewidth=2)
-        plt.plot(range(1, len(val_losses) + 1), val_losses, label='Validation Loss', linewidth=2)
-        plt.xlabel('Epochs', fontsize=12)
-        plt.ylabel('MSE Loss', fontsize=12)
-        plt.yscale('log')
-        plt.title('Training & Validation Loss Curves (Parallel)', fontsize=14)
-        plt.legend(fontsize=10)
-        plt.grid(True, alpha=0.3)
-        plt.savefig('loss_curve_parallel.png', dpi=300, bbox_inches='tight')
-        plt.show()
+    plt.figure(figsize=(10, 5))
+    plt.plot(range(1, len(train_losses) + 1), train_losses, label='Training Loss', linewidth=2)
+    plt.plot(range(1, len(val_losses) + 1), val_losses, label='Validation Loss', linewidth=2)
+    plt.xlabel('Epochs', fontsize=12)
+    plt.ylabel('MSE Loss', fontsize=12)
+    plt.yscale('log')
+    plt.title('Training & Validation Loss Curves', fontsize=14)
+    plt.legend(fontsize=10)
+    plt.grid(True, alpha=0.3)
+    plt.savefig('loss_curve.png', dpi=300, bbox_inches='tight')
+    plt.show()
