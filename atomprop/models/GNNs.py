@@ -257,7 +257,34 @@ class GNN(nn.Module):
         elif self.JK == 'concat':
             out = torch.cat(layer_outputs, dim=-1)  # Shape [N, num_layers * embed_dim]
             out = self.jump(out)  # Shape [B_N, embed_dim]
+            assert False, "Concat Processing Not Implemented Yet. There will be dimension mismatch."
         else:
             raise ValueError("Invalid JK type. Choose from 'last', 'sum', 'max', 'concat'.")
         
         return out # Shape [B_N, embed_dim]
+
+class GNNAggr(nn.Module):
+    """
+    A module for graph-level representation by aggregating node features.
+    """
+    def __init__(self, embed_dim, aggr='mean'):
+        super(GNNAggr, self).__init__()
+        self.aggr = aggr
+        self.aggr_fn = None
+        if aggr == 'mean':
+            self.aggr_fn = torch_geometric.nn.global_mean_pool
+        elif aggr == 'sum':
+            self.aggr_fn = torch_geometric.nn.global_add_pool
+        elif aggr == 'max':
+            self.aggr_fn = torch_geometric.nn.global_max_pool
+        elif aggr == 'min':
+            self.aggr_fn = torch_geometric.nn.global_min_pool
+        elif aggr == 'attention':
+            self.aggr_fn = torch_geometric.nn.GlobalAttention(gate_nn=nn.Linear(embed_dim, 1))
+        else:
+            raise ValueError("Invalid aggregation type. Choose from 'mean', 'sum', 'max', 'min', 'attention'.")
+
+    def forward(self, x, batch):
+        # x has shape [B_N, embed_dim]
+        # batch has shape [B_N] with batch indices
+        return self.aggr_fn(x, batch)  # Shape [B, embed_dim]

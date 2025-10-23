@@ -113,6 +113,7 @@ re_batched = Batch.from_data_list(restored_graphs)
 print(f"Re-batched graph matches original structure: "
       f"nodes={re_batched.num_nodes == big_data.num_nodes}, "
       f"edges={re_batched.num_edges == big_data.num_edges}")
+print(f"batch.batch:{re_batched.batch}")
 
 # data_path = "data/moleculenet/qm9/gdb9.sdf"
 # check_data = False

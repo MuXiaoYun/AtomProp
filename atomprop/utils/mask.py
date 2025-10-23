@@ -17,27 +17,27 @@ class MolGraphMask:
         :param mask_ratio: Ratio of atoms to mask.
         :return: List of indices to mask.
         """
-        atom_indice_dict = {}
+        atom_index_dict = {}
         mask_indices = []
         
         for idx, atom in enumerate(atom_list):
             # Each atom has multiple indices, store them in a list in the dict
-            if atom not in atom_indice_dict:
-                atom_indice_dict[atom] = [idx]
+            if atom.item() not in atom_index_dict:
+                atom_index_dict[atom.item()] = [idx]
                 continue
-            atom_indice_dict[atom].append(idx)
+            atom_index_dict[atom.item()].append(idx)
 
-        sample_num = max(1, int(len(atom_list) * mask_ratio / len(atom_indice_dict)))
+        sample_num = max(1, int(len(atom_list) * mask_ratio / len(atom_index_dict)))
 
-        for key in atom_indice_dict:
+        for key in atom_index_dict:
             # sample sample_num indices from each atom's indices. accept duplicates
-            sampled_indices = random.sample(atom_indice_dict[key], min(sample_num, len(atom_indice_dict[key])))
+            sampled_indices = random.sample(atom_index_dict[key], min(sample_num, len(atom_index_dict[key])))
             mask_indices.extend(sampled_indices)
         
         return mask_indices
 
     @staticmethod
-    def mask_atoms(embed_list, mask_indices, mask_token, modify = True):
+    def mask_atoms(embed_list, mask_indices, mask_token):
         """
         Mask selected atoms in the embedding list.
         :param embed_list: List of atom embeddings.
@@ -46,13 +46,7 @@ class MolGraphMask:
         :param modify: Whether to modify the original embed_list or return a new one.
         :return: New list of embeddings with masked atoms.
         """
-        if modify == False:
-            masked_embed_list = embed_list.clone()
-            for idx in mask_indices:
-                masked_embed_list[idx] = mask_token
-            return masked_embed_list
-
-        else:
-            for idx in mask_indices:
-                embed_list[idx] = mask_token
-            return embed_list
+        masked_embed_list = embed_list.clone()
+        for idx in mask_indices:
+            masked_embed_list[idx] = mask_token
+        return masked_embed_list

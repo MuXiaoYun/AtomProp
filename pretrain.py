@@ -1,6 +1,6 @@
-from atomprop.tasks.tasks import NodeAttrPrediction, MaskedNodePrediction
+from atomprop.tasks.tasks import NodeAttrPrediction, MaskedNodePrediction, GraphMaskContrast, BatchContrast
 from atomprop.dataloader.dataloader import SMILESToInputs
-from atomprop.models.GNNs import Embedder, GNN
+from atomprop.models.GNNs import Embedder, GNN, GNNAggr
 from atomprop.utils.mlp import MLP
 from atomprop.utils.mask import MolGraphMask
 from atomprop.embeddings.AtomEmbedding import BondTypes
@@ -18,9 +18,17 @@ backbone = Embedder(num_atom_types=120, embed_dim=embed_dim)
 neck = GNN(num_layers=6, embed_dim=embed_dim, gnn_type='gcn', JK='last', dropout=0.1)
 head = MLP(input_dim=512, hidden_dim=256, output_dim=157, num_layers=1, dropout=0.1) # used for atom attr pred
 head1 = MLP(input_dim=512, hidden_dim=256, output_dim=512, num_layers=2, dropout=0.1) # used for masked atom pred
+aggrmodel = GNNAggr(embed_dim=embed_dim, aggr='mean')
+
+less_rate = 0.1
+more_rate = 0.3
+
+record_freq = 100
 
 task = NodeAttrPrediction()
 task1 = MaskedNodePrediction()
+task2 = GraphMaskContrast(less_rate=less_rate, more_rate=more_rate)
+task3 = BatchContrast()
 
 data_path = "data/nabladft/summary.csv"
 dataset_size = -1
@@ -275,7 +283,8 @@ if __name__ == "__main__":
                 
                 for opt in optimizers.values():
                     opt.zero_grad()
-                
+
+                ############################################ 1.atom attr pred ############################################
                 # size of batch_data.x is [B_N, 1]
                 atom_emb = backbone(batch_data.x).squeeze() # size [B_N, embed_dim]
 
@@ -289,21 +298,49 @@ if __name__ == "__main__":
                 
                 task.set_pred(outputs)
                 task.run_label(mols, device)
-                loss = task.compute_loss()
+                loss_atom_attr_pred = task.compute_loss()
                 
+                ########################################## 2.masked atom type pred ##########################################
                 mask_indices = MolGraphMask.select_mask_indices(batch_data.x)
-                masked_atom_emb = MolGraphMask.mask_atoms(atom_emb, mask_indices, torch.zeros(embed_dim), modify=False)
+                masked_atom_emb = MolGraphMask.mask_atoms(atom_emb, mask_indices, torch.zeros(embed_dim))
 
                 masked_embedded_data = Data(x=masked_atom_emb, edge_index=batch_data.edge_index)
                 graph_emb1 = neck(masked_embedded_data)
-                graph_emb1 = graph_emb1.view(-1, graph_emb1.size(-1))[mask_indices]
+                graph_emb1_masked = graph_emb1.view(-1, graph_emb1.size(-1))[mask_indices]
 
-                outputs1 = head1(graph_emb1)
+                outputs1 = head1(graph_emb1_masked)
                 outputs1 = outputs1.view(-1, outputs1.size(-1))
 
                 task1.set_pred(outputs1)
-                task1.set_label(graph_emb[mask_indices])
-                loss = task1.compute_loss()
+                task1_labels = graph_emb[mask_indices]
+                task1.set_label(task1_labels)
+                loss_masked_atom_type_pred = task1.compute_loss()
+
+                ######################################### 3.triplet contrast #########################################
+                less_mask_indices = MolGraphMask.select_mask_indices(batch_data.x, mask_ratio=less_rate)
+                less_masked_atom_emb = MolGraphMask.mask_atoms(atom_emb, less_mask_indices, torch.zeros(embed_dim))
+                less_masked_embedded_data = Data(x=less_masked_atom_emb, edge_index=batch_data.edge_index)
+                less_graph_emb = neck(less_masked_embedded_data)
+                less_graph_emb = less_graph_emb.view(-1, less_graph_emb.size(-1))
+                less_outputs = aggrmodel(less_graph_emb, batch_data.batch)
+
+                more_mask_indices = MolGraphMask.select_mask_indices(batch_data.x, mask_ratio=more_rate)
+                more_masked_atom_emb = MolGraphMask.mask_atoms(atom_emb, more_mask_indices, torch.zeros(embed_dim))
+                more_masked_embedded_data = Data(x=more_masked_atom_emb, edge_index=batch_data.edge_index)
+                more_graph_emb = neck(more_masked_embedded_data)
+                more_graph_emb = more_graph_emb.view(-1, more_graph_emb.size(-1))
+                more_outputs = aggrmodel(more_graph_emb, batch_data.batch)
+
+                anchor_outputs = aggrmodel(graph_emb, batch_data.batch)
+                task2.set_embeddings(anchor_outputs, less_outputs, more_outputs)
+                loss_triplet_contrast = task2.compute_loss()
+
+                ############################################# 4.batch contrast ############################################
+                outputs1_for_contrast = aggrmodel(graph_emb1, batch_data.batch)
+                task3.set_embeddings(anchor_outputs, outputs1_for_contrast)
+                loss_batch_contrast = task3.compute_loss()
+
+                loss = loss_atom_attr_pred + 3 * loss_masked_atom_type_pred + loss_triplet_contrast + 0.2 * loss_batch_contrast
 
                 loss.backward()
                 for opt in optimizers.values():
