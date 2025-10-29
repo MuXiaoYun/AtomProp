@@ -12,7 +12,7 @@ class SMILESToInputs:
     A utility class to convert SMILES strings to atom type indices and edges.
     """
     @staticmethod
-    def convert(smiles: str, context_length: int = 420, edge_output_type = 'edge_list', padding = False):
+    def convert(smiles: str, context_length: int = 420, edge_output_type = 'edge_list', padding = False, sanitize = True):
         """
         Convert a SMILES string to atom type indices and edges.
         :param smiles: The SMILES string to convert.
@@ -20,11 +20,12 @@ class SMILESToInputs:
         :param edge_output_type: The type of edge representation to return ('adj_matrix' or 'edge_list').
         :return: A tuple containing the atom indices and edge (adj matrix, value is bond type index, -1 for no edge), and the RDKit molecule object.
         """
-        mol = Chem.MolFromSmiles(smiles)
+        mol = Chem.MolFromSmiles(smiles, sanitize=sanitize)
         if mol is None:
-            raise ValueError(f"Invalid SMILES string: {smiles}")
+            print(f"[SMILES TO INPUTS] Invalid SMILES string: {smiles}")
+            return None, None, None
         
-        mol = Chem.RemoveHs(mol)  # Remove all H atoms
+        mol = Chem.RemoveHs(mol=mol, sanitize=sanitize)  # Remove all H atoms
         # Get atom type indices
         atom_type_indices = [atom.GetAtomicNum() for atom in mol.GetAtoms()]
         atom_type_indices = torch.tensor(atom_type_indices, dtype=torch.long)
