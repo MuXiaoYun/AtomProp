@@ -12,7 +12,7 @@ class MLP(nn.Module):
     A :class:`MLP` is a module that implements a multi-layer perceptron.
     """
 
-    def __init__(self, input_dim: int, hidden_dim: int, output_dim: int, num_layers: int, dropout: float = 0.0, output_activation = nn.Sigmoid()):
+    def __init__(self, input_dim: int, hidden_dim: int, output_dim: int, num_layers: int, dropout: float = 0.0, batch_norm = False, output_activation = nn.Sigmoid()):
         super(MLP, self).__init__()
         self.input_dim = input_dim
         self.hidden_dim = hidden_dim
@@ -32,6 +32,24 @@ class MLP(nn.Module):
 
         self.layers = nn.ModuleList(layers)
 
+        self.batch_norm = None
+        if batch_norm:
+            # add a batch_norm layer between output layer and activation
+            self.batch_norm = nn.BatchNorm1d(output_dim)
+
+    def init_params(self, gain: float = 1.0):
+        """
+        Initialize the parameters of the MLP.
+
+        Args:
+            gain (float): Gain value for Xavier initialization.
+        """
+        for layer in self.layers:
+            if isinstance(layer, nn.Linear):
+                nn.init.xavier_uniform_(layer.weight, gain=gain)
+                if layer.bias is not None:
+                    nn.init.zeros_(layer.bias)
+
     def forward(self, x: torch.Tensor):
         """
         Forward pass of the MLP.
@@ -48,6 +66,8 @@ class MLP(nn.Module):
                 x = F.relu(x)
                 if self.dropout > 0:
                     x = F.dropout(x, p=self.dropout, training=self.training)
+        if self.batch_norm is not None:
+            x = self.batch_norm(x)
         if self.output_activation is not None:
             x = self.output_activation(x)
         return x

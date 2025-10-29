@@ -6,6 +6,52 @@ import torch
 import torch.nn as nn
 import torch_geometric
 from torch_geometric.nn import MessagePassing
+import torch.nn.functional as F
+
+class MaskedBCELoss(nn.Module):
+    def __init__(self, reduction='mean'):
+        super(MaskedBCELoss, self).__init__()
+        self.reduction = reduction
+        
+    def forward(self, pred, label):
+        mask = (label != -1)
+        valid_labels = label[mask].float()
+        valid_preds = pred[mask]
+        
+        if valid_labels.numel() == 0:
+            return torch.tensor(0.0, device=pred.device)
+        loss = F.binary_cross_entropy_with_logits(
+            valid_preds, valid_labels, reduction=self.reduction
+        )
+        return loss
+
+class MaskedFocalLoss(nn.Module):
+    def __init__(self, alpha=0.25, gamma=2.0, reduction='mean'):
+        super(MaskedFocalLoss, self).__init__()
+        self.alpha = alpha
+        self.gamma = gamma
+        self.reduction = reduction
+
+    def forward(self, pred, label):
+        mask = (label != -1)
+        valid_labels = label[mask].float()
+        valid_preds = pred[mask]
+
+        if valid_labels.numel() == 0:
+            return torch.tensor(0.0, device=pred.device)
+
+        bce_loss = F.binary_cross_entropy_with_logits(
+            valid_preds, valid_labels, reduction='none'
+        )
+        pt = torch.exp(-bce_loss)
+        focal_loss = self.alpha * (1 - pt) ** self.gamma * bce_loss
+
+        if self.reduction == 'mean':
+            return focal_loss.mean()
+        elif self.reduction == 'sum':
+            return focal_loss.sum()
+        else:
+            return focal_loss
 
 class GCNconv(MessagePassing):
     """
