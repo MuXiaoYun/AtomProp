@@ -7,6 +7,7 @@ import torch
 import torch.nn as nn
 import numpy as np
 import argparse
+from iterstrat.ml_stratifiers import MultilabelStratifiedKFold
 from tqdm import tqdm
 from torch_geometric.data import Data, Batch, DataLoader
 from torch.utils.tensorboard import SummaryWriter
@@ -105,7 +106,6 @@ if __name__ == "__main__":
         try:
             # Try to use iterative stratification for multilabel data
             try:
-                from iterstrat.ml_stratifiers import MultilabelStratifiedKFold
                 splitter = MultilabelStratifiedKFold(n_splits=K, shuffle=True, random_state=random_state)
                 splits = list(splitter.split(np.zeros(len(created_labels)), np.array(created_labels)))
             except Exception:
