@@ -2,7 +2,7 @@
 Module for pretraining tasks for GNNs.
 """
 
-from atomprop.utils.features import atomFeaturize  
+from atomprop.utils.features import atomFeaturize, atomFeaturizeLoss 
 import torch
 import torch.nn as nn
 
@@ -12,7 +12,7 @@ class NodeAttrPrediction:
     This class computes losses and metrics for the task.
     """
 
-    def __init__(self, criterion=nn.BCEWithLogitsLoss()):
+    def __init__(self, criterion=atomFeaturizeLoss()):
         self.criterion = criterion
         self.preds = None
         self.labels = None

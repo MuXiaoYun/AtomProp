@@ -36,9 +36,9 @@ dataset_size = -1
 chunk_size = 65536
 max_atom_num = 128
 batch_size = 1024
-num_epochs = 4
+num_epochs = 6
 
-device = torch.device("cuda:0") if torch.cuda.is_available() else torch.device("cpu")
+device = torch.device("cuda:1") if torch.cuda.is_available() else torch.device("cpu")
 
 optimizer_configs = {
     "backbone": {
@@ -249,6 +249,7 @@ if __name__ == "__main__":
     best_val_loss = float('inf')
     train_losses = []
     val_losses = []
+    eps = 1e-8
     
     for epoch in range(num_epochs):
         try:
@@ -314,8 +315,37 @@ if __name__ == "__main__":
                 task3.set_embeddings(anchor_outputs, outputs1_for_contrast)
                 loss_batch_contrast = task3.compute_loss()
 
-                loss = loss_atom_attr_pred + 3 * loss_masked_atom_type_pred + loss_triplet_contrast + 0.2 * loss_batch_contrast
+                # --- compute per-task gradient norms (proxy: gradients w.r.t atom embeddings) ---
+                # Use atom_emb (output of backbone) as a shared representation to measure influence of each task.
+                # Allow unused in case a particular loss does not depend on atom_emb for some rare batch.
+                grads = []
+                g = torch.autograd.grad(loss_atom_attr_pred, atom_emb, retain_graph=True, create_graph=False, allow_unused=True)[0]
+                grads.append(g)
+                g = torch.autograd.grad(loss_masked_atom_type_pred, atom_emb, retain_graph=True, create_graph=False, allow_unused=True)[0]
+                grads.append(g)
+                g = torch.autograd.grad(loss_triplet_contrast, atom_emb, retain_graph=True, create_graph=False, allow_unused=True)[0]
+                grads.append(g)
+                g = torch.autograd.grad(loss_batch_contrast, atom_emb, retain_graph=True, create_graph=False, allow_unused=True)[0]
+                grads.append(g)
 
+                # compute L2 norms (handle None grads)
+                norms = []
+                for gg in grads:
+                    if gg is None:
+                        norms.append(torch.tensor(0.0, device=device))
+                    else:
+                        norms.append(gg.norm())
+                norms = torch.stack(norms)
+                inv = 1.0 / (norms.detach() + eps)
+                weights = inv / inv.sum()
+
+                # final weighted loss
+                loss = (weights[0] * loss_atom_attr_pred
+                        + weights[1] * loss_masked_atom_type_pred
+                        + weights[2] * loss_triplet_contrast
+                        + weights[3] * loss_batch_contrast)
+
+                # backward and step
                 loss.backward()
                 for opt in optimizers.values():
                     opt.step()
@@ -326,6 +356,19 @@ if __name__ == "__main__":
                     writer.add_scalar('Train/Loss_masked_atom', loss_masked_atom_type_pred.item(), epoch * train_loader.total_batches + batch_idx)
                     writer.add_scalar('Train/Loss_triplet', loss_triplet_contrast.item(), epoch * train_loader.total_batches + batch_idx)
                     writer.add_scalar('Train/Loss_batch_contrast', loss_batch_contrast.item(), epoch * train_loader.total_batches + batch_idx)
+                    # log grad norms and weights
+                    try:
+                        writer.add_scalar('Train/GradNorm_atom_attr', norms[0].item(), epoch * train_loader.total_batches + batch_idx)
+                        writer.add_scalar('Train/GradNorm_masked_atom', norms[1].item(), epoch * train_loader.total_batches + batch_idx)
+                        writer.add_scalar('Train/GradNorm_triplet', norms[2].item(), epoch * train_loader.total_batches + batch_idx)
+                        writer.add_scalar('Train/GradNorm_batch_contrast', norms[3].item(), epoch * train_loader.total_batches + batch_idx)
+                        writer.add_scalar('Train/Weight_atom_attr', weights[0].item(), epoch * train_loader.total_batches + batch_idx)
+                        writer.add_scalar('Train/Weight_masked_atom', weights[1].item(), epoch * train_loader.total_batches + batch_idx)
+                        writer.add_scalar('Train/Weight_triplet', weights[2].item(), epoch * train_loader.total_batches + batch_idx)
+                        writer.add_scalar('Train/Weight_batch_contrast', weights[3].item(), epoch * train_loader.total_batches + batch_idx)
+                    except Exception:
+                        # logging should not interrupt training
+                        pass
                 
                 if batch_idx == train_loader.total_batches - 1:
                     metrics = task.get_metrics()
@@ -405,7 +448,10 @@ if __name__ == "__main__":
                     task3.set_embeddings(anchor_outputs, outputs1_for_contrast)
                     loss_batch_contrast = task3.compute_loss()
 
-                    loss = loss_atom_attr_pred + 3 * loss_masked_atom_type_pred + loss_triplet_contrast + 0.2 * loss_batch_contrast
+                    loss = (loss_atom_attr_pred
+                            + loss_masked_atom_type_pred
+                            + loss_triplet_contrast
+                            + loss_batch_contrast)
 
                     if batch_idx == 0 or (batch_idx + 1) % record_freq == 0:
                         writer.add_scalar('Val/Loss_total', loss.item(), epoch * val_loader.total_batches + batch_idx)
@@ -459,6 +505,18 @@ if __name__ == "__main__":
                     'best_val_loss': best_val_loss
                 }, 'trained_models/best_model.pth')
                 print(f"Best model saved at epoch {epoch+1} with Val Loss = {best_val_loss:.6f}")
+            # save model at each epoch
+            torch.save({
+                'backbone_state_dict': backbone.state_dict(),
+                'neck_state_dict': neck.state_dict(),
+                'head_state_dict': head.state_dict(),
+                'head1_state_dict': head1.state_dict(),
+                'optimizer_state_dict': {name: opt.state_dict() for name, opt in optimizers.items()},
+                'scheduler_state_dict': {name: sch.state_dict() for name, sch in schedulers.items()},
+                'epoch': epoch,
+                'val_loss': avg_val_loss
+            }, f'trained_models/model_epoch{epoch}.pth')
+            print(f"Model at epoch {epoch+1} saved with Val Loss = {avg_val_loss:.6f}")
 
         except KeyboardInterrupt:
             torch.save({
@@ -472,27 +530,5 @@ if __name__ == "__main__":
                 'best_val_loss': best_val_loss
             }, 'trained_models/interrupted_model.pth')
             print("Training interrupted. Model state saved to 'interrupted_model.pth'.")
-            plt.figure(figsize=(10, 5))
-            plt.plot(range(1, len(train_losses) + 1), train_losses, label='Training Loss', linewidth=2)
-            plt.plot(range(1, len(val_losses) + 1), val_losses, label='Validation Loss', linewidth=2)
-            plt.xlabel('Epochs', fontsize=12)
-            plt.ylabel('MSE Loss', fontsize=12)
-            plt.yscale('log')
-            plt.title('Training & Validation Loss Curves', fontsize=14)
-            plt.legend(fontsize=10)
-            plt.grid(True, alpha=0.3)
-            plt.savefig('interrupted_loss_curve.png', dpi=300, bbox_inches='tight')
-            break
         
     writer.close()
-    plt.figure(figsize=(10, 5))
-    plt.plot(range(1, len(train_losses) + 1), train_losses, label='Training Loss', linewidth=2)
-    plt.plot(range(1, len(val_losses) + 1), val_losses, label='Validation Loss', linewidth=2)
-    plt.xlabel('Epochs', fontsize=12)
-    plt.ylabel('MSE Loss', fontsize=12)
-    plt.yscale('log')
-    plt.title('Training & Validation Loss Curves', fontsize=14)
-    plt.legend(fontsize=10)
-    plt.grid(True, alpha=0.3)
-    plt.savefig('loss_curve.png', dpi=300, bbox_inches='tight')
-    plt.show()

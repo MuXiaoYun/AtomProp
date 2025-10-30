@@ -6,11 +6,14 @@ import rdkit
 from rdkit import Chem
 import torch
 import numpy as np
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
 
 class atomFeaturize:
     """
     A class to featurize atoms in a molecule.
-    Used featrues include:
+    Used features include:
     - Atom type (one-hot encoding for atomic numbers 0-118, 0 for unknown or masked)
     - Degree (one-hot encoding for degrees 0-7, 7 for unknown)
     - Formal charge (one-hot encoding for charges -3 to +3, 4 for unknown)
@@ -163,3 +166,34 @@ class atomFeaturize:
             atom_features.append(features)
         atom_features_np = torch.tensor(atom_features, dtype=torch.float32)
         return atom_features_np # dimension of each atom feature is 119+8+7+8+8+6+1=157
+
+class atomFeaturizeLoss(nn.Module):
+    """
+    A class to compute loss for atom features prediction.
+    Use BCEWithLogitsLoss for multi-label classification dimensions.
+    Use MSELoss for continuous dimensions.
+    """
+    def __init__(self):
+        super(atomFeaturizeLoss, self).__init__()
+        self.bce_loss = nn.BCEWithLogitsLoss()
+        self.mse_loss = nn.MSELoss()
+        self.multi_label_indices = list(range(0, 119 + 8 + 7 + 8 + 8 + 6))  # first 156 dimensions
+        self.continuous_indices = [156]  # last dimension
+
+    def forward(self, preds, labels):
+        """
+        Compute the loss between predictions and labels.
+        :param preds: Predicted atom features (batch_size x num_atoms x feature_dim).
+        :param labels: True atom features (batch_size x num_atoms x feature_dim).
+        :return: Computed loss.
+        """
+        preds_multi_label = preds[:, self.multi_label_indices]
+        labels_multi_label = labels[:, self.multi_label_indices]
+        preds_continuous = preds[:, self.continuous_indices]
+        labels_continuous = labels[:, self.continuous_indices]
+
+        loss_multi_label = self.bce_loss(preds_multi_label, labels_multi_label)
+        loss_continuous = self.mse_loss(preds_continuous, labels_continuous)
+
+        total_loss = loss_multi_label + loss_continuous
+        return total_loss

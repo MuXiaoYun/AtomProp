@@ -10,6 +10,7 @@ import argparse
 from tqdm import tqdm
 from torch_geometric.data import Data, Batch, DataLoader
 from torch.utils.tensorboard import SummaryWriter
+from sklearn.metrics import roc_auc_score
 
 data_path = "./data/moleculenet/tox21/tox21.csv"
 batch_size = 32
@@ -75,25 +76,49 @@ if __name__ == "__main__":
     # params of convert() 
     # smiles: str, context_length: int = 420, edge_output_type = 'edge_list', padding = False
     dataset = []
+    created_labels = []
     for smi, label in zip(smiles_list, labels):
         atom_type_indices, edge_index, mol = SMILESToInputs.convert(smi, edge_output_type='edge_list', padding=False, sanitize=False)
         if atom_type_indices is None or edge_index is None:
             continue
         data = Data(x=atom_type_indices.unsqueeze(1), edge_index=edge_index.t().contiguous()[:2], y=torch.tensor(label))
         dataset.append(data)
+        # prepare label for stratification: convert -1 -> 0 and treat positives as 1
+        arr = np.array(label, dtype=float)
+        binarized = (arr == 1.0).astype(int)
+        created_labels.append(binarized)
 
     writer = SummaryWriter(log_dir='runs/finetune_experiment')
-    num_epochs = 100
+    num_epochs = 1
     global_step = 0
     K = 5
-    split_size = len(dataset) // K
     try:
-        for k in range(K):
+        # Try to use iterative stratification for multilabel data
+        try:
+            from iterstrat.ml_stratifiers import MultilabelStratifiedKFold
+            splitter = MultilabelStratifiedKFold(n_splits=K, shuffle=True, random_state=42)
+            splits = list(splitter.split(np.zeros(len(created_labels)), np.array(created_labels)))
+        except Exception:
+            # Fallback: collapse multilabel into a single aggregated label for stratification (imperfect)
+            from sklearn.model_selection import StratifiedKFold
+            collapsed = []
+            for lbl in created_labels:
+                # collapse binary vector to a string/tuple and map to int class
+                collapsed.append(tuple(int(x) for x in lbl))
+            lbl_map = {}
+            collapsed_ints = []
+            for t in collapsed:
+                if t not in lbl_map:
+                    lbl_map[t] = len(lbl_map)
+                collapsed_ints.append(lbl_map[t])
+            splitter = StratifiedKFold(n_splits=K, shuffle=True, random_state=42)
+            splits = list(splitter.split(np.zeros(len(created_labels)), np.array(collapsed_ints)))
+
+        for fold_idx, (train_idx, val_idx) in enumerate(splits):
+            k = fold_idx
             print(f"Starting fold {k+1}/{K}")
-            val_start = k * split_size
-            val_end = (k + 1) * split_size if k != K - 1 else len(dataset)
-            train_dataset = dataset[:val_start] + dataset[val_end:]
-            val_dataset = dataset[val_start:val_end]
+            train_dataset = [dataset[i] for i in train_idx]
+            val_dataset = [dataset[i] for i in val_idx]
             train_dataloader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, collate_fn=Batch.from_data_list)
             val_dataloader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, collate_fn=Batch.from_data_list)
 
@@ -151,7 +176,7 @@ if __name__ == "__main__":
         'head_state_dict': head.state_dict(),
     }, 'trained_models/finetuned_model.pth')
 
-    # 6. Test on the test set
+    # 6. Test on the test set, report ROC-AUC
     test_size = int(0.05 * len(dataset))
     test_dataset = dataset[-test_size:]
     test_dataloader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, collate_fn=Batch.from_data_list)
@@ -159,14 +184,36 @@ if __name__ == "__main__":
     neck.eval()
     head.eval()
     test_loss = 0.0
+    total_aucs = []
     with torch.no_grad():
         for batch in tqdm(test_dataloader, desc="Testing"):
             batch = batch.to(device)
             emb = backbone(batch.x.squeeze())
-            emb = neck(emb, batch.edge_index)
+            emb = neck(Data(x=emb, edge_index=batch.edge_index))
             graph_emb = aggrmodel(emb, batch.batch)
             preds = head(graph_emb)
             loss = criterion(preds.reshape(-1, len(y_cols)), batch.y.reshape(-1, len(y_cols)))
             test_loss += loss.item()
+            aucs = []
+            for i in range(len(y_cols)):
+                valid_mask = batch.y.reshape(-1, len(y_cols))[:, i] != -1
+                if valid_mask.sum().item() == 0:
+                    continue
+                valid_labels = batch.y.reshape(-1, len(y_cols))[valid_mask, i].cpu().numpy()
+                valid_preds = preds[valid_mask, i].cpu().numpy()
+                try:
+                    auc = roc_auc_score(valid_labels, valid_preds)
+                    # if nan do not append
+                    if np.isnan(auc):
+                        continue
+                    aucs.append(auc)
+                except ValueError:
+                    continue
+            if len(aucs) > 0:
+                total_aucs.append(np.mean(aucs))
+            else:
+                print("No valid AUCs for this batch! Skipping...")
     avg_test_loss = test_loss / len(test_dataloader)
     print(f"Test Loss: {avg_test_loss:.4f}")
+    mean_auc = np.mean(aucs)
+    print(f"Test ROC-AUC: {mean_auc:.4f}")
