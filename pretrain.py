@@ -38,7 +38,7 @@ max_atom_num = 128
 batch_size = 1024
 num_epochs = 6
 
-device = torch.device("cuda:1") if torch.cuda.is_available() else torch.device("cpu")
+device = torch.device("cuda:7") if torch.cuda.is_available() else torch.device("cpu")
 
 optimizer_configs = {
     "backbone": {

@@ -11,9 +11,11 @@ from tqdm import tqdm
 from torch_geometric.data import Data, Batch, DataLoader
 from torch.utils.tensorboard import SummaryWriter
 from sklearn.metrics import roc_auc_score
+from deepchem.splits.splitters import ScaffoldSplitter
 
 data_path = "./data/moleculenet/tox21/tox21.csv"
-batch_size = 32
+batch_size = 64
+test_batch_size = 256
 x_col = "smiles"
 y_cols = [
     "NR-AR",
@@ -29,6 +31,9 @@ y_cols = [
     "SR-MMP",
     "SR-p53",
 ]
+
+split_methods = ['S-K-fold', 'scaffold']
+split_method = 'S-K-fold'
 
 if __name__ == "__main__":
     ### 1. Read from CSV
@@ -46,8 +51,8 @@ if __name__ == "__main__":
     neck = GNN(num_layers=6, embed_dim=embed_dim, gnn_type='gcn', JK='last', dropout=0.1)
     aggrmodel = GNNAggr(embed_dim=embed_dim, aggr='mean')
 
-    backbone_ckpt = torch.load('trained_models/simple_best.pth')['backbone_state_dict']
-    neck_ckpt = torch.load('trained_models/simple_best.pth')['neck_state_dict']
+    backbone_ckpt = torch.load('trained_models/ver1_1030.pth')['backbone_state_dict']
+    neck_ckpt = torch.load('trained_models/ver1_1030.pth')['neck_state_dict']
 
     backbone.load_state_dict(backbone_ckpt)
     neck.load_state_dict(neck_ckpt)
@@ -68,10 +73,11 @@ if __name__ == "__main__":
     neck.train()
     head.train()
     optimizer = torch.optim.Adam([
-        {'params': backbone.parameters(), 'lr': 1e-5},
-        {'params': neck.parameters(), 'lr': 1e-5},
-        {'params': head.parameters(), 'lr': 1e-4}
+        {'params': backbone.parameters(), 'lr': 1e-3},
+        {'params': neck.parameters(), 'lr': 1e-3},
+        {'params': head.parameters(), 'lr': 5e-3}
     ])
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=150, eta_min=1e-6)
     criterion = MaskedBCELoss()
     # params of convert() 
     # smiles: str, context_length: int = 420, edge_output_type = 'edge_list', padding = False
@@ -90,44 +96,103 @@ if __name__ == "__main__":
 
     writer = SummaryWriter(log_dir='runs/finetune_experiment')
     num_epochs = 1
-    global_step = 0
-    K = 5
-    try:
-        # Try to use iterative stratification for multilabel data
-        try:
-            from iterstrat.ml_stratifiers import MultilabelStratifiedKFold
-            splitter = MultilabelStratifiedKFold(n_splits=K, shuffle=True, random_state=42)
-            splits = list(splitter.split(np.zeros(len(created_labels)), np.array(created_labels)))
-        except Exception:
-            # Fallback: collapse multilabel into a single aggregated label for stratification (imperfect)
-            from sklearn.model_selection import StratifiedKFold
-            collapsed = []
-            for lbl in created_labels:
-                # collapse binary vector to a string/tuple and map to int class
-                collapsed.append(tuple(int(x) for x in lbl))
-            lbl_map = {}
-            collapsed_ints = []
-            for t in collapsed:
-                if t not in lbl_map:
-                    lbl_map[t] = len(lbl_map)
-                collapsed_ints.append(lbl_map[t])
-            splitter = StratifiedKFold(n_splits=K, shuffle=True, random_state=42)
-            splits = list(splitter.split(np.zeros(len(created_labels)), np.array(collapsed_ints)))
+    random_state=42
 
-        for fold_idx, (train_idx, val_idx) in enumerate(splits):
-            k = fold_idx
-            print(f"Starting fold {k+1}/{K}")
-            train_dataset = [dataset[i] for i in train_idx]
-            val_dataset = [dataset[i] for i in val_idx]
+    if split_method == 'S-K-fold':
+        K = 5
+
+        global_step = 0
+        try:
+            # Try to use iterative stratification for multilabel data
+            try:
+                from iterstrat.ml_stratifiers import MultilabelStratifiedKFold
+                splitter = MultilabelStratifiedKFold(n_splits=K, shuffle=True, random_state=random_state)
+                splits = list(splitter.split(np.zeros(len(created_labels)), np.array(created_labels)))
+            except Exception:
+                # Fallback: collapse multilabel into a single aggregated label for stratification (imperfect)
+                from sklearn.model_selection import StratifiedKFold
+                collapsed = []
+                for lbl in created_labels:
+                    # collapse binary vector to a string/tuple and map to int class
+                    collapsed.append(tuple(int(x) for x in lbl))
+                lbl_map = {}
+                collapsed_ints = []
+                for t in collapsed:
+                    if t not in lbl_map:
+                        lbl_map[t] = len(lbl_map)
+                    collapsed_ints.append(lbl_map[t])
+                splitter = StratifiedKFold(n_splits=K, shuffle=True, random_state=random_state)
+                splits = list(splitter.split(np.zeros(len(created_labels)), np.array(collapsed_ints)))
+
+            for fold_idx, (train_idx, val_idx) in enumerate(splits):
+                k = fold_idx
+                print(f"Starting fold {k+1}/{K}")
+                train_dataset = [dataset[i] for i in train_idx]
+                val_dataset = [dataset[i] for i in val_idx]
+                train_dataloader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, collate_fn=Batch.from_data_list)
+                val_dataloader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, collate_fn=Batch.from_data_list)
+
+                for epoch in range(num_epochs):
+                    backbone.train()
+                    neck.train()
+                    head.train()
+                    epoch_loss = 0.0
+                    for batch in tqdm(train_dataloader, desc=f"Fold {k+1} Epoch {epoch+1} Training"):
+                        batch = batch.to(device)
+                        optimizer.zero_grad()
+                        emb = backbone(batch.x.squeeze())
+                        emb = neck(Data(x=emb, edge_index=batch.edge_index))
+                        graph_emb = aggrmodel(emb, batch.batch)
+                        preds = head(graph_emb)
+                        loss = criterion(preds.reshape(-1, len(y_cols)), batch.y.reshape(-1, len(y_cols)))
+                        loss.backward()
+                        optimizer.step()
+                        epoch_loss += loss.item()
+                        writer.add_scalar('Train/Loss', loss.item(), global_step)
+                        global_step += 1
+                    avg_epoch_loss = epoch_loss / len(train_dataloader)
+                    print(f"Fold {k+1} Epoch {epoch+1} Training Loss: {avg_epoch_loss:.4f}")
+                    scheduler.step()
+
+                    # Validation
+                    backbone.eval()
+                    neck.eval()
+                    head.eval()
+                    val_loss = 0.0
+                    with torch.no_grad():
+                        for batch in tqdm(val_dataloader, desc=f"Fold {k+1} Epoch {epoch+1} Validation"):
+                            batch = batch.to(device)
+                            emb = backbone(batch.x.squeeze())
+                            emb = neck(Data(x=emb, edge_index=batch.edge_index))
+                            graph_emb = aggrmodel(emb, batch.batch)
+                            preds = head(graph_emb)
+                            loss = criterion(preds.reshape(-1, len(y_cols)), batch.y.reshape(-1, len(y_cols)))
+                            val_loss += loss.item()
+                    avg_val_loss = val_loss / len(val_dataloader)
+                    print(f"Fold {k+1} Epoch {epoch+1} Validation Loss: {avg_val_loss:.4f}")
+                    writer.add_scalar('Val/Loss', avg_val_loss, epoch + k * num_epochs)
+        except KeyboardInterrupt:
+            print("Training interrupted. Saving current model...")
+            torch.save({
+                'backbone_state_dict': backbone.state_dict(),
+                'neck_state_dict': neck.state_dict(),
+                'head_state_dict': head.state_dict(),
+            }, 'trained_models/finetuned_model_interrupted.pth')
+    elif split_method == 'scaffold':
+        try:
+            global_step = 0
+            splitter = ScaffoldSplitter()
+            #split on 8:1:1
+            train_val_dataset, test_dataset = splitter.train_test_split(dataset, frac_train=0.9, random_state=random_state)
+            train_dataset, val_dataset = splitter.train_test_split(train_val_dataset, frac_train=0.8889, random_state=random_state)
             train_dataloader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, collate_fn=Batch.from_data_list)
             val_dataloader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, collate_fn=Batch.from_data_list)
-
             for epoch in range(num_epochs):
                 backbone.train()
                 neck.train()
                 head.train()
                 epoch_loss = 0.0
-                for batch in tqdm(train_dataloader, desc=f"Fold {k+1} Epoch {epoch+1} Training"):
+                for batch in tqdm(train_dataloader, desc=f"Epoch {epoch+1} Training"):
                     batch = batch.to(device)
                     optimizer.zero_grad()
                     emb = backbone(batch.x.squeeze())
@@ -141,7 +206,8 @@ if __name__ == "__main__":
                     writer.add_scalar('Train/Loss', loss.item(), global_step)
                     global_step += 1
                 avg_epoch_loss = epoch_loss / len(train_dataloader)
-                print(f"Fold {k+1} Epoch {epoch+1} Training Loss: {avg_epoch_loss:.4f}")
+                print(f"Epoch {epoch+1} Training Loss: {avg_epoch_loss:.4f}")
+                scheduler.step()
 
                 # Validation
                 backbone.eval()
@@ -149,7 +215,7 @@ if __name__ == "__main__":
                 head.eval()
                 val_loss = 0.0
                 with torch.no_grad():
-                    for batch in tqdm(val_dataloader, desc=f"Fold {k+1} Epoch {epoch+1} Validation"):
+                    for batch in tqdm(val_dataloader, desc=f"Epoch {epoch+1} Validation"):
                         batch = batch.to(device)
                         emb = backbone(batch.x.squeeze())
                         emb = neck(Data(x=emb, edge_index=batch.edge_index))
@@ -158,15 +224,17 @@ if __name__ == "__main__":
                         loss = criterion(preds.reshape(-1, len(y_cols)), batch.y.reshape(-1, len(y_cols)))
                         val_loss += loss.item()
                 avg_val_loss = val_loss / len(val_dataloader)
-                print(f"Fold {k+1} Epoch {epoch+1} Validation Loss: {avg_val_loss:.4f}")
-                writer.add_scalar('Val/Loss', avg_val_loss, epoch + k * num_epochs)
-    except KeyboardInterrupt:
-        print("Training interrupted. Saving current model...")
-        torch.save({
-            'backbone_state_dict': backbone.state_dict(),
-            'neck_state_dict': neck.state_dict(),
-            'head_state_dict': head.state_dict(),
-        }, 'trained_models/finetuned_model_interrupted.pth')
+                print(f"Epoch {epoch+1} Validation Loss: {avg_val_loss:.4f}")
+                writer.add_scalar('Val/Loss', avg_val_loss, epoch)
+        except KeyboardInterrupt:
+            print("Training interrupted. Saving current model...")
+            torch.save({
+                'backbone_state_dict': backbone.state_dict(),
+                'neck_state_dict': neck.state_dict(),
+                'head_state_dict': head.state_dict(),
+            }, 'trained_models/finetuned_model_interrupted.pth')
+    else:
+        raise ValueError(f"Unknown split method: {split_method}")
     writer.close()
     
     # 5. Save final model
@@ -179,7 +247,7 @@ if __name__ == "__main__":
     # 6. Test on the test set, report ROC-AUC
     test_size = int(0.05 * len(dataset))
     test_dataset = dataset[-test_size:]
-    test_dataloader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, collate_fn=Batch.from_data_list)
+    test_dataloader = DataLoader(test_dataset, batch_size=test_batch_size, shuffle=False, collate_fn=Batch.from_data_list)
     backbone.eval()
     neck.eval()
     head.eval()
