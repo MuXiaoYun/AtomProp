@@ -6,17 +6,27 @@ import pandas as pd
 import torch
 import torch.nn as nn
 import numpy as np
+import torch.nn.functional as F
 import argparse
 from iterstrat.ml_stratifiers import MultilabelStratifiedKFold
 from tqdm import tqdm
 from torch_geometric.data import Data, Batch, DataLoader
 from torch.utils.tensorboard import SummaryWriter
 from sklearn.metrics import roc_auc_score
+from sklearn.model_selection import StratifiedKFold
 from deepchem.splits.splitters import ScaffoldSplitter
+from deepchem.data import NumpyDataset
+
+no_pretrain = True
 
 data_path = "./data/moleculenet/tox21/tox21.csv"
+pretrained_path = 'trained_models/zinc15smaller.pth'
 batch_size = 64
 test_batch_size = 256
+
+num_epochs = 100
+random_state = 42
+
 x_col = "smiles"
 y_cols = [
     "NR-AR",
@@ -34,7 +44,7 @@ y_cols = [
 ]
 
 split_methods = ['S-K-fold', 'scaffold']
-split_method = 'S-K-fold'
+split_method = 'scaffold'
 
 if __name__ == "__main__":
     ### 1. Read from CSV
@@ -49,14 +59,15 @@ if __name__ == "__main__":
     embed_dim = 384
 
     backbone = Embedder(num_atom_types=120, embed_dim=embed_dim)
-    neck = GNN(num_layers=6, embed_dim=embed_dim, gnn_type='gcn', JK='last', dropout=0.1)
+    neck = GNN(num_layers=3, embed_dim=embed_dim, gnn_type='gcn', JK='last', dropout=0.1)
     aggrmodel = GNNAggr(embed_dim=embed_dim, aggr='mean')
 
-    backbone_ckpt = torch.load('trained_models/ver1_1030.pth')['backbone_state_dict']
-    neck_ckpt = torch.load('trained_models/ver1_1030.pth')['neck_state_dict']
+    if not no_pretrain:
+        backbone_ckpt = torch.load(pretrained_path)['backbone_state_dict']
+        neck_ckpt = torch.load(pretrained_path)['neck_state_dict']
 
-    backbone.load_state_dict(backbone_ckpt)
-    neck.load_state_dict(neck_ckpt)
+        backbone.load_state_dict(backbone_ckpt)
+        neck.load_state_dict(neck_ckpt)
     
     ### 3. Define head for finetuning
     head = MLP(input_dim=embed_dim, hidden_dim=512, output_dim=len(y_cols), num_layers=3, dropout=0.1, batch_norm=True, output_activation=None)
@@ -79,28 +90,25 @@ if __name__ == "__main__":
         {'params': head.parameters(), 'lr': 5e-3}
     ])
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=150, eta_min=1e-6)
-    criterion = MaskedBCELoss()
-    # params of convert() 
-    # smiles: str, context_length: int = 420, edge_output_type = 'edge_list', padding = False
-    dataset = []
-    created_labels = []
-    for smi, label in zip(smiles_list, labels):
-        atom_type_indices, edge_index, mol = SMILESToInputs.convert(smi, edge_output_type='edge_list', padding=False, sanitize=False)
-        if atom_type_indices is None or edge_index is None:
-            continue
-        data = Data(x=atom_type_indices.unsqueeze(1), edge_index=edge_index.t().contiguous()[:2], y=torch.tensor(label))
-        dataset.append(data)
-        # prepare label for stratification: convert -1 -> 0 and treat positives as 1
-        arr = np.array(label, dtype=float)
-        binarized = (arr == 1.0).astype(int)
-        created_labels.append(binarized)
+    criterion = MaskedFocalLoss()
 
     writer = SummaryWriter(log_dir='runs/finetune_experiment')
-    num_epochs = 1
-    random_state=42
 
     if split_method == 'S-K-fold':
         K = 5
+
+        dataset = []
+        created_labels = []
+        for smi, label in zip(smiles_list, labels):
+            atom_type_indices, edge_index, mol = SMILESToInputs.convert(smi, edge_output_type='edge_list', padding=False, sanitize=False)
+            if atom_type_indices is None or edge_index is None:
+                continue
+            data = Data(x=atom_type_indices.unsqueeze(1), edge_index=edge_index.t().contiguous()[:2], y=torch.tensor(label))
+            dataset.append(data)
+            # prepare label for stratification: convert -1 -> 0 and treat positives as 1
+            arr = np.array(label, dtype=float)
+            binarized = (arr == 1.0).astype(int)
+            created_labels.append(binarized)
 
         global_step = 0
         try:
@@ -110,7 +118,6 @@ if __name__ == "__main__":
                 splits = list(splitter.split(np.zeros(len(created_labels)), np.array(created_labels)))
             except Exception:
                 # Fallback: collapse multilabel into a single aggregated label for stratification (imperfect)
-                from sklearn.model_selection import StratifiedKFold
                 collapsed = []
                 for lbl in created_labels:
                     # collapse binary vector to a string/tuple and map to int class
@@ -173,20 +180,57 @@ if __name__ == "__main__":
                     writer.add_scalar('Val/Loss', avg_val_loss, epoch + k * num_epochs)
         except KeyboardInterrupt:
             print("Training interrupted. Saving current model...")
+            save_model_name = 'trained_models/finetuned_model_interrupted_nopretrain.pth' if no_pretrain else 'trained_models/finetuned_model_interrupted.pth'
             torch.save({
                 'backbone_state_dict': backbone.state_dict(),
                 'neck_state_dict': neck.state_dict(),
                 'head_state_dict': head.state_dict(),
-            }, 'trained_models/finetuned_model_interrupted.pth')
+            }, save_model_name)
+
     elif split_method == 'scaffold':
         try:
             global_step = 0
             splitter = ScaffoldSplitter()
-            #split on 8:1:1
-            train_val_dataset, test_dataset = splitter.train_test_split(dataset, frac_train=0.9, random_state=random_state)
-            train_dataset, val_dataset = splitter.train_test_split(train_val_dataset, frac_train=0.8889, random_state=random_state)
-            train_dataloader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, collate_fn=Batch.from_data_list)
+
+            dc_dataset = NumpyDataset(X=labels, ids=smiles_list)
+            # default split on 8:1:1
+            dc_train, dc_val, dc_test = splitter.train_valid_test_split(dc_dataset, seed=random_state)
+
+            train_smiles = dc_train.ids
+            train_labels = dc_train.X
+            train_dataset = []
+            val_smiles = dc_val.ids
+            val_labels = dc_val.X
+            val_dataset = []
+            test_smiles = dc_test.ids
+            test_labels = dc_test.X
+            test_dataset = []
+
+            for smi, label in zip(train_smiles, train_labels):
+                atom_type_indices, edge_index, mol = SMILESToInputs.convert(smi, edge_output_type='edge_list', padding=False, sanitize=False)
+                if atom_type_indices is None or edge_index is None:
+                    continue
+                data = Data(x=atom_type_indices.unsqueeze(1), edge_index=edge_index.t().contiguous()[:2], y=torch.tensor(label))
+                train_dataset.append(data)
+
+            for smi, label in zip(val_smiles, val_labels):
+                atom_type_indices, edge_index, mol = SMILESToInputs.convert(smi, edge_output_type='edge_list', padding=False, sanitize=False)
+                if atom_type_indices is None or edge_index is None:
+                    continue
+                data = Data(x=atom_type_indices.unsqueeze(1), edge_index=edge_index.t().contiguous()[:2], y=torch.tensor(label))
+                val_dataset.append(data)
+
+            for smi, label in zip(test_smiles, test_labels):
+                atom_type_indices, edge_index, mol = SMILESToInputs.convert(smi, edge_output_type='edge_list', padding=False, sanitize=False)
+                if atom_type_indices is None or edge_index is None:
+                    continue
+                data = Data(x=atom_type_indices.unsqueeze(1), edge_index=edge_index.t().contiguous()[:2], y=torch.tensor(label))
+                test_dataset.append(data)
+
+            train_dataloader = DataLoader(train_dataset, batch_size=batch_size, shuffle=False, collate_fn=Batch.from_data_list)
             val_dataloader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, collate_fn=Batch.from_data_list)
+            test_dataloader = DataLoader(test_dataset, batch_size=test_batch_size, shuffle=False, collate_fn=Batch.from_data_list)
+
             for epoch in range(num_epochs):
                 backbone.train()
                 neck.train()
@@ -228,31 +272,36 @@ if __name__ == "__main__":
                 writer.add_scalar('Val/Loss', avg_val_loss, epoch)
         except KeyboardInterrupt:
             print("Training interrupted. Saving current model...")
+            save_model_name = 'trained_models/finetuned_model_interrupted_nopretrain.pth' if no_pretrain else 'trained_models/finetuned_model_interrupted.pth'
             torch.save({
                 'backbone_state_dict': backbone.state_dict(),
                 'neck_state_dict': neck.state_dict(),
                 'head_state_dict': head.state_dict(),
-            }, 'trained_models/finetuned_model_interrupted.pth')
+            }, save_model_name)
     else:
         raise ValueError(f"Unknown split method: {split_method}")
     writer.close()
     
     # 5. Save final model
+    save_model_name = 'trained_models/finetuned_model_nopretrain.pth' if no_pretrain else 'trained_models/finetuned_model.pth'
     torch.save({
         'backbone_state_dict': backbone.state_dict(),
         'neck_state_dict': neck.state_dict(),
         'head_state_dict': head.state_dict(),
-    }, 'trained_models/finetuned_model.pth')
+    }, save_model_name)
 
     # 6. Test on the test set, report ROC-AUC
-    test_size = int(0.05 * len(dataset))
-    test_dataset = dataset[-test_size:]
-    test_dataloader = DataLoader(test_dataset, batch_size=test_batch_size, shuffle=False, collate_fn=Batch.from_data_list)
+    if split_method == 'S-K-fold':
+        test_size = int(0.05 * len(dataset))
+        test_dataset = dataset[-test_size:]
+        test_dataloader = DataLoader(test_dataset, batch_size=test_batch_size, shuffle=False, collate_fn=Batch.from_data_list)
+    
     backbone.eval()
     neck.eval()
     head.eval()
     test_loss = 0.0
-    total_aucs = []
+    all_labels = np.array([])
+    all_preds = np.array([])
     with torch.no_grad():
         for batch in tqdm(test_dataloader, desc="Testing"):
             batch = batch.to(device)
@@ -268,20 +317,12 @@ if __name__ == "__main__":
                 if valid_mask.sum().item() == 0:
                     continue
                 valid_labels = batch.y.reshape(-1, len(y_cols))[valid_mask, i].cpu().numpy()
-                valid_preds = preds[valid_mask, i].cpu().numpy()
-                try:
-                    auc = roc_auc_score(valid_labels, valid_preds)
-                    # if nan do not append
-                    if np.isnan(auc):
-                        continue
-                    aucs.append(auc)
-                except ValueError:
-                    continue
-            if len(aucs) > 0:
-                total_aucs.append(np.mean(aucs))
-            else:
-                print("No valid AUCs for this batch! Skipping...")
+                valid_preds = F.sigmoid(preds[valid_mask, i]).cpu().numpy()
+
+                all_labels = np.concatenate([all_labels, valid_labels])
+                all_preds = np.concatenate([all_preds, valid_preds])
+
     avg_test_loss = test_loss / len(test_dataloader)
     print(f"Test Loss: {avg_test_loss:.4f}")
-    mean_auc = np.mean(aucs)
-    print(f"Test ROC-AUC: {mean_auc:.4f}")
+    test_auc = roc_auc_score(all_labels, all_preds)
+    print(f"Test auc: {test_auc:.4f}")

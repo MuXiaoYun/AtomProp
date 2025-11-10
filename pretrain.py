@@ -1,4 +1,4 @@
-from atomprop.tasks.tasks import NodeAttrPrediction, MaskedNodePrediction, GraphMaskContrast, BatchContrast
+from atomprop.tasks.tasks import MaskedNodePrediction, GraphMaskContrast, BatchContrast
 from atomprop.dataloader.dataloader import SMILESToInputs
 from atomprop.models.GNNs import Embedder, GNN, GNNAggr
 from atomprop.utils.mlp import MLP
@@ -16,9 +16,9 @@ from torch.utils.tensorboard import SummaryWriter
 embed_dim = 384
 
 backbone = Embedder(num_atom_types=120, embed_dim=embed_dim)
-neck = GNN(num_layers=6, embed_dim=embed_dim, gnn_type='gcn', JK='last', dropout=0.1)
-head = MLP(input_dim=embed_dim, hidden_dim=256, output_dim=157, num_layers=1, dropout=0.1)
-head1 = MLP(input_dim=embed_dim, hidden_dim=256, output_dim=embed_dim, num_layers=2, dropout=0.1)
+neck = GNN(num_layers=6, embed_dim=embed_dim, gnn_type='gcn', JK='last', dropout=0.5)
+head = MLP(input_dim=embed_dim, hidden_dim=256, output_dim=157, num_layers=1, dropout=0.5)
+head1 = MLP(input_dim=embed_dim, hidden_dim=256, output_dim=embed_dim, num_layers=2, dropout=0.5)
 aggrmodel = GNNAggr(embed_dim=embed_dim, aggr='mean')
 
 less_rate = 0.1
@@ -26,47 +26,51 @@ more_rate = 0.3
 
 record_freq = 100
 
-task = NodeAttrPrediction()
+task0 = NodeAttrPrediction()
 task1 = MaskedNodePrediction()
 task2 = GraphMaskContrast(less_rate=less_rate, more_rate=more_rate)
 task3 = BatchContrast()
 
+# data_path = "data/zinc15/dataset/zinc_standard_agent/processed/smiles.csv"
 data_path = "data/nabladft/summary.csv"
+pretrain_file_type = 'csv'
+logdir = "pretrain_nabladft"
+
 dataset_size = -1
 chunk_size = 65536
 max_atom_num = 128
 batch_size = 1024
-num_epochs = 6
+num_epochs = 10
 
 device = torch.device("cuda:7") if torch.cuda.is_available() else torch.device("cpu")
 
 optimizer_configs = {
     "backbone": {
         "cls": torch.optim.Adam,
-        "kwargs": {"lr": 5e-5, "weight_decay": 1e-5}
+        "kwargs": {"lr": 5e-4, "weight_decay": 5e-5}
     },
     "neck": {
         "cls": torch.optim.AdamW,
-        "kwargs": {"lr": 1e-4, "weight_decay": 5e-4}
+        "kwargs": {"lr": 1e-3, "weight_decay": 1e-4}
     },
     "head": {
         "cls": torch.optim.Adam,
-        "kwargs": {"lr": 2e-4, "weight_decay": 1e-6}
+        "kwargs": {"lr": 5e-4, "weight_decay": 1e-5}
     },
     "head1": {
         "cls": torch.optim.Adam,
-        "kwargs": {"lr": 2e-4, "weight_decay": 1e-6}
+        "kwargs": {"lr": 5e-4, "weight_decay": 1e-5}
     }
 }
 
 scheduler_configs = {
     "backbone": {
         "cls": torch.optim.lr_scheduler.ReduceLROnPlateau,
-        "kwargs": {"mode": "min", "factor": 0.7, "patience": 4, "min_lr": 1e-6}
+        "kwargs": {"mode": "min", "factor": 0.7, "patience": 4, "min_lr": 1e-5}
     },
     "neck": {
         "cls": torch.optim.lr_scheduler.CosineAnnealingLR,
-        "kwargs": {"T_max": 20, "eta_min": 1e-6}
+        "kwargs": {"T_max": 20, "eta_min": 1e-5}
     },
     "head": {
         "cls": torch.optim.lr_scheduler.StepLR,
@@ -116,7 +120,7 @@ def smiles_to_pyg_data(smiles, max_atom_num=None):
     return Data(x=x, edge_index=edge_index, edge_attr=edge_attr, smiles=smiles, mol=mol)
 
 class PyGChunkDataListLoader:
-    def __init__(self, data_path, split_indices, chunk_size=65536, max_atom_num=128, batch_size=32, device=None):
+    def __init__(self, data_path, split_indices, chunk_size=65536, max_atom_num=128, batch_size=32, device=None, file_type='csv'):
         self.data_path = data_path
         self.split_indices = split_indices
         self.chunk_size = chunk_size
@@ -125,8 +129,14 @@ class PyGChunkDataListLoader:
         self.current_chunk_idx = 0
         self.current_chunk_data = None
         self.current_chunk_start = 0
-        self.headers = pd.read_csv(data_path, nrows=0).columns.tolist()
         self.device = device
+        self.file_type = file_type
+        
+        if self.file_type == 'csv':
+            self.headers = pd.read_csv(data_path, nrows=0).columns.tolist()
+        else:
+            self.headers = ['SMILES']
+            
         self.sorted_indices = np.sort(split_indices)
         self.total_batches = len(self.sorted_indices) // self.batch_size
         if len(self.sorted_indices) % self.batch_size != 0:
@@ -153,14 +163,23 @@ class PyGChunkDataListLoader:
             chunk_start = chunk_num * self.chunk_size
 
             if self.current_chunk_data is None or chunk_start != self.current_chunk_start:
-                self.current_chunk_data = pd.read_csv(
-                    self.data_path,
-                    skiprows=chunk_start + 1,
-                    nrows=self.chunk_size,
-                    header=None,
-                    names=self.headers,
-                    usecols=['SMILES']
-                )
+                if self.file_type == 'csv':
+                    self.current_chunk_data = pd.read_csv(
+                        self.data_path,
+                        skiprows=chunk_start + 1,
+                        nrows=self.chunk_size,
+                        header=None,
+                        names=self.headers,
+                        usecols=['SMILES']
+                    )
+                else:
+                    self.current_chunk_data = pd.read_csv(
+                        self.data_path,
+                        skiprows=chunk_start,
+                        nrows=self.chunk_size,
+                        header=None,
+                        names=self.headers
+                    )
                 self.current_chunk_start = chunk_start
 
             local_idx = target_idx % self.chunk_size
@@ -184,7 +203,7 @@ class PyGChunkDataListLoader:
 
 
 if __name__ == "__main__":
-    writer = SummaryWriter()
+    writer = SummaryWriter(log_dir=f"runs/{logdir}")
     total_rows, columns = get_dataset_info(data_path)
     print(f"Total rows in dataset: {total_rows}")
 
@@ -205,6 +224,7 @@ if __name__ == "__main__":
     print(backbone.__class__.__name__, f"Parameters: {sum(p.numel() for p in backbone.parameters() if p.requires_grad)}")
     print(neck.__class__.__name__, f"Parameters: {sum(p.numel() for p in neck.parameters() if p.requires_grad)}")
     print(head.__class__.__name__, f"Parameters: {sum(p.numel() for p in head.parameters() if p.requires_grad)}")
+    print(head1.__class__.__name__, f"Parameters: {sum(p.numel() for p in head1.parameters() if p.requires_grad)}")
 
     components = {
         "backbone": backbone,
@@ -237,6 +257,7 @@ if __name__ == "__main__":
         chunk_size=chunk_size,
         max_atom_num=max_atom_num,
         batch_size=batch_size,
+        file_type=pretrain_file_type
     )
     val_loader = PyGChunkDataListLoader(
         data_path=data_path,
@@ -244,6 +265,7 @@ if __name__ == "__main__":
         chunk_size=chunk_size,
         max_atom_num=max_atom_num,
         batch_size=batch_size,
+        file_type=pretrain_file_type
     )
     
     best_val_loss = float('inf')
@@ -277,9 +299,9 @@ if __name__ == "__main__":
 
                 outputs = head(graph_emb)
                 outputs = outputs.view(-1, outputs.size(-1))
-                task.set_pred(outputs)
-                task.run_label(mols, device)
-                loss_atom_attr_pred = task.compute_loss()
+                task0.set_pred(outputs)
+                task0.run_label(mols, device)
+                loss_atom_attr_pred = task0.compute_loss()
                 
                 mask_indices = MolGraphMask.select_mask_indices(batch_data.x)
                 masked_atom_emb = MolGraphMask.mask_atoms(atom_emb, mask_indices, torch.zeros(embed_dim))
@@ -371,7 +393,7 @@ if __name__ == "__main__":
                         pass
                 
                 if batch_idx == train_loader.total_batches - 1:
-                    metrics = task.get_metrics()
+                    metrics = task0.get_metrics()
                     print(f"Batch {batch_idx+1}/{train_loader.total_batches} Metrics: {metrics}")
                 
                 batch_size_current = len(mols)
@@ -410,9 +432,9 @@ if __name__ == "__main__":
 
                     outputs = head(graph_emb)
                     outputs = outputs.view(-1, outputs.size(-1))
-                    task.set_pred(outputs)
-                    task.run_label(mols, device)
-                    loss_atom_attr_pred = task.compute_loss()
+                    task0.set_pred(outputs)
+                    task0.run_label(mols, device)
+                    loss_atom_attr_pred = task0.compute_loss()
                     
                     mask_indices = MolGraphMask.select_mask_indices(batch_data.x)
                     masked_atom_emb = MolGraphMask.mask_atoms(atom_emb, mask_indices, torch.zeros(embed_dim))
@@ -461,7 +483,11 @@ if __name__ == "__main__":
                         writer.add_scalar('Val/Loss_batch_contrast', loss_batch_contrast.item(), epoch * val_loader.total_batches + batch_idx)
                     
                     if batch_idx == val_loader.total_batches - 1:
-                        metrics = task.get_metrics()
+                        metrics_0 = task0.get_metrics()
+                        metrics_1 = task1.get_metrics()
+                        metrics_2 = task2.get_metrics()
+                        metrics_3 = task3.get_metrics()
+                        metrics = {**metrics_0, **metrics_1, **metrics_2, **metrics_3}
                         print(f"Batch {batch_idx+1}/{val_loader.total_batches} Metrics: {metrics}")
                     
                     batch_size_current = len(mols)

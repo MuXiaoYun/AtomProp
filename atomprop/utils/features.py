@@ -10,7 +10,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-class atomFeaturize:
+class AtomFeaturize:
     """
     A class to featurize atoms in a molecule.
     Used features include:
@@ -156,25 +156,25 @@ class atomFeaturize:
         atom_features = []
         for atom in mol.GetAtoms():
             features = []
-            features += atomFeaturize.atom_type_onehot(atom)
-            features += atomFeaturize.atom_degree_onehot(atom)
-            features += atomFeaturize.atom_formal_charge_onehot(atom)
-            features += atomFeaturize.atom_hybridization_onehot(atom)
-            features += atomFeaturize.atom_chirality_onehot(atom)
-            features += atomFeaturize.atom_num_hydrogens_onehot(atom)
-            features += atomFeaturize.atom_mass(atom)
+            features += AtomFeaturize.atom_type_onehot(atom)
+            features += AtomFeaturize.atom_degree_onehot(atom)
+            features += AtomFeaturize.atom_formal_charge_onehot(atom)
+            features += AtomFeaturize.atom_hybridization_onehot(atom)
+            features += AtomFeaturize.atom_chirality_onehot(atom)
+            features += AtomFeaturize.atom_num_hydrogens_onehot(atom)
+            features += AtomFeaturize.atom_mass(atom)
             atom_features.append(features)
         atom_features_np = torch.tensor(atom_features, dtype=torch.float32)
         return atom_features_np # dimension of each atom feature is 119+8+7+8+8+6+1=157
 
-class atomFeaturizeLoss(nn.Module):
+class AtomFeaturizeLoss(nn.Module):
     """
     A class to compute loss for atom features prediction.
     Use BCEWithLogitsLoss for multi-label classification dimensions.
     Use MSELoss for continuous dimensions.
     """
     def __init__(self):
-        super(atomFeaturizeLoss, self).__init__()
+        super(AtomFeaturizeLoss, self).__init__()
         self.bce_loss = nn.BCEWithLogitsLoss()
         self.mse_loss = nn.MSELoss()
         self.multi_label_indices = list(range(0, 119 + 8 + 7 + 8 + 8 + 6))  # first 156 dimensions

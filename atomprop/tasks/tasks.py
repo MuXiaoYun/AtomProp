@@ -2,7 +2,7 @@
 Module for pretraining tasks for GNNs.
 """
 
-from atomprop.utils.features import atomFeaturize, atomFeaturizeLoss 
+from atomprop.utils.features import AtomFeaturize, AtomFeaturizeLoss 
 import torch
 import torch.nn as nn
 
@@ -12,7 +12,7 @@ class NodeAttrPrediction:
     This class computes losses and metrics for the task.
     """
 
-    def __init__(self, criterion=atomFeaturizeLoss()):
+    def __init__(self, criterion=AtomFeaturizeLoss()):
         self.criterion = criterion
         self.preds = None
         self.labels = None
@@ -28,7 +28,7 @@ class NodeAttrPrediction:
         """
         Process a batch of data and generate labels.
         """
-        self.labels = torch.cat([atomFeaturize.featurize(mol) for mol in mol_batch], dim=0).to(device)
+        self.labels = torch.cat([AtomFeaturize.featurize(mol) for mol in mol_batch], dim=0).to(device)
         return
 
     def compute_loss(self):
@@ -177,3 +177,19 @@ class BatchContrast:
         return {
             'relative_accuracy': relative_accuracy.item()
         }
+
+class BondLengthPrediction:
+    pass
+
+class BondAnglePrediction:
+    pass
+
+class DFTPrediction:
+    """
+    Graph level prediction of DFT properties.
+    """
+
+    def __init__(self, criterion=nn.MSELoss()):
+        self.criterion = criterion
+        self.preds = None
+        self.labels = None
