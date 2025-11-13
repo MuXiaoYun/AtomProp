@@ -1,5 +1,5 @@
 from atomprop.tasks.tasks import MaskedNodePrediction, GraphMaskContrast, BatchContrast
-from atomprop.dataloader.dataloader import SMILESToInputs
+from atomprop.dataloader.dataloader import SMILESToInputs, PyGChunkDataListLoader
 from atomprop.models.GNNs import Embedder, GNN, GNNAggr
 from atomprop.utils.mlp import MLP
 from atomprop.utils.mask import MolGraphMask
@@ -32,9 +32,13 @@ task2 = GraphMaskContrast(less_rate=less_rate, more_rate=more_rate)
 task3 = BatchContrast()
 
 # data_path = "data/zinc15/dataset/zinc_standard_agent/processed/smiles.csv"
-data_path = "data/nabladft/summary.csv"
-pretrain_file_type = 'csv'
-logdir = "pretrain_nabladft"
+data_path = "data/pubchem/pubchem-10m.txt"
+pretrain_file_type = 'txt'
+
+xyz_path = "data/pubchem/pubchem-xyzs.txt"
+xyz_type = 'txt'
+
+logdir = "pretrain_pubchem"
 
 dataset_size = -1
 chunk_size = 65536
@@ -95,112 +99,6 @@ def create_data_splits(total_size):
     val_indices = indices[train_size:train_size + val_size]
     test_indices = indices[train_size + val_size:]
     return train_indices, val_indices, test_indices
-
-def smiles_to_pyg_data(smiles, max_atom_num=None):
-    atom_indices, edges, mol = SMILESToInputs.convert(
-        smiles=smiles,
-        context_length=max_atom_num
-    )
-
-    if mol is None:
-        return None
-    
-    num_atoms = len(mol.GetAtoms())
-    x = atom_indices[:num_atoms]
-    if x.dim() == 1:
-        x = x.unsqueeze(-1)
-    
-    if edges.dim() == 2 and edges.size(1) == 3:
-        edge_index = edges[:, :2].t().contiguous()
-        edge_attr = edges[:, 2].unsqueeze(-1)
-    else:
-        edge_index = edges
-        edge_attr = torch.ones(edges.size(1), 1) if edges.dim() == 2 else torch.ones(1, 1)
-    
-    return Data(x=x, edge_index=edge_index, edge_attr=edge_attr, smiles=smiles, mol=mol)
-
-class PyGChunkDataListLoader:
-    def __init__(self, data_path, split_indices, chunk_size=65536, max_atom_num=128, batch_size=32, device=None, file_type='csv'):
-        self.data_path = data_path
-        self.split_indices = split_indices
-        self.chunk_size = chunk_size
-        self.max_atom_num = max_atom_num
-        self.batch_size = batch_size
-        self.current_chunk_idx = 0
-        self.current_chunk_data = None
-        self.current_chunk_start = 0
-        self.device = device
-        self.file_type = file_type
-        
-        if self.file_type == 'csv':
-            self.headers = pd.read_csv(data_path, nrows=0).columns.tolist()
-        else:
-            self.headers = ['SMILES']
-            
-        self.sorted_indices = np.sort(split_indices)
-        self.total_batches = len(self.sorted_indices) // self.batch_size
-        if len(self.sorted_indices) % self.batch_size != 0:
-            self.total_batches += 1
-
-    def __iter__(self):
-        self.current_chunk_idx = 0
-        self.current_chunk_data = None
-        return self
-
-    def __next__(self):
-        data_list = []
-        mols_list = []
-
-        while len(data_list) < self.batch_size:
-            if self.current_chunk_idx >= len(self.sorted_indices):
-                if len(data_list) > 0:
-                    return data_list, mols_list
-                else:
-                    raise StopIteration
-
-            target_idx = self.sorted_indices[self.current_chunk_idx]
-            chunk_num = target_idx // self.chunk_size
-            chunk_start = chunk_num * self.chunk_size
-
-            if self.current_chunk_data is None or chunk_start != self.current_chunk_start:
-                if self.file_type == 'csv':
-                    self.current_chunk_data = pd.read_csv(
-                        self.data_path,
-                        skiprows=chunk_start + 1,
-                        nrows=self.chunk_size,
-                        header=None,
-                        names=self.headers,
-                        usecols=['SMILES']
-                    )
-                else:
-                    self.current_chunk_data = pd.read_csv(
-                        self.data_path,
-                        skiprows=chunk_start,
-                        nrows=self.chunk_size,
-                        header=None,
-                        names=self.headers
-                    )
-                self.current_chunk_start = chunk_start
-
-            local_idx = target_idx % self.chunk_size
-            smiles = self.current_chunk_data.iloc[local_idx]['SMILES']
-
-            data = smiles_to_pyg_data(smiles, self.max_atom_num)
-
-            if data is None:
-                print(f"Invalid SMILES at index {target_idx}: {smiles}")
-                self.current_chunk_idx += 1
-                continue
-
-            if self.device is not None:
-                data = data.to(self.device)
-
-            data_list.append(data)
-            mols_list.append(data.mol)
-            self.current_chunk_idx += 1
-
-        return data_list, mols_list
-
 
 if __name__ == "__main__":
     writer = SummaryWriter(log_dir=f"runs/{logdir}")
@@ -529,7 +427,7 @@ if __name__ == "__main__":
                     'scheduler_state_dict': {name: sch.state_dict() for name, sch in schedulers.items()},
                     'epoch': epoch,
                     'best_val_loss': best_val_loss
-                }, 'trained_models/best_model.pth')
+                }, f'trained_models/{logdir}/best_model.pth')
                 print(f"Best model saved at epoch {epoch+1} with Val Loss = {best_val_loss:.6f}")
             # save model at each epoch
             torch.save({
@@ -541,7 +439,7 @@ if __name__ == "__main__":
                 'scheduler_state_dict': {name: sch.state_dict() for name, sch in schedulers.items()},
                 'epoch': epoch,
                 'val_loss': avg_val_loss
-            }, f'trained_models/model_epoch{epoch}.pth')
+            }, f'trained_models/{logdir}/model_epoch{epoch}.pth')
             print(f"Model at epoch {epoch+1} saved with Val Loss = {avg_val_loss:.6f}")
 
         except KeyboardInterrupt:
@@ -554,7 +452,7 @@ if __name__ == "__main__":
                 'scheduler_state_dict': {name: sch.state_dict() for name, sch in schedulers.items()},
                 'epoch': epoch,
                 'best_val_loss': best_val_loss
-            }, 'trained_models/interrupted_model.pth')
+            }, f'trained_models/{logdir}/interrupted_model.pth')
             print("Training interrupted. Model state saved to 'interrupted_model.pth'.")
         
     writer.close()

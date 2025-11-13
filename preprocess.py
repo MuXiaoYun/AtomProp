@@ -42,15 +42,16 @@ while True:
     smiles = line.strip()
     if not smiles:  # Skip empty lines
         invalid_smiles_count += 1
-        out_f.write("ERROR: EMPTY_SMILES\n\n")
         continue
     
     # Convert SMILES to molecule
     mol = Chem.MolFromSmiles(smiles)
     if mol is None:
         invalid_smiles_count += 1
-        out_f.write("ERROR: INVALID_SMILES\n\n")
         continue
+    # remove Hs
+    mol = Chem.RemoveHs(mol)
+    num_atoms = mol.GetNumAtoms()
     
     # try embedding molecules
     embed_result = AllChem.EmbedMolecule(mol, randomSeed=0xf00d)
@@ -64,16 +65,13 @@ while True:
                 pos = conf.GetAtomPosition(atom.GetIdx())
                 out_f.write(f"{pos.x} {pos.y} {pos.z}\n")
             successful_conformers += 1
-            # write an empty line
             out_f.write("\n")
         except:
-            # write a line of "ERROR: OPTIMIZE" and an empty line
-            out_f.write("ERROR: OPTIMIZE\n\n")
+            out_f.write(f"ERROR({num_atoms}): OPTIMIZE\n\n")
             error_optimize_count += 1
             continue
     else:
-        # write a line of "ERROR: EMBED" and an empty line
-        out_f.write("ERROR: EMBED\n\n")
+        out_f.write(f"ERROR({num_atoms}): EMBED\n\n")
         error_embed_count += 1
         continue
 

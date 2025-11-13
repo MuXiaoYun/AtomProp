@@ -194,26 +194,29 @@ class BondAnglePrediction:
         """
         Calculate angles and set predictions.
         Args:
-            xyzs: [B, N, 3] 
-            indices: [B, S, 3] 
+            xyzs: [N, 3] 
+            indices: [S, 3] 
         Returns:
-            coss: [B, S, 1]
+            coss: [S, 1]
         """
-        B, S, _ = indices.shape
-        batch_indices = torch.arange(B, device=xyzs.device).view(B, 1, 1)  # [B, 1, 1]
-        triplets = xyzs[batch_indices, indices]
-
-        p0 = triplets[:, :, 0]  # [B, S, 3]
-        p1 = triplets[:, :, 1]  # [B, S, 3]
-        p2 = triplets[:, :, 2]  # [B, S, 3]
-        v1 = p1 - p0
-        v2 = p2 - p0
-        v1_norm = F.normalize(v1, p=2, dim=-1)
-        v2_norm = F.normalize(v2, p=2, dim=-1)
+        triplets = xyzs[indices]  # [S, 3, 3]
         
-        cosines = torch.sum(v1_norm * v2_norm, dim=-1, keepdim=True)  # [B, S, 1]
-        cosines = torch.clamp(cosines, -1.0, 1.0)
+        p0 = triplets[:, 0]
+        p1 = triplets[:, 1]
+        p2 = triplets[:, 2]
+        
+        v1 = p1 - p0  
+        v2 = p2 - p0  
+        
+        dot_products = torch.sum(v1 * v2, dim=1, keepdim=True)  # [S, 1]
 
+        norm_v1 = torch.norm(v1, dim=1, keepdim=True)  # [S, 1]
+        norm_v2 = torch.norm(v2, dim=1, keepdim=True)  # [S, 1]
+
+        eps = 1e-8
+        cosines = dot_products / (norm_v1 * norm_v2 + eps)  # [S, 1]
+
+        cosines = torch.clamp(cosines, -1.0, 1.0)
         self.preds = cosines
         return
         
@@ -227,8 +230,12 @@ class BondAnglePrediction:
     def compute_loss(self):
         """
         Compute the loss for the task.
+        To note, thre are NANs in self.labels, which are angles that cannot be defined. We need to mask them and those relevant in self.preds.
         """
-        loss = self.criterion(self.preds, self.labels)
+        mask = ~torch.isnan(self.labels)
+        filtered_preds = self.preds[mask]
+        filtered_labels = self.labels[mask]
+        loss = self.criterion(filtered_preds, filtered_labels)
         return loss
 
     def get_metrics(self):
@@ -256,38 +263,32 @@ class DihedralAnglePrediction:
         """
         Calculate dihedral angles and set predictions.
         Args:
-            xyzs: [B, N, 3] 
-            indices: [B, S, 4]
+            xyzs: [N, 3] 
+            indices: [S, 4] 
         Returns:
-            coss: [B, S, 1]
+            coss: [S, 1]
         """
-        B, S, _ = indices.shape
-        batch_indices = torch.arange(B, device=xyzs.device).view(B, 1, 1)  # [B, 1, 1]
-        quadruplets = xyzs[batch_indices, indices]
+        quadruplets = xyzs[indices]  # [S, 4, 3]
+        
+        p0 = quadruplets[:, 0]
+        p1 = quadruplets[:, 1]
+        p2 = quadruplets[:, 2]
+        p3 = quadruplets[:, 3]
+        
+        b0 = p1 - p0  
+        b1 = p2 - p1  
+        b2 = p3 - p2  
+        
+        b1_norm = b1 / (torch.norm(b1, dim=1, keepdim=True) + 1e-8)
+        
+        v = b0 - torch.sum(b0 * b1_norm, dim=1, keepdim=True) * b1_norm
+        w = b2 - torch.sum(b2 * b1_norm, dim=1, keepdim=True) * b1_norm
+        
+        x = torch.sum(v * w, dim=1, keepdim=True)  # [S, 1]
+        y = torch.sum(torch.cross(b1_norm, v, dim=1) * w, dim=1, keepdim=True)  # [S, 1]
 
-        p0 = quadruplets[:, :, 0]  # [B, S, 3]
-        p1 = quadruplets[:, :, 1]  # [B, S, 3]
-        p2 = quadruplets[:, :, 2]  # [B, S, 3]
-        p3 = quadruplets[:, :, 3]  # [B, S, 3]
-
-        b0 = p1 - p0
-        b1 = p2 - p1
-        b2 = p3 - p2
-
-        b0xb1 = torch.cross(b0, b1, dim=-1)
-        b1xb2 = torch.cross(b1, b2, dim=-1)
-
-        b0xb1_norm = F.normalize(b0xb1, p=2, dim=-1)
-        b1xb2_norm = F.normalize(b1xb2, p=2, dim=-1)
-        b1_norm = F.normalize(b1, p=2, dim=-1)
-
-        m1 = torch.cross(b0xb1_norm, b1_norm, dim=-1)
-
-        x = torch.sum(b0xb1_norm * b1xb2_norm, dim=-1)
-        y = torch.sum(m1 * b1xb2_norm, dim=-1)
-
-        dihedrals = torch.atan2(y, x).unsqueeze(-1)  # [B, S, 1]
-        cosines = torch.cos(dihedrals)
+        angles = torch.atan2(y, x)  # [S, 1]
+        cosines = torch.cos(angles)  # [S, 1]
 
         self.preds = cosines
         return
@@ -302,8 +303,12 @@ class DihedralAnglePrediction:
     def compute_loss(self):
         """
         Compute the loss for the task.
+        To note, thre are NANs in self.labels, which are angles that cannot be defined. We need to mask them and those relevant in self.preds.
         """
-        loss = self.criterion(self.preds, self.labels)
+        mask = ~torch.isnan(self.labels)
+        filtered_preds = self.preds[mask]
+        filtered_labels = self.labels[mask]
+        loss = self.criterion(filtered_preds, filtered_labels)
         return loss
 
     def get_metrics(self):

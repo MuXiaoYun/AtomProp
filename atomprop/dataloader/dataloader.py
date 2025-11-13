@@ -133,3 +133,190 @@ class SDFToInputs:
             else:
                 raise ValueError(f"Invalid edge_output_type: {edge_output_type}. Must be 'adj_matrix' or 'edge_list'.")
         return results
+
+def smiles_to_pyg_data(smiles, max_atom_num=None):
+    atom_indices, edges, mol = SMILESToInputs.convert(
+        smiles=smiles,
+        context_length=max_atom_num
+    )
+
+    if mol is None:
+        return None
+    
+    num_atoms = len(mol.GetAtoms())
+    x = atom_indices[:num_atoms]
+    if x.dim() == 1:
+        x = x.unsqueeze(-1)
+    
+    if edges.dim() == 2 and edges.size(1) == 3:
+        edge_index = edges[:, :2].t().contiguous()
+        edge_attr = edges[:, 2].unsqueeze(-1)
+    else:
+        edge_index = edges
+        edge_attr = torch.ones(edges.size(1), 1) if edges.dim() == 2 else torch.ones(1, 1)
+    
+    return Data(x=x, edge_index=edge_index, edge_attr=edge_attr, smiles=smiles, mol=mol)
+
+class PyGChunkDataListLoader:
+    def __init__(self, data_path, split_indices, chunk_size=65536, max_atom_num=128, batch_size=32, device=None, file_type='csv'):
+        self.data_path = data_path
+        self.split_indices = split_indices
+        self.chunk_size = chunk_size
+        self.max_atom_num = max_atom_num
+        self.batch_size = batch_size
+        self.current_chunk_idx = 0
+        self.current_chunk_data = None
+        self.current_chunk_start = 0
+        self.device = device
+        self.file_type = file_type
+        
+        if self.file_type == 'csv':
+            self.headers = pd.read_csv(data_path, nrows=0).columns.tolist()
+        else:
+            self.headers = ['SMILES']
+            
+        self.sorted_indices = np.sort(split_indices)
+        self.total_batches = len(self.sorted_indices) // self.batch_size
+        if len(self.sorted_indices) % self.batch_size != 0:
+            self.total_batches += 1
+
+    def __iter__(self):
+        self.current_chunk_idx = 0
+        self.current_chunk_data = None
+        return self
+
+    def __next__(self):
+        data_list = []
+        mols_list = []
+
+        while len(data_list) < self.batch_size:
+            if self.current_chunk_idx >= len(self.sorted_indices):
+                if len(data_list) > 0:
+                    return data_list, mols_list
+                else:
+                    raise StopIteration
+
+            target_idx = self.sorted_indices[self.current_chunk_idx]
+            chunk_num = target_idx // self.chunk_size
+            chunk_start = chunk_num * self.chunk_size
+
+            if self.current_chunk_data is None or chunk_start != self.current_chunk_start:
+                if self.file_type == 'csv':
+                    self.current_chunk_data = pd.read_csv(
+                        self.data_path,
+                        skiprows=chunk_start + 1,
+                        nrows=self.chunk_size,
+                        header=None,
+                        names=self.headers,
+                        usecols=['SMILES']
+                    )
+                else:
+                    self.current_chunk_data = pd.read_csv(
+                        self.data_path,
+                        skiprows=chunk_start,
+                        nrows=self.chunk_size,
+                        header=None,
+                        names=self.headers
+                    )
+                self.current_chunk_start = chunk_start
+
+            local_idx = target_idx % self.chunk_size
+            smiles = self.current_chunk_data.iloc[local_idx]['SMILES']
+
+            data = smiles_to_pyg_data(smiles, self.max_atom_num)
+
+            if data is None:
+                print(f"Invalid SMILES at index {target_idx}: {smiles}")
+                self.current_chunk_idx += 1
+                continue
+
+            if self.device is not None:
+                data = data.to(self.device)
+
+            data_list.append(data)
+            mols_list.append(data.mol)
+            self.current_chunk_idx += 1
+
+        return data_list, mols_list
+
+class XYZChunckDataLoader:
+    def __init__(self, data_path, split_indices, chunk_size=65536, max_atom_num=128, batch_size=32, device=None, file_type='txt'):
+        self.data_path = data_path
+        self.split_indices = split_indices
+        self.chunk_size = chunk_size
+        self.max_atom_num = max_atom_num
+        self.batch_size = batch_size
+        self.current_chunk_idx = 0
+        self.current_chunk_data = None
+        self.current_chunk_start = 0
+        self.device = device
+        self.file_type = file_type
+        
+        if self.file_type == 'txt':
+            self.headers = pd.read_csv(data_path, nrows=0).columns.tolist()
+        else:
+            pass
+            
+        self.sorted_indices = np.sort(split_indices)
+        self.total_batches = len(self.sorted_indices) // self.batch_size
+        if len(self.sorted_indices) % self.batch_size != 0:
+            self.total_batches += 1
+
+    def __iter__(self):
+        self.current_chunk_idx = 0
+        self.current_chunk_data = None
+        return self
+
+    def __next__(self):
+        data_list = []
+        mols_list = []
+
+        while len(data_list) < self.batch_size:
+            if self.current_chunk_idx >= len(self.sorted_indices):
+                if len(data_list) > 0:
+                    return data_list, mols_list
+                else:
+                    raise StopIteration
+
+            target_idx = self.sorted_indices[self.current_chunk_idx]
+            chunk_num = target_idx // self.chunk_size
+            chunk_start = chunk_num * self.chunk_size
+
+            if self.current_chunk_data is None or chunk_start != self.current_chunk_start:
+                if self.file_type == 'csv':
+                    self.current_chunk_data = pd.read_csv(
+                        self.data_path,
+                        skiprows=chunk_start + 1,
+                        nrows=self.chunk_size,
+                        header=None,
+                        names=self.headers,
+                        usecols=['SMILES']
+                    )
+                else:
+                    self.current_chunk_data = pd.read_csv(
+                        self.data_path,
+                        skiprows=chunk_start,
+                        nrows=self.chunk_size,
+                        header=None,
+                        names=self.headers
+                    )
+                self.current_chunk_start = chunk_start
+
+            local_idx = target_idx % self.chunk_size
+            smiles = self.current_chunk_data.iloc[local_idx]['SMILES']
+
+            data = smiles_to_pyg_data(smiles, self.max_atom_num)
+
+            if data is None:
+                print(f"Invalid SMILES at index {target_idx}: {smiles}")
+                self.current_chunk_idx += 1
+                continue
+
+            if self.device is not None:
+                data = data.to(self.device)
+
+            data_list.append(data)
+            mols_list.append(data.mol)
+            self.current_chunk_idx += 1
+
+        return data_list, mols_list

@@ -12,15 +12,16 @@ from iterstrat.ml_stratifiers import MultilabelStratifiedKFold
 from tqdm import tqdm
 from torch_geometric.data import Data, Batch, DataLoader
 from torch.utils.tensorboard import SummaryWriter
-from sklearn.metrics import roc_auc_score
+from sklearn.metrics import roc_auc_score, roc_curve
 from sklearn.model_selection import StratifiedKFold
 from deepchem.splits.splitters import ScaffoldSplitter
 from deepchem.data import NumpyDataset
+import csv
 
 no_pretrain = True
 
 data_path = "./data/moleculenet/tox21/tox21.csv"
-pretrained_path = 'trained_models/zinc15smaller.pth'
+pretrained_path = 'trained_models/ft_scaffold.pth'
 batch_size = 64
 test_batch_size = 256
 
@@ -300,8 +301,9 @@ if __name__ == "__main__":
     neck.eval()
     head.eval()
     test_loss = 0.0
-    all_labels = np.array([])
-    all_preds = np.array([])
+    all_preds = []  # list of (N, num_tasks)
+    all_labels = []
+
     with torch.no_grad():
         for batch in tqdm(test_dataloader, desc="Testing"):
             batch = batch.to(device)
@@ -309,20 +311,84 @@ if __name__ == "__main__":
             emb = neck(Data(x=emb, edge_index=batch.edge_index))
             graph_emb = aggrmodel(emb, batch.batch)
             preds = head(graph_emb)
-            loss = criterion(preds.reshape(-1, len(y_cols)), batch.y.reshape(-1, len(y_cols)))
-            test_loss += loss.item()
-            aucs = []
-            for i in range(len(y_cols)):
-                valid_mask = batch.y.reshape(-1, len(y_cols))[:, i] != -1
-                if valid_mask.sum().item() == 0:
-                    continue
-                valid_labels = batch.y.reshape(-1, len(y_cols))[valid_mask, i].cpu().numpy()
-                valid_preds = F.sigmoid(preds[valid_mask, i]).cpu().numpy()
+            # sigmoid to get probabilities
+            preds_np = F.sigmoid(preds).cpu().numpy()
+            labels_np = batch.y.reshape(-1, len(y_cols)).cpu().numpy()
+            all_preds.append(preds_np)
+            all_labels.append(labels_np)
 
-                all_labels = np.concatenate([all_labels, valid_labels])
-                all_preds = np.concatenate([all_preds, valid_preds])
+    if len(all_preds) == 0:
+        print("No predictions were produced on the test set.")
+        exit(1)
 
-    avg_test_loss = test_loss / len(test_dataloader)
-    print(f"Test Loss: {avg_test_loss:.4f}")
-    test_auc = roc_auc_score(all_labels, all_preds)
-    print(f"Test auc: {test_auc:.4f}")
+    all_preds = np.vstack(all_preds)
+    all_labels = np.vstack(all_labels)
+
+    # compute per-task thresholds using ROC left-top point (min distance to (0,1))
+
+    thresholds = np.full(len(y_cols), 0.5, dtype=float)
+    task_aucs = []
+    for col_idx in range(len(y_cols)):
+        valid_mask = all_labels[:, col_idx] != -1
+        if valid_mask.sum() == 0:
+            # no labels for this task in test set
+            thresholds[col_idx] = 0.5
+            continue
+        valid_labels = all_labels[valid_mask, col_idx]
+        valid_preds = all_preds[valid_mask, col_idx]
+        # if only one class present, skip ROC
+        if len(np.unique(valid_labels)) < 2:
+            thresholds[col_idx] = 0.5
+            try:
+                auc = roc_auc_score(valid_labels, valid_preds)
+                task_aucs.append(auc)
+            except Exception:
+                pass
+            continue
+        fpr, tpr, thr = roc_curve(valid_labels, valid_preds)
+        # distance to the point (0,1)
+        distances = (fpr - 0.0) ** 2 + (1.0 - tpr) ** 2
+        idx = np.nanargmin(distances)
+        thresholds[col_idx] = thr[idx]
+        try:
+            auc = roc_auc_score(valid_labels, valid_preds)
+            task_aucs.append(auc)
+        except Exception:
+            pass
+
+    if len(task_aucs) > 0:
+        mean_auc = np.mean(task_aucs)
+    else:
+        mean_auc = float('nan')
+    print("Per-task thresholds:")
+    for name, t in zip(y_cols, thresholds):
+        print(f"  {name}: threshold={t:.4f}")
+    print("Pre-task aucs:")
+    for name, auc in zip(y_cols, task_aucs):
+        print(f"  {name}: AUC={auc:.4f}")
+    print(f"Test ROC-AUC (mean over tasks with valid AUC): {mean_auc:.4f}")
+
+    # open a csv write stream and write per-molecule rows: probs, predicted labels (by thresholds), true labels, empty row
+    output_csv_path = "test_preds_labels.csv"
+    with open(output_csv_path, mode='w', newline='') as csv_file:
+        csv_writer = csv.writer(csv_file)
+        # header
+        csv_writer.writerow(y_cols)
+
+        for i in range(all_preds.shape[0]):
+            row_preds = all_preds[i].tolist()
+            # predicted binary results according to thresholds; for missing label keep empty string
+            row_pred_results = []
+            for j in range(len(y_cols)):
+                if all_labels[i, j] == -1:
+                    row_pred_results.append("")
+                else:
+                    val = 1 if all_preds[i, j] >= thresholds[j] else 0
+                    row_pred_results.append(int(val))
+            row_labels = all_labels[i].astype(int).tolist()
+            # replace all '-1's in row_labels with empty string
+            row_labels = [lbl if lbl != -1 else "" for lbl in row_labels]
+            csv_writer.writerow(row_preds)
+            csv_writer.writerow(row_pred_results)
+            csv_writer.writerow(row_labels)
+            csv_writer.writerow([])
