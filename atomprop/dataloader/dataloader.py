@@ -139,7 +139,6 @@ def smiles_to_pyg_data(smiles, max_atom_num=None):
         smiles=smiles,
         context_length=max_atom_num
     )
-
     if mol is None:
         return None
     
@@ -239,84 +238,190 @@ class PyGChunkDataListLoader:
 
         return data_list, mols_list
 
-class XYZChunckDataLoader:
-    def __init__(self, data_path, split_indices, chunk_size=65536, max_atom_num=128, batch_size=32, device=None, file_type='txt'):
+class xyzBatchLoader:
+    def __init__(self, data_path):
         self.data_path = data_path
-        self.split_indices = split_indices
-        self.chunk_size = chunk_size
-        self.max_atom_num = max_atom_num
-        self.batch_size = batch_size
-        self.current_chunk_idx = 0
-        self.current_chunk_data = None
-        self.current_chunk_start = 0
-        self.device = device
-        self.file_type = file_type
+        self.current_position = 0
+        self.total_molecules = 0
+        self.file_handle = None
+        self._count_total_molecules()
+        self._open_file()  # Open file handle on initialization
+    
+    def _open_file(self):
+        """Open file handle and keep it open"""
+        if self.file_handle is None or self.file_handle.closed:
+            self.file_handle = open(self.data_path, 'r')
+    
+    def _count_total_molecules(self):
+        """Count total number of molecules in file"""
+        count = 0
+        with open(self.data_path, 'r') as f:
+            for line in f:
+                if line.strip() == '':
+                    count += 1
+            if count > 0 or self._has_any_molecules():
+                count += 1
+        self.total_molecules = count
+    
+    def _has_any_molecules(self):
+        """Check if file contains any molecules"""
+        with open(self.data_path, 'r') as f:
+            for line in f:
+                if line.strip() and not line.startswith('ERROR'):
+                    return True
+        return False
+    
+    def _read_next_molecule(self):
+        """Read next molecule data from the open file stream"""
+        if self.file_handle is None or self.file_handle.closed:
+            self._open_file()
         
-        if self.file_type == 'txt':
-            self.headers = pd.read_csv(data_path, nrows=0).columns.tolist()
-        else:
-            pass
-            
-        self.sorted_indices = np.sort(split_indices)
-        self.total_batches = len(self.sorted_indices) // self.batch_size
-        if len(self.sorted_indices) % self.batch_size != 0:
-            self.total_batches += 1
-
+        lines = []
+        molecule_data = None
+        
+        while True:
+            line = self.file_handle.readline()
+            # End of file
+            if not line:
+                break
+            line = line.strip()
+            # Empty line indicates end of molecule
+            if not line and lines:
+                break
+            if line:  # Non-empty line
+                lines.append(line)
+        
+        # Process collected lines
+        if lines:
+            # Check if it's an ERROR molecule
+            if lines[0].startswith('ERROR'):
+                error_str = lines[0]
+                num_atoms = int(error_str.split('(')[1].split(')')[0])
+                molecule_data = {
+                    'type': 'error',
+                    'num_atoms': num_atoms,
+                    'coords': None
+                }
+            else:
+                # Parse normal molecule coordinates
+                coords = []
+                for line in lines:
+                    try:
+                        x, y, z = map(float, line.split())
+                        coords.append([x, y, z])
+                    except ValueError:
+                        continue  # Skip malformed lines
+                
+                molecule_data = {
+                    'type': 'normal',
+                    'num_atoms': len(coords),
+                    'coords': coords
+                }
+        
+        return molecule_data
+    
+    def reset(self):
+        """Reset loader to start from beginning"""
+        self.current_position = 0
+        if self.file_handle and not self.file_handle.closed:
+            self.file_handle.seek(0)  # Reset file pointer to beginning
+    
     def __iter__(self):
-        self.current_chunk_idx = 0
-        self.current_chunk_data = None
+        self.reset()
         return self
-
+    
     def __next__(self):
-        data_list = []
-        mols_list = []
+        """Get next batch using iterator protocol"""
+        if not hasattr(self, 'batch_size'):
+            raise ValueError("batch_size must be set before iteration")
+        return self.get_batch(self.batch_size)
+    
+    def get_batch(self, batch_size):
+        """Get next batch of molecules from current position"""
+        if self.file_handle is None or self.file_handle.closed:
+            self._open_file()
+        
+        molecules = []
+        total_atoms = 0
+        
+        # Read batch_size molecules
+        for _ in range(batch_size):
+            molecule = self._read_next_molecule()
+            if molecule is None:  # End of file
+                break
+                
+            molecules.append(molecule)
+            total_atoms += molecule['num_atoms']
+            self.current_position += 1
+        
+        # Return empty tensor if no molecules found
+        if not molecules:
+            self.close()  # Close file when done
+            raise StopIteration
+        
+        # Create result tensor filled with NaN
+        batch_tensor = torch.full((total_atoms, 3), float('nan'))
+        
+        # Fill with actual coordinates for normal molecules
+        current_pos = 0
+        for mol in molecules:
+            if mol['type'] == 'normal' and mol['coords'] is not None:
+                coords_tensor = torch.tensor(mol['coords'], dtype=torch.float32)
+                batch_tensor[current_pos:current_pos + mol['num_atoms']] = coords_tensor
+            current_pos += mol['num_atoms']
+        
+        return batch_tensor
+    
+    def close(self):
+        """Close the file handle"""
+        if self.file_handle and not self.file_handle.closed:
+            self.file_handle.close()
+    
+    def __del__(self):
+        """Destructor to ensure file is closed"""
+        self.close()
+    
+    def __len__(self):
+        """Return total number of molecules"""
+        return self.total_molecules
+    
+    def get_current_position(self):
+        """Get current reading position"""
+        return self.current_position
+    
+    def set_position(self, position):
+        """Set current reading position (not efficient for large jumps)"""
+        if position < 0 or position > self.total_molecules:
+            raise ValueError(f"Position must be between 0 and {self.total_molecules}")
+        
+        # For large backward jumps, it's better to reset and skip
+        if position < self.current_position:
+            self.reset()
+        
+        # Skip to desired position
+        while self.current_position < position:
+            molecule = self._read_next_molecule()
+            if molecule is None:
+                break
+            self.current_position += 1
+    
+    def has_next(self):
+        """Check if there are more molecules to read"""
+        return self.current_position < self.total_molecules
 
-        while len(data_list) < self.batch_size:
-            if self.current_chunk_idx >= len(self.sorted_indices):
-                if len(data_list) > 0:
-                    return data_list, mols_list
-                else:
-                    raise StopIteration
-
-            target_idx = self.sorted_indices[self.current_chunk_idx]
-            chunk_num = target_idx // self.chunk_size
-            chunk_start = chunk_num * self.chunk_size
-
-            if self.current_chunk_data is None or chunk_start != self.current_chunk_start:
-                if self.file_type == 'csv':
-                    self.current_chunk_data = pd.read_csv(
-                        self.data_path,
-                        skiprows=chunk_start + 1,
-                        nrows=self.chunk_size,
-                        header=None,
-                        names=self.headers,
-                        usecols=['SMILES']
-                    )
-                else:
-                    self.current_chunk_data = pd.read_csv(
-                        self.data_path,
-                        skiprows=chunk_start,
-                        nrows=self.chunk_size,
-                        header=None,
-                        names=self.headers
-                    )
-                self.current_chunk_start = chunk_start
-
-            local_idx = target_idx % self.chunk_size
-            smiles = self.current_chunk_data.iloc[local_idx]['SMILES']
-
-            data = smiles_to_pyg_data(smiles, self.max_atom_num)
-
-            if data is None:
-                print(f"Invalid SMILES at index {target_idx}: {smiles}")
-                self.current_chunk_idx += 1
-                continue
-
-            if self.device is not None:
-                data = data.to(self.device)
-
-            data_list.append(data)
-            mols_list.append(data.mol)
-            self.current_chunk_idx += 1
-
-        return data_list, mols_list
+class xyzBatchLoaderContext:
+    """
+    Context manager for xyzBatchLoader to ensure proper resource management.
+    """
+    def __init__(self, data_path):
+        self.data_path = data_path
+        self.loader = None
+    
+    def __enter__(self):
+        self.loader = xyzBatchLoader(self.data_path)
+        return self.loader
+    
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        if self.loader:
+            self.loader.close()
+            

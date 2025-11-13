@@ -12,7 +12,7 @@ from deepchem.splits.splitters import ScaffoldSplitter
 from deepchem.data import NumpyDataset
 import csv
 
-model_path = "trained_models/finetuned_model_nopretrain.pth"
+model_path = "trained_models/backup/ft_scaffold.pth"
 data_path = "./data/moleculenet/tox21/tox21.csv"
 test_batch_size = 256
 embed_dim = 384
@@ -34,7 +34,7 @@ if __name__ == "__main__":
     labels = df[y_cols].values.tolist()
 
     backbone = Embedder(num_atom_types=120, embed_dim=embed_dim)
-    neck = GNN(num_layers=3, embed_dim=embed_dim, gnn_type='gcn', JK='last', dropout=0.1)
+    neck = GNN(num_layers=6, embed_dim=embed_dim, gnn_type='gcn', JK='last', dropout=0.1)
     aggrmodel = GNNAggr(embed_dim=embed_dim, aggr='mean')
 
     backbone_ckpt = torch.load(model_path)['backbone_state_dict']
