@@ -1,6 +1,7 @@
-__pycache__
+__pycache__/
 /data/*
 /runs
 /trained_models/*.pth
 *.log
 *.csv
+.vscode

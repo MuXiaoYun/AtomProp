@@ -12,17 +12,25 @@ RDLogger.DisableLog('rdApp.*')
 molecule_num = -1  # -1 means load full dataset
 data_path = "data/pubchem/pubchem-10m.txt" #each row is a SMILES
 
+# Count how many molecules have been processed from output file
+processed_count = 0
+try:
+    with open("data/pubchem/pubchem-xyzs.txt", "r") as f:
+        for line in f:
+            if line.strip() == "":
+                processed_count += 1
+    print(f"Found {processed_count} molecules already processed in output file")
+except FileNotFoundError:
+    print("Output file does not exist, starting from scratch")
+    processed_count = 0
+
 # open files
 input_f = open(data_path, "r")
-out_f = open("data/pubchem/pubchem-xyzs.txt", "w")
+out_f = open("data/pubchem/pubchem-xyzs.txt", "a")
 
 start_time = time.time()
 
-successful_conformers = 0
 count = 0
-error_embed_count = 0
-error_optimize_count = 0
-invalid_smiles_count = 0
 
 # Process line by line
 while True:
@@ -36,21 +44,36 @@ while True:
         break
     
     count += 1
+    
+    # Skip already processed molecules
+    if count <= processed_count:
+        if count % 100000 == 0:
+            print(f"Skipping molecule {count}")
+        continue
+    
     if count % 100 == 0:
         print(f"Processing molecule {count}" + (f"/{molecule_num}" if molecule_num != -1 else ""))
     
     smiles = line.strip()
     if not smiles:  # Skip empty lines
-        invalid_smiles_count += 1
         continue
     
     # Convert SMILES to molecule
     mol = Chem.MolFromSmiles(smiles)
     if mol is None:
-        invalid_smiles_count += 1
         continue
-    # remove Hs
-    mol = Chem.RemoveHs(mol)
+    
+    # Remove Hs with error handling
+    try:
+        mol = Chem.RemoveHs(mol)
+    except:
+        try:
+            num_atoms = mol.GetNumAtoms()
+            out_f.write(f"ERROR({num_atoms}): REMOVE_HS\n\n")
+        except:
+            out_f.write(f"ERROR(unknown): REMOVE_HS\n\n")
+        continue
+    
     num_atoms = mol.GetNumAtoms()
     
     # try embedding molecules
@@ -64,15 +87,12 @@ while True:
             for atom in mol.GetAtoms():
                 pos = conf.GetAtomPosition(atom.GetIdx())
                 out_f.write(f"{pos.x} {pos.y} {pos.z}\n")
-            successful_conformers += 1
             out_f.write("\n")
         except:
             out_f.write(f"ERROR({num_atoms}): OPTIMIZE\n\n")
-            error_optimize_count += 1
             continue
     else:
         out_f.write(f"ERROR({num_atoms}): EMBED\n\n")
-        error_embed_count += 1
         continue
 
 # Close files
@@ -85,9 +105,3 @@ elapsed_time = end_time - start_time
 print(f"Processing completed!")
 print(f"Total molecules processed: {count}")
 print(f"Used {elapsed_time:.2f} seconds.")
-print(f"Successful conformers: {successful_conformers}")
-print(f"Statistics:")
-print(f"  - Invalid SMILES: {invalid_smiles_count}")
-print(f"  - Embed errors: {error_embed_count}")
-print(f"  - Optimize errors: {error_optimize_count}")
-print(f"  - Success rate: {successful_conformers/count*100:.2f}%" if count > 0 else "N/A")

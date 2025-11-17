@@ -190,9 +190,16 @@ class BondAnglePrediction:
         self.preds = None
         self.labels = None
 
-    def set_pred(self, xyzs, indices):
+    def set_pred(self, preds):
         """
-        Calculate angles and set predictions.
+        Set preds.
+        """
+        self.preds = preds
+        return
+        
+    def set_label(self, xyzs, indices):
+        """
+        Calculate angles and set labels.
         Args:
             xyzs: [N, 3] 
             indices: [S, 3] 
@@ -217,14 +224,7 @@ class BondAnglePrediction:
         cosines = dot_products / (norm_v1 * norm_v2 + eps)  # [S, 1]
 
         cosines = torch.clamp(cosines, -1.0, 1.0)
-        self.preds = cosines
-        return
-        
-    def set_label(self, labels):
-        """
-        Set labels.
-        """
-        self.labels = labels
+        self.labels = cosines
         return
 
     def compute_loss(self):
@@ -259,9 +259,16 @@ class DihedralAnglePrediction:
         self.preds = None
         self.labels = None
 
-    def set_pred(self, xyzs, indices):
+    def set_pred(self, preds):
         """
-        Calculate dihedral angles and set predictions.
+        Set preds.
+        """
+        self.preds = preds
+        return
+
+    def set_label(self, xyzs, indices):
+        """
+        Calculate dihedral angles and set labels.
         Args:
             xyzs: [N, 3] 
             indices: [S, 4] 
@@ -290,14 +297,7 @@ class DihedralAnglePrediction:
         angles = torch.atan2(y, x)  # [S, 1]
         cosines = torch.cos(angles)  # [S, 1]
 
-        self.preds = cosines
-        return
-
-    def set_label(self, labels):
-        """
-        Set labels.
-        """
-        self.labels = labels
+        self.labels = cosines
         return
 
     def compute_loss(self):

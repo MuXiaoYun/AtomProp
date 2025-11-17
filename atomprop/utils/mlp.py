@@ -12,12 +12,13 @@ class MLP(nn.Module):
     A :class:`MLP` is a module that implements a multi-layer perceptron.
     """
 
-    def __init__(self, input_dim: int, hidden_dim: int, output_dim: int, num_layers: int, dropout: float = 0.0, batch_norm = False, output_activation = nn.Sigmoid()):
+    def __init__(self, input_dim: int, hidden_dim: int, output_dim: int, num_layers: int, dropout: float = 0.0, batch_norm = False, hidden_activation = F.relu, output_activation = nn.Sigmoid()):
         super(MLP, self).__init__()
         self.input_dim = input_dim
         self.hidden_dim = hidden_dim
         self.output_dim = output_dim
         self.num_layers = num_layers
+        self.hidden_activation = hidden_activation
         self.output_activation = output_activation
         self.dropout = dropout
 
@@ -63,7 +64,7 @@ class MLP(nn.Module):
         for i in range(self.num_layers):
             x = self.layers[i](x)
             if i != self.num_layers - 1:
-                x = F.relu(x)
+                x = self.hidden_activation(x)
                 if self.dropout > 0:
                     x = F.dropout(x, p=self.dropout, training=self.training)
         if self.batch_norm is not None:

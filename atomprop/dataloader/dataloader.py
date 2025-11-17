@@ -6,6 +6,8 @@ import torch.nn as nn
 import rdkit.Chem as Chem
 from atomprop.embeddings.AtomEmbedding import BondTypes
 from torch_geometric.data import Data, Batch
+import numpy as np
+import pandas as pd
 
 class SMILESToInputs:
     """
@@ -24,8 +26,11 @@ class SMILESToInputs:
         if mol is None:
             print(f"[SMILES TO INPUTS] Invalid SMILES string: {smiles}")
             return None, None, None
-        
-        mol = Chem.RemoveHs(mol=mol, sanitize=sanitize)  # Remove all H atoms
+        try:
+            mol = Chem.RemoveHs(mol=mol, sanitize=sanitize)  # Remove all H atoms
+        except:
+            print(f"[SMILES TO INPUTS] SMILES string {smiles} convert error: removeHs failed")
+            return None, None, None
         # Get atom type indices
         atom_type_indices = [atom.GetAtomicNum() for atom in mol.GetAtoms()]
         atom_type_indices = torch.tensor(atom_type_indices, dtype=torch.long)
