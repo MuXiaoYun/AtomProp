@@ -18,7 +18,7 @@ from deepchem.splits.splitters import ScaffoldSplitter
 from deepchem.data import NumpyDataset
 import csv
 
-no_pretrain = True
+no_pretrain = False
 
 data_path = "./data/moleculenet/tox21/tox21.csv"
 pretrained_path = 'trained_models/ft_scaffold.pth'

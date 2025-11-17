@@ -13,28 +13,12 @@ import numpy as np
 from tqdm import tqdm
 from torch_geometric.data import Data, Batch
 from torch.utils.tensorboard import SummaryWriter
+import os
 
-embed_dim = 384
-
-backbone = Embedder(num_atom_types=120, embed_dim=embed_dim)
-neck = GNN(num_layers=6, embed_dim=embed_dim, gnn_type='gcn', JK='last', dropout=0.5)
-head0 = MLP(input_dim=embed_dim, hidden_dim=256, output_dim=157, num_layers=1, dropout=0.5) # used for atom attribute prediction
-head1 = MLP(input_dim=embed_dim, hidden_dim=256, output_dim=embed_dim, num_layers=2, dropout=0.5) # used for masked node prediction
-head2 = MLP(input_dim=embed_dim*3, hidden_dim=256, output_dim=1, num_layers=2, dropout=0.5) # used for bond angle prediction
-head3 = MLP(input_dim=embed_dim*4, hidden_dim=256, output_dim=1, num_layers=1, dropout=0.5) # used for hydrogen bond prediction
-aggrmodel = GNNAggr(embed_dim=embed_dim, aggr='mean')
-
-less_rate = 0.1
-more_rate = 0.3
-
-record_freq = 100
-
-task0 = NodeAttrPrediction()
-task1 = MaskedNodePrediction()
-task2 = GraphMaskContrast(less_rate=less_rate, more_rate=more_rate)
-task3 = BatchContrast()
-task4 = BondAnglePrediction()
-task5 = DihedralAnglePrediction()
+record_freq = 5
+dataset_size = 10000
+num_epochs = 2
+batch_size = 1024
 
 # data_path = "data/zinc15/dataset/zinc_standard_agent/processed/smiles.csv"
 data_path = "data/pubchem/pubchem-10m.txt"
@@ -44,14 +28,32 @@ xyz_path = "data/pubchem/pubchem-xyzs.txt"
 xyz_type = 'txt'
 
 logdir = "pretrain_pubchem"
+# make directory trained_models/{logdir}
+os.makedirs(f"trained_models/{logdir}", exist_ok=True)
 
-dataset_size = 10000
 chunk_size = 65536
 max_atom_num = 128
-batch_size = 1024
-num_epochs = 10
+
+less_rate = 0.1
+more_rate = 0.3
+embed_dim = 384
 
 device = torch.device("cuda:7") if torch.cuda.is_available() else torch.device("cpu")
+
+backbone = Embedder(num_atom_types=120, embed_dim=embed_dim)
+neck = GNN(num_layers=6, embed_dim=embed_dim, gnn_type='gcn', JK='last', dropout=0.5)
+head0 = MLP(input_dim=embed_dim, hidden_dim=256, output_dim=157, num_layers=1, dropout=0.5) # used for atom attribute prediction
+head1 = MLP(input_dim=embed_dim, hidden_dim=256, output_dim=embed_dim, num_layers=2, dropout=0.5) # used for masked node prediction
+head2 = MLP(input_dim=embed_dim*3, hidden_dim=256, output_dim=1, num_layers=2, dropout=0.5) # used for bond angle prediction
+head3 = MLP(input_dim=embed_dim*4, hidden_dim=256, output_dim=1, num_layers=1, dropout=0.5) # used for hydrogen bond prediction
+aggrmodel = GNNAggr(embed_dim=embed_dim, aggr='mean')
+
+task0 = NodeAttrPrediction()
+task1 = MaskedNodePrediction()
+task2 = GraphMaskContrast(less_rate=less_rate, more_rate=more_rate)
+task3 = BatchContrast()
+task4 = BondAnglePrediction()
+task5 = DihedralAnglePrediction()
 
 optimizer_configs = {
     "backbone": {
@@ -113,7 +115,7 @@ def get_dataset_info(data_path):
     return total_rows, sample_chunk.columns.tolist()
 
 def create_data_splits(total_size):
-    indices = np.random.permutation(total_size)
+    indices = np.arange(total_size)
     train_size = int(0.85 * total_size)
     val_size = int(0.10 * total_size)
     train_indices = indices[:train_size]
@@ -201,6 +203,8 @@ if __name__ == "__main__":
         
         for epoch in range(num_epochs):
             try:
+                xyz_loader.reset()
+
                 backbone.train()
                 neck.train()
                 head0.train()
@@ -351,7 +355,14 @@ if __name__ == "__main__":
                         metrics_3 = task3.get_metrics()
                         metrics_4 = task4.get_metrics()
                         metrics_5 = task5.get_metrics()
-                        metrics = {**metrics_0, **metrics_1, **metrics_2, **metrics_3, **metrics_4, **metrics_5}
+                        metrics = {
+                        "metrics_0": metrics_0,
+                        "metrics_1": metrics_1,
+                        "metrics_2": metrics_2,
+                        "metrics_3": metrics_3,
+                        "metrics_4": metrics_4,
+                        "metrics_5": metrics_5
+                        }
                         print(f"Batch {batch_idx+1}/{train_loader.total_batches} Metrics: {metrics}")
                     
                     batch_size_current = len(mols)
@@ -373,6 +384,8 @@ if __name__ == "__main__":
                 total_val_loss_masked_atom = 0.0
                 total_val_loss_triplet = 0.0
                 total_val_loss_batch_contrast = 0.0
+                total_val_loss_bond_angle = 0.0
+                total_val_loss_dihedral_angle = 0.0
                 val_sample_count = 0
                 
                 val_pbar = tqdm(enumerate(val_loader),
@@ -428,20 +441,20 @@ if __name__ == "__main__":
                         task3.set_embeddings(anchor_outputs, outputs1_for_contrast)
                         loss_batch_contrast = task3.compute_loss()
 
-                        xyzs = xyz_loader.get_batch(len(data_list))
+                        xyzs = xyz_loader.get_batch(len(data_list)).to(device)
                         triplet_indices = TripletGroup.batch_generate(batch_data.edge_index).to(device)
-                        triplet_emb = atom_emb[triplet_indices.view(-1)].view(-1, 3 * embed_dim) # (num_triplets, 3*embed_dim)
+                        triplet_emb = atom_emb[triplet_indices.view(-1)].view(-1, 3 * embed_dim).to(device) # (num_triplets, 3*embed_dim)
                         triplet_outputs = head2(triplet_emb) # (num_triplets, 1)
-                        BondAnglePrediction.set_label(xyzs, triplet_indices)
-                        BondAnglePrediction.set_pred(triplet_outputs)
-                        loss_bond_angle_pred = BondAnglePrediction.compute_loss()
+                        task4.set_label(xyzs, triplet_indices)
+                        task4.set_pred(triplet_outputs)
+                        loss_bond_angle_pred = task4.compute_loss()
 
                         quadruplet_indices = QuadrupletGroup.batch_generate(batch_data.edge_index).to(device)
-                        DihedralAnglePrediction.set_label(xyzs, quadruplet_indices)
-                        quadruplet_emb = atom_emb[quadruplet_indices.view(-1)].view(-1, 4 * embed_dim) # (num_quadruplets, 4*embed_dim)
+                        task5.set_label(xyzs, quadruplet_indices)
+                        quadruplet_emb = atom_emb[quadruplet_indices.view(-1)].view(-1, 4 * embed_dim).to(device) # (num_quadruplets, 4*embed_dim)
                         quadruplet_outputs = head3(quadruplet_emb) # (num_quadruplets, 1)
-                        DihedralAnglePrediction.set_pred(quadruplet_outputs)
-                        loss_dihedral_angle_pred = DihedralAnglePrediction.compute_loss()
+                        task5.set_pred(quadruplet_outputs)
+                        loss_dihedral_angle_pred = task5.compute_loss()
 
                         loss = (loss_atom_attr_pred
                                 + loss_masked_atom_type_pred
@@ -463,7 +476,14 @@ if __name__ == "__main__":
                             metrics_3 = task3.get_metrics()
                             metrics_4 = task4.get_metrics()
                             metrics_5 = task5.get_metrics()
-                            metrics = {**metrics_0, **metrics_1, **metrics_2, **metrics_3, **metrics_4, **metrics_5}
+                            metrics = {
+                            "metrics_0": metrics_0,
+                            "metrics_1": metrics_1,
+                            "metrics_2": metrics_2,
+                            "metrics_3": metrics_3,
+                            "metrics_4": metrics_4,
+                            "metrics_5": metrics_5
+                            }
                             print(f"Batch {batch_idx+1}/{val_loader.total_batches} Metrics: {metrics}")
                         
                         batch_size_current = len(mols)
