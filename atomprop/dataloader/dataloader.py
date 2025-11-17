@@ -340,6 +340,38 @@ class xyzBatchLoader:
         if not hasattr(self, 'batch_size'):
             raise ValueError("batch_size must be set before iteration")
         return self.get_batch(self.batch_size)
+
+    def download_head(self, batch_size, file_path):
+        """Copy the lines in xyz file of the first batch_size molecules to a new file"""
+        if self.file_handle is None or self.file_handle.closed:
+            self._open_file()
+        
+        output_lines = []
+        molecules_copied = 0
+        
+        while molecules_copied < batch_size:
+            lines = []
+            while True:
+                line = self.file_handle.readline()
+                # End of file
+                if not line:
+                    break
+                line = line.strip()
+                # Empty line indicates end of molecule
+                if not line and lines:
+                    break
+                if line:  # Non-empty line
+                    lines.append(line)
+            
+            if lines:
+                output_lines.extend(lines)
+                output_lines.append('')  # Add empty line between molecules
+                molecules_copied += 1
+            else:
+                break  # No more molecules
+        
+        with open(file_path, 'w') as out_file:
+            out_file.write('\n'.join(output_lines).strip() + '\n')
     
     def get_batch(self, batch_size):
         """Get next batch of molecules from current position"""

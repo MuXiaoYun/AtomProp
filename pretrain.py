@@ -21,7 +21,7 @@ neck = GNN(num_layers=6, embed_dim=embed_dim, gnn_type='gcn', JK='last', dropout
 head0 = MLP(input_dim=embed_dim, hidden_dim=256, output_dim=157, num_layers=1, dropout=0.5) # used for atom attribute prediction
 head1 = MLP(input_dim=embed_dim, hidden_dim=256, output_dim=embed_dim, num_layers=2, dropout=0.5) # used for masked node prediction
 head2 = MLP(input_dim=embed_dim*3, hidden_dim=256, output_dim=1, num_layers=2, dropout=0.5) # used for bond angle prediction
-head3 = MLP(input_dim=embed_dim*4, hidden_dim=256, output_dim=1, num_layers=2, dropout=0.5) # used for hydrogen bond prediction
+head3 = MLP(input_dim=embed_dim*4, hidden_dim=256, output_dim=1, num_layers=1, dropout=0.5) # used for hydrogen bond prediction
 aggrmodel = GNNAggr(embed_dim=embed_dim, aggr='mean')
 
 less_rate = 0.1
