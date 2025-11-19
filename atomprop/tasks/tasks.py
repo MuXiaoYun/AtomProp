@@ -244,8 +244,12 @@ class BondAnglePrediction:
         In this case, we compute relative accuracy.
         ra(label, pred) = 1 - (||label - pred||) / ||label||
         """
+        mask = ~torch.isnan(self.labels)
+        filtered_preds = self.preds[mask]
+        filtered_labels = self.labels[mask]
+        relative_accuracy = 1 - torch.mean(torch.norm(filtered_labels - filtered_preds) / (torch.norm(filtered_labels) + 1e-16)).item()
         return {
-            'relative_accuracy': 1 - torch.mean(torch.norm(self.labels - self.preds) / (torch.norm(self.labels) + 1e-16)).item()
+            'relative_accuracy': relative_accuracy
         }
 
 class DihedralAnglePrediction:
@@ -317,6 +321,10 @@ class DihedralAnglePrediction:
         In this case, we compute relative accuracy.
         ra(label, pred) = 1 - (||label - pred||) / ||label||
         """
+        mask = ~torch.isnan(self.labels)
+        filtered_preds = self.preds[mask]
+        filtered_labels = self.labels[mask]
+        relative_accuracy = 1 - torch.mean(torch.norm(filtered_labels - filtered_preds) / (torch.norm(filtered_labels) + 1e-16)).item()
         return {
-            'relative_accuracy': 1 - torch.mean(torch.norm(self.labels - self.preds) / (torch.norm(self.labels) + 1e-16)).item()
+            'relative_accuracy': relative_accuracy
         }

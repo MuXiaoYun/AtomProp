@@ -1,4 +1,4 @@
-# This is a test script
+# Preprocessing script
 # It reads SMILES from a txt and calculates coordinates of atoms
 
 import rdkit
@@ -10,12 +10,12 @@ from rdkit import RDLogger
 RDLogger.DisableLog('rdApp.*')
 
 molecule_num = -1  # -1 means load full dataset
-data_path = "data/pubchem/pubchem-10m.txt" #each row is a SMILES
-
+data_path = "data/tests/pubchem_unkekulized_test.txt" #each row is a SMILES
+xyz_path = "data/tests/pubchem_unkekulized_test_xyzs.txt"
 # Count how many molecules have been processed from output file
 processed_count = 0
 try:
-    with open("data/pubchem/pubchem-xyzs.txt", "r") as f:
+    with open(xyz_path, "r") as f:
         for line in f:
             if line.strip() == "":
                 processed_count += 1
@@ -26,7 +26,7 @@ except FileNotFoundError:
 
 # open files
 input_f = open(data_path, "r")
-out_f = open("data/pubchem/pubchem-xyzs.txt", "a")
+out_f = open(xyz_path, "a")
 
 start_time = time.time()
 
@@ -66,12 +66,11 @@ while True:
     # Remove Hs with error handling
     try:
         mol = Chem.RemoveHs(mol)
-    except:
-        try:
-            num_atoms = mol.GetNumAtoms()
-            out_f.write(f"ERROR({num_atoms}): REMOVE_HS\n\n")
-        except:
-            out_f.write(f"ERROR(unknown): REMOVE_HS\n\n")
+    except Exception as e:
+        print(f"Failed to remove Hs for molecule {count}, SMILES: {smiles}")
+        print(f"Error: {e}")
+        # If molecule cannot be kekulized, it cannot be embedded, so skip it
+        out_f.write(f"ERROR({mol.GetNumAtoms()}): REMOVE_HS\n\n")
         continue
     
     num_atoms = mol.GetNumAtoms()

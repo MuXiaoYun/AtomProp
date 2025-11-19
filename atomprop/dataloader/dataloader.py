@@ -29,8 +29,9 @@ class SMILESToInputs:
         try:
             mol = Chem.RemoveHs(mol=mol, sanitize=sanitize)  # Remove all H atoms
         except:
+            # This is usually because the molecule cannot be kekulized.
+            # Just do not remove Hs in this case.
             print(f"[SMILES TO INPUTS] SMILES string {smiles} convert error: removeHs failed")
-            return None, None, None
         # Get atom type indices
         atom_type_indices = [atom.GetAtomicNum() for atom in mol.GetAtoms()]
         atom_type_indices = torch.tensor(atom_type_indices, dtype=torch.long)
@@ -82,6 +83,7 @@ class SMILESToInputs:
 class SDFToInputs:
     """
     A utility class to convert SDF files to atom type indices and edges.
+    NOTE: THIS CLASS IS NOT TESTED YET, MAY BE UNSTABLE. 
     """
     @staticmethod
     def convert(sdf_path: str, context_length: int = 420, edge_output_type = 'edge_list', padding = False):

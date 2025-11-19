@@ -15,9 +15,9 @@ from torch_geometric.data import Data, Batch
 from torch.utils.tensorboard import SummaryWriter
 import os
 
-record_freq = 5
-dataset_size = 10000
-num_epochs = 2
+record_freq = 100
+dataset_size = -1
+num_epochs = 4
 batch_size = 1024
 
 # data_path = "data/zinc15/dataset/zinc_standard_agent/processed/smiles.csv"
@@ -41,11 +41,11 @@ embed_dim = 384
 device = torch.device("cuda:7") if torch.cuda.is_available() else torch.device("cpu")
 
 backbone = Embedder(num_atom_types=120, embed_dim=embed_dim)
-neck = GNN(num_layers=6, embed_dim=embed_dim, gnn_type='gcn', JK='last', dropout=0.5)
-head0 = MLP(input_dim=embed_dim, hidden_dim=256, output_dim=157, num_layers=1, dropout=0.5) # used for atom attribute prediction
-head1 = MLP(input_dim=embed_dim, hidden_dim=256, output_dim=embed_dim, num_layers=2, dropout=0.5) # used for masked node prediction
-head2 = MLP(input_dim=embed_dim*3, hidden_dim=256, output_dim=1, num_layers=2, dropout=0.5) # used for bond angle prediction
-head3 = MLP(input_dim=embed_dim*4, hidden_dim=256, output_dim=1, num_layers=1, dropout=0.5) # used for hydrogen bond prediction
+neck = GNN(num_layers=7, embed_dim=embed_dim, gnn_type='gcn', JK='sum', dropout=0.5)
+head0 = MLP(input_dim=embed_dim, hidden_dim=128, output_dim=157, num_layers=2, dropout=0.5) # used for atom attribute prediction
+head1 = MLP(input_dim=embed_dim, hidden_dim=128, output_dim=embed_dim, num_layers=2, dropout=0.5) # used for masked node prediction
+head2 = MLP(input_dim=embed_dim*3, hidden_dim=128, output_dim=1, num_layers=2, dropout=0.5) # used for bond angle prediction
+head3 = MLP(input_dim=embed_dim*4, hidden_dim=128, output_dim=1, num_layers=2, dropout=0.5) # used for hydrogen bond prediction
 aggrmodel = GNNAggr(embed_dim=embed_dim, aggr='mean')
 
 task0 = NodeAttrPrediction()
@@ -217,6 +217,7 @@ if __name__ == "__main__":
                                 desc=f"Epoch {epoch+1}/{num_epochs} - Training")
                 
                 for batch_idx, (data_list, mols) in train_pbar:
+
                     batch_data = Batch.from_data_list(data_list).to(device)
                     
                     for opt in optimizers.values():
