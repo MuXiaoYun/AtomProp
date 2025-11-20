@@ -4,11 +4,13 @@ Module for hand-made features for atoms and molecules.
 
 import rdkit
 from rdkit import Chem
+
 import torch
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
 
 class AtomFeaturize:
     """
@@ -197,3 +199,35 @@ class AtomFeaturizeLoss(nn.Module):
 
         total_loss = loss_multi_label + loss_continuous
         return total_loss
+
+class FunctionalGroupUtils:
+    """
+    A utility class for functional group detection using RDKit's FunctionalGroups module.
+    """
+
+    @staticmethod
+    def detect_with_rdkit_fg(mol, fg_list=None):
+        results = []
+        
+        for fg in fg_list:
+            pattern = fg.pattern
+            matches = mol.GetSubstructMatches(pattern)
+            if matches:
+                results.append(1)
+            else:
+                results.append(0)
+        
+        return torch.tensor(results, dtype=torch.float32) #shape (num_functional_groups,)
+
+    @staticmethod
+    def batch_detect_with_rdkit_fg(mols, fg_list=None):
+        batch_size = len(mols)
+        num_functional_groups = len(fg_list)
+        results = torch.zeros((batch_size, num_functional_groups), dtype=torch.float32)
+        
+        for i, mol in enumerate(mols):
+            fg_vector = FunctionalGroupUtils.detect_with_rdkit_fg(mol, fg_list)
+            results[i] = fg_vector
+        
+        return results  # shape (batch_size, num_functional_groups)
+        

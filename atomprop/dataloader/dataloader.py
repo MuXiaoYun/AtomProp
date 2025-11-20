@@ -14,7 +14,7 @@ class SMILESToInputs:
     A utility class to convert SMILES strings to atom type indices and edges.
     """
     @staticmethod
-    def convert(smiles: str, context_length: int = 420, edge_output_type = 'edge_list', padding = False, sanitize = True):
+    def convert(smiles: str, context_length: int = 420, edge_output_type = 'edge_list', padding = False, sanitize = True, skipUnkekulizable = False):
         """
         Convert a SMILES string to atom type indices and edges.
         :param smiles: The SMILES string to convert.
@@ -32,6 +32,8 @@ class SMILESToInputs:
             # This is usually because the molecule cannot be kekulized.
             # Just do not remove Hs in this case.
             print(f"[SMILES TO INPUTS] SMILES string {smiles} convert error: removeHs failed")
+            if skipUnkekulizable:
+                return None, None, None
         # Get atom type indices
         atom_type_indices = [atom.GetAtomicNum() for atom in mol.GetAtoms()]
         atom_type_indices = torch.tensor(atom_type_indices, dtype=torch.long)

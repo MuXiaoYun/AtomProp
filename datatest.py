@@ -17,48 +17,35 @@ import os
 from rdkit import Chem
 
 smiles = "CC(C)(C)[Si](C)(C)[Si]1=[Si]([Si](C(C)(C)C)(C(C)(C)C)C(C)(C)C)[Si+]1[Si](C(C)(C)C)(C(C)(C)C)C(C)(C)C"
-mol = Chem.MolFromSmiles(smiles)
-# print num of atoms
-print("Number of atoms:", mol.GetNumAtoms())
 
-try:
-    mol = Chem.RemoveHs(mol)
-except:
-    pass
+from rdkit.Chem import FunctionalGroups
 
-print("Molecule after removing Hs has", mol.GetNumAtoms(), "atoms.")
+def print_all_functional_groups():
+    """打印所有预定义的官能团模式"""
+    fg_list = FunctionalGroups.BuildFuncGroupHierarchy()
+    for fg in fg_list:
+        print(f"Label: {fg.label}, Pattern: {fg.pattern}")
 
-try:
-    mol = Chem.RemoveHs(mol)
-except:
-    pass
+def detect_with_rdkit_fg(mol):
+    """使用RdKit内置的FunctionalGroups模块"""
+    results = {}
+    
+    # 获取所有预定义的官能团模式
+    fg_list = FunctionalGroups.BuildFuncGroupHierarchy()
+    
+    for fg in fg_list:
+        pattern = fg.pattern
+        matches = mol.GetSubstructMatches(pattern)
+        if matches:
+            results[fg.label] = len(matches)
+    
+    return results
 
-print("Molecule after removing Hs has", mol.GetNumAtoms(), "atoms.")
+# 使用示例
+print_all_functional_groups()
 
-try:
-    mol = Chem.RemoveHs(mol)
-except:
-    pass
-
-print("Molecule after removing Hs has", mol.GetNumAtoms(), "atoms.")
-
-try:
-    mol = Chem.RemoveHs(mol)
-except:
-    pass
-
-print("Molecule after removing Hs has", mol.GetNumAtoms(), "atoms.")
-
-try:
-    mol = Chem.RemoveHs(mol)
-except:
-    pass
-
-print("Molecule after removing Hs has", mol.GetNumAtoms(), "atoms.")
-
-try:
-    mol = Chem.RemoveHs(mol)
-except:
-    pass
-
-print("Molecule after removing Hs has", mol.GetNumAtoms(), "atoms.")
+mol = Chem.MolFromSmiles("CC(=O)NC1=CC=C(C=C1)O")  # 对乙酰氨基酚
+fg_results = detect_with_rdkit_fg(mol)
+print("RdKit内置官能团检测:")
+for group, count in fg_results.items():
+    print(f"{group}: {count}个")

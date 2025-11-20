@@ -1,9 +1,10 @@
-from atomprop.tasks.tasks import NodeAttrPrediction, MaskedNodePrediction, GraphMaskContrast, BatchContrast, BondAnglePrediction, DihedralAnglePrediction
+from atomprop.tasks.tasks import NodeAttrPrediction, MaskedNodePrediction, GraphMaskContrast, BatchContrast, BondAnglePrediction, DihedralAnglePrediction, FunctionalGroupsPrediction
 from atomprop.dataloader.dataloader import SMILESToInputs, PyGChunkDataListLoader, xyzBatchLoader, xyzBatchLoaderContext
 from atomprop.models.GNNs import Embedder, GNN, GNNAggr
 from atomprop.utils.mlp import MLP
 from atomprop.utils.mask import MolGraphMask
 from atomprop.utils.groups import TripletGroup, QuadrupletGroup
+from atomprop.utils.features import FunctionalGroupUtils
 from atomprop.embeddings.AtomEmbedding import BondTypes
 import matplotlib.pyplot as plt
 import pandas as pd
@@ -13,6 +14,7 @@ import numpy as np
 from tqdm import tqdm
 from torch_geometric.data import Data, Batch
 from torch.utils.tensorboard import SummaryWriter
+from rdkit.Chem import FunctionalGroups
 import os
 
 record_freq = 100
@@ -21,15 +23,16 @@ num_epochs = 4
 batch_size = 1024
 
 # data_path = "data/zinc15/dataset/zinc_standard_agent/processed/smiles.csv"
-data_path = "data/pubchem/pubchem-10m.txt"
+data_path = "data/tests/pubchem_continue_test.txt"
 pretrain_file_type = 'txt'
 
-xyz_path = "data/pubchem/pubchem-xyzs.txt"
+xyz_path = "data/tests/pubchem_continue_test_xyzs.txt"
 xyz_type = 'txt'
 
 logdir = "pretrain_pubchem"
 # make directory trained_models/{logdir}
 os.makedirs(f"trained_models/{logdir}", exist_ok=True)
+fg_list = None # if none, use default rdkit fgs
 
 chunk_size = 65536
 max_atom_num = 128
@@ -40,12 +43,16 @@ embed_dim = 384
 
 device = torch.device("cuda:7") if torch.cuda.is_available() else torch.device("cpu")
 
+if fg_list is None:
+    fg_list = FunctionalGroups.BuildFuncGroupHierarchy()
+
 backbone = Embedder(num_atom_types=120, embed_dim=embed_dim)
 neck = GNN(num_layers=7, embed_dim=embed_dim, gnn_type='gcn', JK='sum', dropout=0.5)
 head0 = MLP(input_dim=embed_dim, hidden_dim=128, output_dim=157, num_layers=2, dropout=0.5) # used for atom attribute prediction
 head1 = MLP(input_dim=embed_dim, hidden_dim=128, output_dim=embed_dim, num_layers=2, dropout=0.5) # used for masked node prediction
 head2 = MLP(input_dim=embed_dim*3, hidden_dim=128, output_dim=1, num_layers=2, dropout=0.5) # used for bond angle prediction
 head3 = MLP(input_dim=embed_dim*4, hidden_dim=128, output_dim=1, num_layers=2, dropout=0.5) # used for hydrogen bond prediction
+head4 = MLP(input_dim=embed_dim, hidden_dim=128, output_dim=len(fg_list), num_layers=2, dropout=0.5) # used for functional group prediction
 aggrmodel = GNNAggr(embed_dim=embed_dim, aggr='mean')
 
 task0 = NodeAttrPrediction()
@@ -54,6 +61,7 @@ task2 = GraphMaskContrast(less_rate=less_rate, more_rate=more_rate)
 task3 = BatchContrast()
 task4 = BondAnglePrediction()
 task5 = DihedralAnglePrediction()
+task6 = FunctionalGroupsPrediction()
 
 optimizer_configs = {
     "backbone": {
@@ -77,6 +85,10 @@ optimizer_configs = {
         "kwargs": {"lr": 5e-4, "weight_decay": 1e-5}
     },
     "head3": {
+        "cls": torch.optim.Adam,
+        "kwargs": {"lr": 5e-4, "weight_decay": 1e-5}
+    },
+    "head4": {
         "cls": torch.optim.Adam,
         "kwargs": {"lr": 5e-4, "weight_decay": 1e-5}
     }
@@ -104,6 +116,10 @@ scheduler_configs = {
         "kwargs": {"step_size": 1, "gamma": 0.5}
     },
     "head3": {
+        "cls": torch.optim.lr_scheduler.StepLR,
+        "kwargs": {"step_size": 1, "gamma": 0.5}
+    },
+    "head4": {
         "cls": torch.optim.lr_scheduler.StepLR,
         "kwargs": {"step_size": 1, "gamma": 0.5}
     }
@@ -144,6 +160,7 @@ if __name__ == "__main__":
         head1.to(device)
         head2.to(device)
         head3.to(device)
+        head4.to(device)
 
         print(backbone.__class__.__name__, f"Parameters: {sum(p.numel() for p in backbone.parameters() if p.requires_grad)}")
         print(neck.__class__.__name__, f"Parameters: {sum(p.numel() for p in neck.parameters() if p.requires_grad)}")
@@ -151,6 +168,7 @@ if __name__ == "__main__":
         print(head1.__class__.__name__, f"Parameters: {sum(p.numel() for p in head1.parameters() if p.requires_grad)}")
         print(head2.__class__.__name__, f"Parameters: {sum(p.numel() for p in head2.parameters() if p.requires_grad)}")
         print(head3.__class__.__name__, f"Parameters: {sum(p.numel() for p in head3.parameters() if p.requires_grad)}")
+        print(head4.__class__.__name__, f"Parameters: {sum(p.numel() for p in head4.parameters() if p.requires_grad)}")
 
         components = {
             "backbone": backbone,
@@ -158,7 +176,8 @@ if __name__ == "__main__":
             "head0": head0,
             "head1": head1,
             "head2": head2,
-            "head3": head3
+            "head3": head3,
+            "head4": head4
         }
 
         optimizers = {}
@@ -283,6 +302,12 @@ if __name__ == "__main__":
                     task5.set_pred(quadruplet_outputs)
                     loss_dihedral_angle_pred = task5.compute_loss()
 
+                    outputs1_fg = head4(anchor_outputs)
+                    fg_labels = FunctionalGroupUtils.batch_detect_with_rdkit_fg(mols, fg_list).to(device)
+                    task6.set_pred(outputs1_fg)
+                    task6.set_label(fg_labels)
+                    loss_functional_group_pred = task6.compute_loss()
+
                     # --- compute per-task gradient norms (proxy: gradients w.r.t atom embeddings) ---
                     # Use atom_emb (output of backbone) as a shared representation to measure influence of each task.
                     # Allow unused in case a particular loss does not depend on atom_emb for some rare batch.
@@ -298,6 +323,8 @@ if __name__ == "__main__":
                     g = torch.autograd.grad(loss_bond_angle_pred, atom_emb, retain_graph=True, create_graph=False, allow_unused=True)[0]
                     grads.append(g)
                     g = torch.autograd.grad(loss_dihedral_angle_pred, atom_emb, retain_graph=True, create_graph=False, allow_unused=True)[0]
+                    grads.append(g)
+                    g = torch.autograd.grad(loss_functional_group_pred, atom_emb, retain_graph=True, create_graph=False, allow_unused=True)[0]
                     grads.append(g)
 
                     # compute L2 norms (handle None grads)
@@ -317,7 +344,8 @@ if __name__ == "__main__":
                             + weights[2] * loss_triplet_contrast
                             + weights[3] * loss_batch_contrast
                             + weights[4] * loss_bond_angle_pred
-                            + weights[5] * loss_dihedral_angle_pred)
+                            + weights[5] * loss_dihedral_angle_pred
+                            + weights[6] * loss_functional_group_pred)
 
                     # backward and step
                     loss.backward()
@@ -332,6 +360,7 @@ if __name__ == "__main__":
                         writer.add_scalar('Train/Loss_batch_contrast', loss_batch_contrast.item(), epoch * train_loader.total_batches + batch_idx)
                         writer.add_scalar('Train/Loss_bond_angle', loss_bond_angle_pred.item(), epoch * train_loader.total_batches + batch_idx)
                         writer.add_scalar('Train/Loss_dihedral_angle', loss_dihedral_angle_pred.item(), epoch * train_loader.total_batches + batch_idx)
+                        writer.add_scalar('Train/Loss_functional_group', loss_functional_group_pred.item(), epoch * train_loader.total_batches + batch_idx)
                         # log grad norms and weights
                         try:
                             writer.add_scalar('TrainGradNorm/GradNorm_atom_attr', norms[0].item(), epoch * train_loader.total_batches + batch_idx)
@@ -340,11 +369,13 @@ if __name__ == "__main__":
                             writer.add_scalar('TrainGradNorm/GradNorm_batch_contrast', norms[3].item(), epoch * train_loader.total_batches + batch_idx)
                             writer.add_scalar('TrainGradNorm/GradNorm_bond_angle', norms[4].item(), epoch * train_loader.total_batches + batch_idx)
                             writer.add_scalar('TrainGradNorm/GradNorm_dihedral_angle', norms[5].item(), epoch * train_loader.total_batches + batch_idx)
+                            writer.add_scalar('TrainGradNorm/GradNorm_functional_group', norms[6].item(), epoch * train_loader.total_batches + batch_idx)
 
                             writer.add_scalar('TrainWeight/Weight_atom_attr', weights[0].item(), epoch * train_loader.total_batches + batch_idx)
                             writer.add_scalar('TrainWeight/Weight_masked_atom', weights[1].item(), epoch * train_loader.total_batches + batch_idx)
                             writer.add_scalar('TrainWeight/Weight_triplet', weights[2].item(), epoch * train_loader.total_batches + batch_idx)
                             writer.add_scalar('TrainWeight/Weight_batch_contrast', weights[3].item(), epoch * train_loader.total_batches + batch_idx)
+                            writer.add_scalar('TrainWeight/Weight_bond_angle', weights[4].item(), epoch * train_loader.total_batches + batch_idx)
                         except Exception:
                             # logging should not interrupt training
                             pass
@@ -356,13 +387,15 @@ if __name__ == "__main__":
                         metrics_3 = task3.get_metrics()
                         metrics_4 = task4.get_metrics()
                         metrics_5 = task5.get_metrics()
+                        metrics_6 = task6.get_metrics()
                         metrics = {
                         "metrics_0": metrics_0,
                         "metrics_1": metrics_1,
                         "metrics_2": metrics_2,
                         "metrics_3": metrics_3,
                         "metrics_4": metrics_4,
-                        "metrics_5": metrics_5
+                        "metrics_5": metrics_5,
+                        "metrics_6": metrics_6
                         }
                         print(f"Batch {batch_idx+1}/{train_loader.total_batches} Metrics: {metrics}")
                     
@@ -379,6 +412,9 @@ if __name__ == "__main__":
                 neck.eval()
                 head0.eval()
                 head1.eval()
+                head2.eval()
+                head3.eval()
+                head4.eval()
 
                 total_val_loss = 0.0
                 total_val_loss_atom_attr = 0.0
@@ -387,6 +423,7 @@ if __name__ == "__main__":
                 total_val_loss_batch_contrast = 0.0
                 total_val_loss_bond_angle = 0.0
                 total_val_loss_dihedral_angle = 0.0
+                total_val_loss_functional_group = 0.0
                 val_sample_count = 0
                 
                 val_pbar = tqdm(enumerate(val_loader),
@@ -457,18 +494,28 @@ if __name__ == "__main__":
                         task5.set_pred(quadruplet_outputs)
                         loss_dihedral_angle_pred = task5.compute_loss()
 
+                        outputs1_fg = head4(anchor_outputs)
+                        fg_labels = FunctionalGroupUtils.batch_detect_with_rdkit_fg(mols, fg_list).to(device)
+                        task6.set_pred(outputs1_fg)
+                        task6.set_label(fg_labels)
+                        loss_functional_group_pred = task6.compute_loss()
+
                         loss = (loss_atom_attr_pred
                                 + loss_masked_atom_type_pred
                                 + loss_triplet_contrast
                                 + loss_batch_contrast
                                 + loss_bond_angle_pred
-                                + loss_dihedral_angle_pred)
+                                + loss_dihedral_angle_pred
+                                + loss_functional_group_pred)
 
                         if batch_idx == 0 or (batch_idx + 1) % record_freq == 0:
                             writer.add_scalar('Val/Loss_atom_attr', loss_atom_attr_pred.item(), epoch * val_loader.total_batches + batch_idx)
                             writer.add_scalar('Val/Loss_masked_atom', loss_masked_atom_type_pred.item(), epoch * val_loader.total_batches + batch_idx)
                             writer.add_scalar('Val/Loss_triplet', loss_triplet_contrast.item(), epoch * val_loader.total_batches + batch_idx)
                             writer.add_scalar('Val/Loss_batch_contrast', loss_batch_contrast.item(), epoch * val_loader.total_batches + batch_idx)
+                            writer.add_scalar('Val/Loss_bond_angle', loss_bond_angle_pred.item(), epoch * val_loader.total_batches + batch_idx)
+                            writer.add_scalar('Val/Loss_dihedral_angle', loss_dihedral_angle_pred.item(), epoch * val_loader.total_batches + batch_idx)
+                            writer.add_scalar('Val/Loss_functional_group', loss_functional_group_pred.item(), epoch * val_loader.total_batches + batch_idx)
                         
                         if batch_idx == val_loader.total_batches - 1:
                             metrics_0 = task0.get_metrics()
@@ -477,6 +524,7 @@ if __name__ == "__main__":
                             metrics_3 = task3.get_metrics()
                             metrics_4 = task4.get_metrics()
                             metrics_5 = task5.get_metrics()
+                            metrics_6 = task6.get_metrics()
                             metrics = {
                             "metrics_0": metrics_0,
                             "metrics_1": metrics_1,
@@ -484,6 +532,7 @@ if __name__ == "__main__":
                             "metrics_3": metrics_3,
                             "metrics_4": metrics_4,
                             "metrics_5": metrics_5
+                            "metrics_6": metrics_6
                             }
                             print(f"Batch {batch_idx+1}/{val_loader.total_batches} Metrics: {metrics}")
                         
@@ -495,6 +544,7 @@ if __name__ == "__main__":
                         total_val_loss_batch_contrast += loss_batch_contrast.item() * batch_size_current
                         total_val_loss_bond_angle += loss_bond_angle_pred.item() * batch_size_current
                         total_val_loss_dihedral_angle += loss_dihedral_angle_pred.item() * batch_size_current
+                        total_val_loss_functional_group += loss_functional_group_pred.item() * batch_size_current
                         val_sample_count += batch_size_current
                         
                         val_pbar.set_postfix({"Batch Loss": f"{loss.item():.6f}"})
@@ -508,6 +558,9 @@ if __name__ == "__main__":
                 writer.add_scalar('Epoch/Val_loss_masked_atom', total_val_loss_masked_atom / val_sample_count, epoch)
                 writer.add_scalar('Epoch/Val_loss_triplet', total_val_loss_triplet / val_sample_count, epoch)
                 writer.add_scalar('Epoch/Val_loss_batch_contrast', total_val_loss_batch_contrast / val_sample_count, epoch)
+                writer.add_scalar('Epoch/Val_loss_bond_angle', total_val_loss_bond_angle / val_sample_count, epoch)
+                writer.add_scalar('Epoch/Val_loss_dihedral_angle', total_val_loss_dihedral_angle / val_sample_count, epoch)
+                writer.add_scalar('Epoch/Val_loss_functional_group', total_val_loss_functional_group / val_sample_count, epoch)
                 
                 for name, scheduler in schedulers.items():
                     if isinstance(scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):

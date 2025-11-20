@@ -10,8 +10,10 @@ from rdkit import RDLogger
 RDLogger.DisableLog('rdApp.*')
 
 molecule_num = -1  # -1 means load full dataset
-data_path = "data/tests/pubchem_unkekulized_test.txt" #each row is a SMILES
-xyz_path = "data/tests/pubchem_unkekulized_test_xyzs.txt"
+data_path = "data/pubchem/pubchem-10m.txt" #each row is a SMILES
+xyz_path = "data/pubchem/pubchem-xyzs.txt" #output file path
+skipUnkekulizable = False  # whether to skip unkekulizable molecules
+
 # Count how many molecules have been processed from output file
 processed_count = 0
 try:
@@ -69,8 +71,9 @@ while True:
     except Exception as e:
         print(f"Failed to remove Hs for molecule {count}, SMILES: {smiles}")
         print(f"Error: {e}")
-        # If molecule cannot be kekulized, it cannot be embedded, so skip it
-        out_f.write(f"ERROR({mol.GetNumAtoms()}): REMOVE_HS\n\n")
+        # If molecule cannot be kekulized, it cannot be embedded
+        if not skipUnkekulizable:
+            out_f.write(f"ERROR({mol.GetNumAtoms()}): REMOVE_HS\n\n")
         continue
     
     num_atoms = mol.GetNumAtoms()

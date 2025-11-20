@@ -328,3 +328,45 @@ class DihedralAnglePrediction:
         return {
             'relative_accuracy': relative_accuracy
         }
+
+class FunctionalGroupsPrediction:
+    """
+    Functional groups prediction task.
+    This class computes losses and metrics for the task.
+    """
+
+    def __init__(self, criterion=nn.BCEWithLogitsLoss()):
+        self.criterion = criterion
+        self.preds = None
+        self.labels = None
+
+    def set_pred(self, preds):
+        """
+        Set predictions.
+        """
+        self.preds = preds
+        return
+
+    def set_label(self, labels):
+        """
+        Set labels.
+        """
+        self.labels = labels
+        return
+
+    def compute_loss(self):
+        """
+        Compute the loss for the task.
+        """
+        loss = self.criterion(self.preds, self.labels)
+        return loss
+
+    def get_metrics(self):
+        """
+        Compute metrics for the task.
+        In this case, we compute relative accuracy.
+        ra(label, pred) = 1 - (||label - pred||) / ||label||
+        """
+        return {
+            'relative_accuracy': 1 - torch.mean(torch.norm(self.labels - self.preds) / (torch.norm(self.labels) + 1e-16)).item()
+        }
