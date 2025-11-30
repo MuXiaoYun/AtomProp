@@ -7,6 +7,7 @@ import torch.nn as nn
 import torch_geometric
 from torch_geometric.nn import MessagePassing
 import torch.nn.functional as F
+from atomprop.embeddings.AtomEmbedding import BondTypes, BondDirections, AtomChirals
 
 class MaskedBCELoss(nn.Module):
     def __init__(self, reduction='mean'):
@@ -61,12 +62,16 @@ class GCNconv(MessagePassing):
         super(GCNconv, self).__init__(aggr=aggr)
         self.lin = nn.Linear(embed_dim, embed_dim)
         self.root_emb = nn.Parameter(torch.zeros(embed_dim))
+        self.edge_type_embedding = nn.Embedding(len(BondTypes.get_bond_types())+1, embed_dim)
+        self.edge_direction_embedding = nn.Embedding(len(BondDirections.get_bond_directions())+1, embed_dim)
         self.reset_parameters()
 
     def reset_parameters(self):
         nn.init.xavier_uniform_(self.lin.weight)
         nn.init.zeros_(self.lin.bias)
         nn.init.zeros_(self.root_emb)
+        nn.init.xavier_uniform_(self.edge_type_embedding.weight)
+        nn.init.xavier_uniform_(self.edge_direction_embedding.weight)
 
     def normalize(self, edge_index, num_nodes):
         # Compute normalization
@@ -77,14 +82,16 @@ class GCNconv(MessagePassing):
         norm = deg_inv_sqrt[row] * deg_inv_sqrt[col]
         return norm
 
-    def forward(self, x, edge_index):
+    def forward(self, x, edge_index, edge_attr):
         # x has shape [B_N, embed_dim]
         # edge_index has shape [2, E]
+        # edge_attr has shape [E, 2]
         num_nodes = x.size(0)
         edge_index, _ = torch_geometric.utils.add_self_loops(edge_index, num_nodes=num_nodes)
         norm = self.normalize(edge_index, num_nodes)  # Shape [E]
         x = self.lin(x)  # Shape [B_N, embed_dim]
-        out = self.propagate(edge_index=edge_index, x=x, norm=norm)  # Shape [B_N, embed_dim]
+        edge_embeddings = self.edge_type_embedding(edge_attr[:,0]) + self.edge_direction_embedding(edge_attr[:,1])
+        out = self.propagate(edge_index=edge_index, x=x, norm=norm, edge_attr=edge_embeddings)  # Shape [B_N, embed_dim]
         out = out + self.root_emb * x  # Add skip connection
         return out
 
@@ -109,6 +116,8 @@ class GATconv(MessagePassing):
         self.att_scope = attt
         self.embed_dim = embed_dim
         self.lin = nn.Linear(embed_dim, embed_dim)
+        self.edge_type_embedding = nn.Embedding(len(BondTypes.get_bond_types())+1, embed_dim)
+        self.edge_direction_embedding = nn.Embedding(len(BondDirections.get_bond_directions())+1, embed_dim)
         if att == 'concat_linear':
             self.att = nn.Parameter(torch.Tensor(2 * embed_dim))
             nn.init.xavier_uniform_(self.att.view(1, -1))
@@ -127,12 +136,16 @@ class GATconv(MessagePassing):
         if self.att is not None:
             nn.init.xavier_uniform_(self.att.view(1, -1))
         nn.init.zeros_(self.root_emb)
+        nn.init.xavier_uniform_(self.edge_type_embedding.weight)
+        nn.init.xavier_uniform_(self.edge_direction_embedding.weight)
 
-    def forward(self, x, edge_index):
+    def forward(self, x, edge_index, edge_attr):
         # x has shape [B_N, embed_dim]
         # edge_index has shape [2, E]
+        # edge_attr has shape [E, 2]
         x = self.lin(x)  # Shape [B_N, embed_dim]
-        out = self.propagate(edge_index=edge_index, x=x)  # Shape [B_N, embed_dim]
+        edge_embeddings = self.edge_type_embedding(edge_attr[:,0]) + self.edge_direction_embedding(edge_attr[:,1])
+        out = self.propagate(edge_index=edge_index, x=x, edge_attr=edge_embeddings)  # Shape [B_N, embed_dim]
         out = out + self.root_emb * x  # Add skip connection
         return out
 
@@ -166,17 +179,23 @@ class GraphSAGEconv(MessagePassing):
         super(GraphSAGEconv, self).__init__(aggr=aggr)
         self.lin = nn.Linear(2 * embed_dim, embed_dim)
         self.root_emb = nn.Parameter(torch.zeros(embed_dim))
+        self.edge_type_embedding = nn.Embedding(len(BondTypes.get_bond_types())+1, embed_dim)
+        self.edge_direction_embedding = nn.Embedding(len(BondDirections.get_bond_directions())+1, embed_dim)
         self.reset_parameters()
 
     def reset_parameters(self):
         nn.init.xavier_uniform_(self.lin.weight)
         nn.init.zeros_(self.lin.bias)
         nn.init.zeros_(self.root_emb)
+        nn.init.xavier_uniform_(self.edge_type_embedding.weight)
+        nn.init.xavier_uniform_(self.edge_direction_embedding.weight)
 
-    def forward(self, x, edge_index):
+    def forward(self, x, edge_index, edge_attr):
         # x has shape [B_N, embed_dim]
         # edge_index has shape [2, E]
-        out = self.propagate(edge_index=edge_index, x=x)  # Shape [B_N, embed_dim]
+        # edge_attr has shape [E, 2]
+        edge_embeddings = self.edge_type_embedding(edge_attr[:,0]) + self.edge_direction_embedding(edge_attr[:,1])
+        out = self.propagate(edge_index=edge_index, x=x, edge_attr=edge_embeddings)  # Shape [B_N, embed_dim]
         out = torch.cat([out, x], dim=-1)  # Shape [N, 2*embed_dim]
         out = self.lin(out)  # Shape [B_N, embed_dim]
         out = out + self.root_emb * x  # Add skip connection
@@ -197,6 +216,8 @@ class GINconv(MessagePassing):
             nn.Linear(2 * embed_dim, embed_dim)
         )
         self.eps = nn.Parameter(torch.zeros(1))
+        self.edge_type_embedding = nn.Embedding(len(BondTypes.get_bond_types())+1, embed_dim)
+        self.edge_direction_embedding = nn.Embedding(len(BondDirections.get_bond_directions())+1, embed_dim)
         self.reset_parameters()
 
     def reset_parameters(self):
@@ -205,10 +226,14 @@ class GINconv(MessagePassing):
                 nn.init.xavier_uniform_(layer.weight)
                 nn.init.zeros_(layer.bias)
         nn.init.zeros_(self.eps)
+        nn.init.xavier_uniform_(self.edge_type_embedding.weight)
+        nn.init.xavier_uniform_(self.edge_direction_embedding.weight)
 
-    def forward(self, x, edge_index):
+    def forward(self, x, edge_index, edge_attr):
         # x has shape [B_N, embed_dim]
         # edge_index has shape [2, E]
+        # edge_attr has shape [E, 2]
+        edge_embeddings = self.edge_type_embedding(edge_attr[:,0]) + self.edge_direction_embedding(edge_attr[:,1])
         out = self.propagate(edge_index=edge_index, x=x)  # Shape [B_N, embed_dim]
         out = (1 + self.eps) * x + out  # Shape [B_N, embed_dim]
         out = self.mlp(out)  # Shape [B_N, embed_dim]
@@ -219,19 +244,20 @@ class GINconv(MessagePassing):
 
 class Embedder(nn.Module):
     """
-    A module for embedding atom types.
+    A module for embedding atom types and atom chirals.
     """
     def __init__(self, num_atom_types, embed_dim):
         super(Embedder, self).__init__()
         self.embedding = nn.Embedding(num_atom_types, embed_dim)
+        self.embedding_chiral = nn.Embedding(len(AtomChirals.get_atom_chirals())+1, embed_dim)
         self.reset_parameters()
 
     def reset_parameters(self):
         nn.init.xavier_uniform_(self.embedding.weight)
+        nn.init.xavier_uniform_(self.embedding_chiral.weight)
 
-    def forward(self, atom_type_indices):
-        # atom_type_indices has shape [N]
-        return self.embedding(atom_type_indices)  # Shape [B_N, embed_dim]
+    def forward(self, atom_attr):
+        return self.embedding(atom_attr[:,0]) + self.embedding_chiral(atom_attr[:,1])  # Shape [B_N, embed_dim]
 
 class GNN(nn.Module):
     def __init__(self, num_layers, embed_dim, dropout, gnn_type='gcn', JK='last', **kwargs):
@@ -287,9 +313,11 @@ class GNN(nn.Module):
         # edge_index has shape [2, E]
         x = data.x
         edge_index = data.edge_index
+        edge_attr = data.edge_attr
+        assert edge_attr is not None
         layer_outputs = []
         for conv in self.convs:
-            x = conv(x, edge_index)  # Shape [B_N, embed_dim]
+            x = conv(x=x, edge_index=edge_index, edge_attr=edge_attr)  # Shape [B_N, embed_dim]
             x = torch.relu(x)
             x = torch.dropout(x, p=self.dropout, train=self.training)
             layer_outputs.append(x)

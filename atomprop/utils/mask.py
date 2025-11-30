@@ -22,10 +22,10 @@ class MolGraphMask:
         
         for idx, atom in enumerate(atom_list):
             # Each atom has multiple indices, store them in a list in the dict
-            if atom.item() not in atom_index_dict:
-                atom_index_dict[atom.item()] = [idx]
+            if atom[0].item() not in atom_index_dict:
+                atom_index_dict[atom[0].item()] = [idx]
                 continue
-            atom_index_dict[atom.item()].append(idx)
+            atom_index_dict[atom[0].item()].append(idx)
 
         sample_num = max(1, int(len(atom_list) * mask_ratio / len(atom_index_dict)))
 

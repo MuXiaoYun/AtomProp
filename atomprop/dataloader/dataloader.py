@@ -4,7 +4,7 @@ Library module for processing SMILES and sdf files to create datasets and datalo
 import torch
 import torch.nn as nn
 import rdkit.Chem as Chem
-from atomprop.embeddings.AtomEmbedding import BondTypes
+from atomprop.embeddings.AtomEmbedding import BondTypes, BondDirections, AtomChirals
 from torch_geometric.data import Data, Batch
 import numpy as np
 import pandas as pd
@@ -14,154 +14,59 @@ class SMILESToInputs:
     A utility class to convert SMILES strings to atom type indices and edges.
     """
     @staticmethod
-    def convert(smiles: str, context_length: int = 420, edge_output_type = 'edge_list', padding = False, sanitize = True, skipUnkekulizable = False):
+    def convert(smiles: str, removehs = True, sanitize = True, skipUnkekulizable = False):
         """
         Convert a SMILES string to atom type indices and edges.
         :param smiles: The SMILES string to convert.
-        :param context_length: The maximum number of atoms in a molecule for padding.
-        :param edge_output_type: The type of edge representation to return ('adj_matrix' or 'edge_list').
-        :return: A tuple containing the atom indices and edge (adj matrix, value is bond type index, -1 for no edge), and the RDKit molecule object.
+        :param sanitize: Decide whether to sanitize input molecules.
+        :param skipUnkekulizable: Decide whether to abandon molecules which could not be removeHs().
+        :return: A tuple containing the atom info, edge info, and the RDKit molecule object.
         """
         mol = Chem.MolFromSmiles(smiles, sanitize=sanitize)
         if mol is None:
             print(f"[SMILES TO INPUTS] Invalid SMILES string: {smiles}")
             return None, None, None
-        try:
-            mol = Chem.RemoveHs(mol=mol, sanitize=sanitize)  # Remove all H atoms
-        except:
-            # This is usually because the molecule cannot be kekulized.
-            # Just do not remove Hs in this case.
-            print(f"[SMILES TO INPUTS] SMILES string {smiles} convert error: removeHs failed")
-            if skipUnkekulizable:
-                return None, None, None
+        if removehs:
+            try:
+                mol = Chem.RemoveHs(mol=mol, sanitize=sanitize)  # Remove all H atoms
+            except:
+                # This is usually because the molecule cannot be kekulized.
+                # Just do not remove Hs in this case.
+                print(f"[SMILES TO INPUTS] SMILES string {smiles} convert error: removeHs failed")
+                if skipUnkekulizable:
+                    return None, None, None
         # Get atom type indices
-        atom_type_indices = [atom.GetAtomicNum() for atom in mol.GetAtoms()]
-        atom_type_indices = torch.tensor(atom_type_indices, dtype=torch.long)
-
-        if padding:
-            # Pad atom type indices to context length with zeros
-            if len(atom_type_indices) < context_length:
-                atom_type_indices = torch.cat([atom_type_indices, torch.zeros(context_length - len(atom_type_indices), dtype=torch.long)])
-            else:
-                atom_type_indices = atom_type_indices[:context_length] 
+        atoms = [[atom.GetAtomicNum(), atom.GetChiralTag()] for atom in mol.GetAtoms()]
 
         # Get edges (bond type indices)
         edges = []
         for bond in mol.GetBonds():
             start_idx = bond.GetBeginAtomIdx()
             end_idx = bond.GetEndAtomIdx()
-            bond_type_index = BondTypes.get_bond_types().index(str(bond.GetBondType()))
-            edges.append((start_idx, end_idx, bond_type_index))
+            bond_type_index = BondTypes.get_index(str(bond.GetBondType()))
+            bond_direction_index = BondDirections.get_index(str(bond.GetBondDir()))
+            edges.append((start_idx, end_idx, bond_type_index, bond_direction_index))
         
-        if edge_output_type == 'adj_matrix':
-            # Create adjacency matrix
-            adj_matrix = torch.zeros((context_length, context_length), dtype=torch.long) - 1
-            for start_idx, end_idx, bond_type_index in edges:
-                adj_matrix[start_idx, end_idx] = bond_type_index
-                adj_matrix[end_idx, start_idx] = bond_type_index
-            if padding:
-                # Pad atom type indices and adjacency matrix
-                if len(atom_type_indices) < context_length:
-                    atom_type_indices = torch.cat([atom_type_indices, torch.zeros(context_length - len(atom_type_indices), dtype=torch.long)])
-            else:
-                atom_type_indices = atom_type_indices[:context_length]
-            if adj_matrix.size(0) < context_length:
-                adj_matrix = torch.cat([adj_matrix, torch.zeros(context_length - adj_matrix.size(0), context_length, dtype=torch.long) - 1], dim=0)
-                adj_matrix = torch.cat([adj_matrix, torch.zeros(context_length, context_length - adj_matrix.size(1), dtype=torch.long) - 1], dim=1)
-            else:
-                adj_matrix = adj_matrix[:context_length, :context_length]
-            return atom_type_indices, adj_matrix, mol
-        elif edge_output_type == 'edge_list':
-            if padding:
-                # Pad atom type indices to context length with zeros
-                if len(atom_type_indices) < context_length:
-                    atom_type_indices = torch.cat([atom_type_indices, torch.zeros(context_length - len(atom_type_indices), dtype=torch.long)])
-                else:
-                    atom_type_indices = atom_type_indices[:context_length]
-            return atom_type_indices, torch.tensor(edges, dtype=torch.long), mol
-        else:
-            raise ValueError(f"Invalid edge_output_type: {edge_output_type}. Must be 'adj_matrix' or 'edge_list'.")
-
-class SDFToInputs:
-    """
-    A utility class to convert SDF files to atom type indices and edges.
-    NOTE: THIS CLASS IS NOT TESTED YET, MAY BE UNSTABLE. 
-    """
-    @staticmethod
-    def convert(sdf_path: str, context_length: int = 420, edge_output_type = 'edge_list', padding = False):
-        """
-        Convert an SDF file to atom type indices and edges.
-        :param sdf_path: The path to the SDF file.
-        :param context_length: The maximum number of atoms in a molecule for padding.
-        :param edge_output_type: The type of edge representation to return ('adj_matrix' or 'edge_list').
-        :return: A list of tuples, each containing the atom indices and edge (adj matrix, value is bond type index, -1 for no edge), and the RDKit molecule object.
-        """
-        suppl = Chem.SDMolSupplier(sdf_path, sanitize=True)
-        if suppl is None:
-            raise ValueError(f"Invalid SDF file: {sdf_path}")
-        
-        results = []
-        for mol in suppl:
-            if mol is None:
-                continue
-            mol = Chem.RemoveHs(mol)  # Remove all H atoms
-            # Get atom type indices
-            atom_type_indices = [atom.GetAtomicNum() for atom in mol.GetAtoms()]
-            atom_type_indices = torch.tensor(atom_type_indices, dtype=torch.long)
-            if padding:
-                # Pad atom type indices to context length with zeros
-                if len(atom_type_indices) < context_length:
-                    atom_type_indices = torch.cat([atom_type_indices, torch.zeros(context_length - len(atom_type_indices), dtype=torch.long)])
-                else:
-                    atom_type_indices = atom_type_indices[:context_length] 
-
-            # Get edges (bond type indices)
-            edges = []
-            for bond in mol.GetBonds():
-                start_idx = bond.GetBeginAtomIdx()
-                end_idx = bond.GetEndAtomIdx()
-                bond_type_index = BondTypes.get_bond_types().index(str(bond.GetBondType()))
-                edges.append((start_idx, end_idx, bond_type_index))
-            
-            if edge_output_type == 'adj_matrix':
-                # Create adjacency matrix
-                adj_matrix = torch.zeros((context_length, context_length), dtype=torch.long) - 1
-                for start_idx, end_idx, bond_type_index in edges:
-                    adj_matrix[start_idx, end_idx] = bond_type_index
-                    adj_matrix[end_idx, start_idx] = bond_type_index
-                if padding:
-                    # Pad adjacency matrix
-                    if adj_matrix.size(0) < context_length:
-                        adj_matrix = torch.cat([adj_matrix, torch.zeros(context_length - adj_matrix.size(0), context_length, dtype=torch.long) - 1], dim=0)
-                        adj_matrix = torch.cat([adj_matrix, torch.zeros(context_length, context_length - adj_matrix.size(1), dtype=torch.long) - 1], dim=1)
-                    else:
-                        adj_matrix = adj_matrix[:context_length, :context_length]
-                results.append((atom_type_indices, adj_matrix, mol))
-            elif edge_output_type == 'edge_list':
-                results.append((atom_type_indices, torch.tensor(edges, dtype=torch.long), mol))
-            else:
-                raise ValueError(f"Invalid edge_output_type: {edge_output_type}. Must be 'adj_matrix' or 'edge_list'.")
-        return results
+        return torch.tensor(atoms, dtype=torch.long), torch.tensor(edges, dtype=torch.long), mol
 
 def smiles_to_pyg_data(smiles, max_atom_num=None):
-    atom_indices, edges, mol = SMILESToInputs.convert(
+    atom_info, edge_info, mol = SMILESToInputs.convert(
         smiles=smiles,
-        context_length=max_atom_num
     )
     if mol is None:
         return None
     
     num_atoms = len(mol.GetAtoms())
-    x = atom_indices[:num_atoms]
+    x = atom_info[:num_atoms]
     if x.dim() == 1:
         x = x.unsqueeze(-1)
     
-    if edges.dim() == 2 and edges.size(1) == 3:
-        edge_index = edges[:, :2].t().contiguous()
-        edge_attr = edges[:, 2].unsqueeze(-1)
+    if edge_info.dim() == 2 and edge_info.size(1) == 4:
+        edge_index = edge_info[:, :2].t().contiguous()
+        edge_attr = edge_info[:, 2:]
     else:
-        edge_index = edges
-        edge_attr = torch.ones(edges.size(1), 1) if edges.dim() == 2 else torch.ones(1, 1)
+        edge_index = edge_info
+        edge_attr = None
     
     return Data(x=x, edge_index=edge_index, edge_attr=edge_attr, smiles=smiles, mol=mol)
 

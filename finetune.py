@@ -17,16 +17,21 @@ from sklearn.model_selection import StratifiedKFold
 from deepchem.splits.splitters import ScaffoldSplitter
 from deepchem.data import NumpyDataset
 import csv
+import os
 
-no_pretrain = False
+no_pretrain = True
 
 data_path = "./data/moleculenet/tox21/tox21.csv"
-pretrained_path = 'trained_models/ft_scaffold.pth'
+pretrained_path = 'trained_models/pretrain_pubchem/model_epoch3.pth'
+
+logdir = "pretrain_pubchem"
+os.makedirs(f"trained_models/{logdir}", exist_ok=True)
+
 batch_size = 64
 test_batch_size = 256
 
 num_epochs = 100
-random_state = 42
+random_state = 7
 
 x_col = "smiles"
 y_cols = [
@@ -46,6 +51,7 @@ y_cols = [
 
 split_methods = ['S-K-fold', 'scaffold']
 split_method = 'scaffold'
+aggr = 'attention'
 
 if __name__ == "__main__":
     ### 1. Read from CSV
@@ -60,8 +66,8 @@ if __name__ == "__main__":
     embed_dim = 384
 
     backbone = Embedder(num_atom_types=120, embed_dim=embed_dim)
-    neck = GNN(num_layers=3, embed_dim=embed_dim, gnn_type='gcn', JK='last', dropout=0.1)
-    aggrmodel = GNNAggr(embed_dim=embed_dim, aggr='mean')
+    neck = GNN(num_layers=7, embed_dim=embed_dim, gnn_type='gcn', JK='sum', dropout=0)
+    aggrmodel = GNNAggr(embed_dim=embed_dim, aggr=aggr)
 
     if not no_pretrain:
         backbone_ckpt = torch.load(pretrained_path)['backbone_state_dict']
@@ -71,7 +77,7 @@ if __name__ == "__main__":
         neck.load_state_dict(neck_ckpt)
     
     ### 3. Define head for finetuning
-    head = MLP(input_dim=embed_dim, hidden_dim=512, output_dim=len(y_cols), num_layers=3, dropout=0.1, batch_norm=True, output_activation=None)
+    head = MLP(input_dim=embed_dim, hidden_dim=512, output_dim=len(y_cols), num_layers=1, dropout=0.1, batch_norm=True, output_activation=None)
     head.init_params(gain=2.0)
 
     ### 4. Train the model
@@ -82,15 +88,15 @@ if __name__ == "__main__":
     backbone = backbone.to(device)
     neck = neck.to(device)
     head = head.to(device)
-    backbone.train()
-    neck.train()
-    head.train()
+    if aggr == 'attention':
+        aggrmodel = aggrmodel.to(device)
+
     optimizer = torch.optim.Adam([
-        {'params': backbone.parameters(), 'lr': 1e-3},
-        {'params': neck.parameters(), 'lr': 1e-3},
-        {'params': head.parameters(), 'lr': 5e-3}
+        {'params': backbone.parameters(), 'lr': 1e-5},
+        {'params': neck.parameters(), 'lr': 1e-5},
+        {'params': head.parameters(), 'lr': 1e-4}
     ])
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=150, eta_min=1e-6)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=num_epochs, eta_min=1e-6)
     criterion = MaskedFocalLoss()
 
     writer = SummaryWriter(log_dir='runs/finetune_experiment')
@@ -144,6 +150,8 @@ if __name__ == "__main__":
                     backbone.train()
                     neck.train()
                     head.train()
+                    if aggr == 'attention':
+                        aggrmodel.train()
                     epoch_loss = 0.0
                     for batch in tqdm(train_dataloader, desc=f"Fold {k+1} Epoch {epoch+1} Training"):
                         batch = batch.to(device)
@@ -166,6 +174,8 @@ if __name__ == "__main__":
                     backbone.eval()
                     neck.eval()
                     head.eval()
+                    if aggr == 'attention':
+                        aggrmodel.eval()
                     val_loss = 0.0
                     with torch.no_grad():
                         for batch in tqdm(val_dataloader, desc=f"Fold {k+1} Epoch {epoch+1} Validation"):
@@ -181,7 +191,7 @@ if __name__ == "__main__":
                     writer.add_scalar('Val/Loss', avg_val_loss, epoch + k * num_epochs)
         except KeyboardInterrupt:
             print("Training interrupted. Saving current model...")
-            save_model_name = 'trained_models/finetuned_model_interrupted_nopretrain.pth' if no_pretrain else 'trained_models/finetuned_model_interrupted.pth'
+            save_model_name = f'trained_models/{logdir}/finetuned_model_interrupted_nopretrain.pth' if no_pretrain else f'trained_models/{logdir}/finetuned_model_interrupted.pth'
             torch.save({
                 'backbone_state_dict': backbone.state_dict(),
                 'neck_state_dict': neck.state_dict(),
@@ -228,7 +238,7 @@ if __name__ == "__main__":
                 data = Data(x=atom_type_indices.unsqueeze(1), edge_index=edge_index.t().contiguous()[:2], y=torch.tensor(label))
                 test_dataset.append(data)
 
-            train_dataloader = DataLoader(train_dataset, batch_size=batch_size, shuffle=False, collate_fn=Batch.from_data_list)
+            train_dataloader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, collate_fn=Batch.from_data_list)
             val_dataloader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, collate_fn=Batch.from_data_list)
             test_dataloader = DataLoader(test_dataset, batch_size=test_batch_size, shuffle=False, collate_fn=Batch.from_data_list)
 
@@ -236,6 +246,8 @@ if __name__ == "__main__":
                 backbone.train()
                 neck.train()
                 head.train()
+                if aggr == 'attention':
+                    aggrmodel.train()
                 epoch_loss = 0.0
                 for batch in tqdm(train_dataloader, desc=f"Epoch {epoch+1} Training"):
                     batch = batch.to(device)
@@ -258,6 +270,8 @@ if __name__ == "__main__":
                 backbone.eval()
                 neck.eval()
                 head.eval()
+                if aggr == 'attention':
+                    aggrmodel.eval()
                 val_loss = 0.0
                 with torch.no_grad():
                     for batch in tqdm(val_dataloader, desc=f"Epoch {epoch+1} Validation"):
@@ -273,7 +287,7 @@ if __name__ == "__main__":
                 writer.add_scalar('Val/Loss', avg_val_loss, epoch)
         except KeyboardInterrupt:
             print("Training interrupted. Saving current model...")
-            save_model_name = 'trained_models/finetuned_model_interrupted_nopretrain.pth' if no_pretrain else 'trained_models/finetuned_model_interrupted.pth'
+            save_model_name = f'trained_models/{logdir}/finetuned_model_interrupted_nopretrain.pth' if no_pretrain else f'trained_models/{logdir}/finetuned_model_interrupted.pth'
             torch.save({
                 'backbone_state_dict': backbone.state_dict(),
                 'neck_state_dict': neck.state_dict(),
@@ -284,11 +298,12 @@ if __name__ == "__main__":
     writer.close()
     
     # 5. Save final model
-    save_model_name = 'trained_models/finetuned_model_nopretrain.pth' if no_pretrain else 'trained_models/finetuned_model.pth'
+    save_model_name = f'trained_models/{logdir}/finetuned_model_nopretrain.pth' if no_pretrain else f'trained_models/{logdir}/finetuned_model.pth'
     torch.save({
         'backbone_state_dict': backbone.state_dict(),
         'neck_state_dict': neck.state_dict(),
         'head_state_dict': head.state_dict(),
+        'aggr': aggrmodel.state_dict()
     }, save_model_name)
 
     # 6. Test on the test set, report ROC-AUC
@@ -300,6 +315,8 @@ if __name__ == "__main__":
     backbone.eval()
     neck.eval()
     head.eval()
+    if aggr == 'attention':
+        aggrmodel.eval()
     test_loss = 0.0
     all_preds = []  # list of (N, num_tasks)
     all_labels = []

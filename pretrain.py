@@ -5,6 +5,7 @@ from atomprop.utils.mlp import MLP
 from atomprop.utils.mask import MolGraphMask
 from atomprop.utils.groups import TripletGroup, QuadrupletGroup
 from atomprop.utils.features import FunctionalGroupUtils
+from atomprop.utils.weights import EqualWeightStratergy, HardSwitch, SoftSwitch, GradNorm
 from atomprop.embeddings.AtomEmbedding import BondTypes
 import matplotlib.pyplot as plt
 import pandas as pd
@@ -19,19 +20,22 @@ import os
 
 record_freq = 100
 dataset_size = -1
-num_epochs = 4
+num_epochs = 8
 batch_size = 1024
 
+switch_timings = [0, 16000, 32000, 48000]
+transition_width = 4000
+
 # data_path = "data/zinc15/dataset/zinc_standard_agent/processed/smiles.csv"
-data_path = "data/tests/pubchem_continue_test.txt"
+data_path = "data/pubchem/pubchem-10m.txt"
 pretrain_file_type = 'txt'
 
-xyz_path = "data/tests/pubchem_continue_test_xyzs.txt"
+xyz_path = "data/pubchem/pubchem-xyzs.txt"
 xyz_type = 'txt'
 
-logdir = "pretrain_pubchem"
-# make directory trained_models/{logdir}
+logdir = "pretrain_pubchem_gradnorm_gin5"
 os.makedirs(f"trained_models/{logdir}", exist_ok=True)
+
 fg_list = None # if none, use default rdkit fgs
 
 chunk_size = 65536
@@ -47,11 +51,11 @@ if fg_list is None:
     fg_list = FunctionalGroups.BuildFuncGroupHierarchy()
 
 backbone = Embedder(num_atom_types=120, embed_dim=embed_dim)
-neck = GNN(num_layers=7, embed_dim=embed_dim, gnn_type='gcn', JK='sum', dropout=0.5)
+neck = GNN(num_layers=5, embed_dim=embed_dim, gnn_type='gin', JK='last', dropout=0.5)
 head0 = MLP(input_dim=embed_dim, hidden_dim=128, output_dim=157, num_layers=2, dropout=0.5) # used for atom attribute prediction
 head1 = MLP(input_dim=embed_dim, hidden_dim=128, output_dim=embed_dim, num_layers=2, dropout=0.5) # used for masked node prediction
-head2 = MLP(input_dim=embed_dim*3, hidden_dim=128, output_dim=1, num_layers=2, dropout=0.5) # used for bond angle prediction
-head3 = MLP(input_dim=embed_dim*4, hidden_dim=128, output_dim=1, num_layers=2, dropout=0.5) # used for hydrogen bond prediction
+head2 = MLP(input_dim=embed_dim*3, hidden_dim=64, output_dim=1, num_layers=2, dropout=0.5) # used for bond angle prediction
+head3 = MLP(input_dim=embed_dim*4, hidden_dim=64, output_dim=1, num_layers=2, dropout=0.5) # used for hydrogen bond prediction
 head4 = MLP(input_dim=embed_dim, hidden_dim=128, output_dim=len(fg_list), num_layers=2, dropout=0.5) # used for functional group prediction
 aggrmodel = GNNAggr(embed_dim=embed_dim, aggr='mean')
 
@@ -62,6 +66,8 @@ task3 = BatchContrast()
 task4 = BondAnglePrediction()
 task5 = DihedralAnglePrediction()
 task6 = FunctionalGroupsPrediction()
+
+weight_stratergy0 = GradNorm(task_num=7, device=device)
 
 optimizer_configs = {
     "backbone": {
@@ -236,14 +242,14 @@ if __name__ == "__main__":
                                 desc=f"Epoch {epoch+1}/{num_epochs} - Training")
                 
                 for batch_idx, (data_list, mols) in train_pbar:
-
+                    
                     batch_data = Batch.from_data_list(data_list).to(device)
                     
                     for opt in optimizers.values():
                         opt.zero_grad()
 
                     atom_emb = backbone(batch_data.x).squeeze()
-                    embedded_data = Data(x=atom_emb, edge_index=batch_data.edge_index)
+                    embedded_data = Data(x=atom_emb, edge_index=batch_data.edge_index, edge_attr=batch_data.edge_attr)
                     graph_emb = neck(embedded_data)
                     graph_emb = graph_emb.view(-1, graph_emb.size(-1))
 
@@ -255,7 +261,7 @@ if __name__ == "__main__":
                     
                     mask_indices = MolGraphMask.select_mask_indices(batch_data.x)
                     masked_atom_emb = MolGraphMask.mask_atoms(atom_emb, mask_indices, torch.zeros(embed_dim))
-                    masked_embedded_data = Data(x=masked_atom_emb, edge_index=batch_data.edge_index)
+                    masked_embedded_data = Data(x=masked_atom_emb, edge_index=batch_data.edge_index, edge_attr=batch_data.edge_attr)
                     graph_emb1 = neck(masked_embedded_data)
                     graph_emb1_masked = graph_emb1.view(-1, graph_emb1.size(-1))[mask_indices]
                     outputs1 = head1(graph_emb1_masked)
@@ -267,14 +273,14 @@ if __name__ == "__main__":
 
                     less_mask_indices = MolGraphMask.select_mask_indices(batch_data.x, mask_ratio=less_rate)
                     less_masked_atom_emb = MolGraphMask.mask_atoms(atom_emb, less_mask_indices, torch.zeros(embed_dim))
-                    less_masked_embedded_data = Data(x=less_masked_atom_emb, edge_index=batch_data.edge_index)
+                    less_masked_embedded_data = Data(x=less_masked_atom_emb, edge_index=batch_data.edge_index, edge_attr=batch_data.edge_attr)
                     less_graph_emb = neck(less_masked_embedded_data)
                     less_graph_emb = less_graph_emb.view(-1, less_graph_emb.size(-1))
                     less_outputs = aggrmodel(less_graph_emb, batch_data.batch)
 
                     more_mask_indices = MolGraphMask.select_mask_indices(batch_data.x, mask_ratio=more_rate)
                     more_masked_atom_emb = MolGraphMask.mask_atoms(atom_emb, more_mask_indices, torch.zeros(embed_dim))
-                    more_masked_embedded_data = Data(x=more_masked_atom_emb, edge_index=batch_data.edge_index)
+                    more_masked_embedded_data = Data(x=more_masked_atom_emb, edge_index=batch_data.edge_index, edge_attr=batch_data.edge_attr)
                     more_graph_emb = neck(more_masked_embedded_data)
                     more_graph_emb = more_graph_emb.view(-1, more_graph_emb.size(-1))
                     more_outputs = aggrmodel(more_graph_emb, batch_data.batch)
@@ -327,16 +333,7 @@ if __name__ == "__main__":
                     g = torch.autograd.grad(loss_functional_group_pred, atom_emb, retain_graph=True, create_graph=False, allow_unused=True)[0]
                     grads.append(g)
 
-                    # compute L2 norms (handle None grads)
-                    norms = []
-                    for gg in grads:
-                        if gg is None:
-                            norms.append(torch.tensor(0.0, device=device))
-                        else:
-                            norms.append(gg.norm())
-                    norms = torch.stack(norms)
-                    inv = 1.0 / (norms.detach() + eps)
-                    weights = inv / inv.sum()
+                    weights = weight_stratergy0.outputs(grads)
 
                     # final weighted loss
                     loss = (weights[0] * loss_atom_attr_pred
@@ -435,7 +432,7 @@ if __name__ == "__main__":
                         batch_data = Batch.from_data_list(data_list).to(device)
                         
                         atom_emb = backbone(batch_data.x).squeeze()
-                        embedded_data = Data(x=atom_emb, edge_index=batch_data.edge_index)
+                        embedded_data = Data(x=atom_emb, edge_index=batch_data.edge_index, edge_attr=batch_data.edge_attr)
                         graph_emb = neck(embedded_data)
                         graph_emb = graph_emb.view(-1, graph_emb.size(-1))
 
@@ -447,7 +444,7 @@ if __name__ == "__main__":
                         
                         mask_indices = MolGraphMask.select_mask_indices(batch_data.x)
                         masked_atom_emb = MolGraphMask.mask_atoms(atom_emb, mask_indices, torch.zeros(embed_dim))
-                        masked_embedded_data = Data(x=masked_atom_emb, edge_index=batch_data.edge_index)
+                        masked_embedded_data = Data(x=masked_atom_emb, edge_index=batch_data.edge_index, edge_attr=batch_data.edge_attr)
                         graph_emb1 = neck(masked_embedded_data)
                         graph_emb1_masked = graph_emb1.view(-1, graph_emb1.size(-1))[mask_indices]
                         outputs1 = head1(graph_emb1_masked)
@@ -459,14 +456,14 @@ if __name__ == "__main__":
 
                         less_mask_indices = MolGraphMask.select_mask_indices(batch_data.x, mask_ratio=less_rate)
                         less_masked_atom_emb = MolGraphMask.mask_atoms(atom_emb, less_mask_indices, torch.zeros(embed_dim))
-                        less_masked_embedded_data = Data(x=less_masked_atom_emb, edge_index=batch_data.edge_index)
+                        less_masked_embedded_data = Data(x=less_masked_atom_emb, edge_index=batch_data.edge_index, edge_attr=batch_data.edge_attr)
                         less_graph_emb = neck(less_masked_embedded_data)
                         less_graph_emb = less_graph_emb.view(-1, less_graph_emb.size(-1))
                         less_outputs = aggrmodel(less_graph_emb, batch_data.batch)
 
                         more_mask_indices = MolGraphMask.select_mask_indices(batch_data.x, mask_ratio=more_rate)
                         more_masked_atom_emb = MolGraphMask.mask_atoms(atom_emb, more_mask_indices, torch.zeros(embed_dim))
-                        more_masked_embedded_data = Data(x=more_masked_atom_emb, edge_index=batch_data.edge_index)
+                        more_masked_embedded_data = Data(x=more_masked_atom_emb, edge_index=batch_data.edge_index, edge_attr=batch_data.edge_attr)
                         more_graph_emb = neck(more_masked_embedded_data)
                         more_graph_emb = more_graph_emb.view(-1, more_graph_emb.size(-1))
                         more_outputs = aggrmodel(more_graph_emb, batch_data.batch)
@@ -507,16 +504,7 @@ if __name__ == "__main__":
                                 + loss_bond_angle_pred
                                 + loss_dihedral_angle_pred
                                 + loss_functional_group_pred)
-
-                        if batch_idx == 0 or (batch_idx + 1) % record_freq == 0:
-                            writer.add_scalar('Val/Loss_atom_attr', loss_atom_attr_pred.item(), epoch * val_loader.total_batches + batch_idx)
-                            writer.add_scalar('Val/Loss_masked_atom', loss_masked_atom_type_pred.item(), epoch * val_loader.total_batches + batch_idx)
-                            writer.add_scalar('Val/Loss_triplet', loss_triplet_contrast.item(), epoch * val_loader.total_batches + batch_idx)
-                            writer.add_scalar('Val/Loss_batch_contrast', loss_batch_contrast.item(), epoch * val_loader.total_batches + batch_idx)
-                            writer.add_scalar('Val/Loss_bond_angle', loss_bond_angle_pred.item(), epoch * val_loader.total_batches + batch_idx)
-                            writer.add_scalar('Val/Loss_dihedral_angle', loss_dihedral_angle_pred.item(), epoch * val_loader.total_batches + batch_idx)
-                            writer.add_scalar('Val/Loss_functional_group', loss_functional_group_pred.item(), epoch * val_loader.total_batches + batch_idx)
-                        
+                   
                         if batch_idx == val_loader.total_batches - 1:
                             metrics_0 = task0.get_metrics()
                             metrics_1 = task1.get_metrics()
@@ -531,7 +519,7 @@ if __name__ == "__main__":
                             "metrics_2": metrics_2,
                             "metrics_3": metrics_3,
                             "metrics_4": metrics_4,
-                            "metrics_5": metrics_5
+                            "metrics_5": metrics_5,
                             "metrics_6": metrics_6
                             }
                             print(f"Batch {batch_idx+1}/{val_loader.total_batches} Metrics: {metrics}")
