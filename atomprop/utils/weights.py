@@ -68,31 +68,53 @@ class HardSwitch(WeightStratergy):
             return weights
         
 class SoftSwitch(WeightStratergy):
-    """
-    Soft switch weight stratergy.
-    It's similar to hard switch. The difference is that it uses a cosine function to smooth the transition between tasks.
-    """
-    def __init__(self, task_num, device, switch_timings = None, input_weights = None, transition_width = 10):
+    def __init__(self, task_num, device, switch_timings=None, input_weights=None, transition_width=10, 
+                 min_weight=0.0, max_weight=1.0):
         super().__init__(task_num, device, input_weights)
         assert switch_timings is not None, "switch_timings must be provided for SoftSwitchWeightStratergy."
         assert switch_timings.shape[0] == task_num, "switch_timings length must be task_num."
         self.switch_timings = switch_timings.to(device)
         self.transition_width = transition_width
+        self.min_weight = min_weight
+        self.max_weight = max_weight
+        assert max_weight > min_weight, "max_weight must be greater than min_weight"
     
     def outputs(self, timing):
-        weights = torch.zeros(self.task_num, device=self.device)
-        for i in range(self.task_num):
-            if i == 0:
+        weights = torch.full((self.task_num,), self.min_weight, device=self.device)
+        weight_range = self.max_weight - self.min_weight
+        
+        # Determine which task is currently active or transitioning
+        if timing < self.switch_timings[0]:
+            # First task is active
+            weights[0] = self.max_weight
+        else:
+            for i in range(1, self.task_num):
                 if timing < self.switch_timings[i]:
-                    weights[i] = 1.0
-                elif timing < self.switch_timings[i] + self.transition_width:
-                    weights[i] = 0.5 * (1 + torch.cos(torch.pi * (timing - self.switch_timings[i]) / self.transition_width))
+                    # Task i is transitioning to active
+                    prev_timing = self.switch_timings[i-1]
+                    if timing < prev_timing + self.transition_width:
+                        # Transition period: task i-1 -> task i
+                        progress = (timing - prev_timing) / self.transition_width
+                        cos_value = torch.cos(torch.pi * progress)
+                        weights[i-1] = self.min_weight + 0.5 * weight_range * (1 + cos_value)
+                        weights[i] = self.min_weight + 0.5 * weight_range * (1 - cos_value)
+                    else:
+                        # Task i is fully active
+                        weights[i] = self.max_weight
+                    break
             else:
-                if timing >= self.switch_timings[i-1] + self.transition_width and timing < self.switch_timings[i]:
-                    weights[i] = 1.0
-                elif timing >= self.switch_timings[i] and timing < self.switch_timings[i] + self.transition_width:
-                    weights[i] = 0.5 * (1 + torch.cos(torch.pi * (timing - self.switch_timings[i]) / self.transition_width))
-        return self._weight_norm(weights*self.input_weights)
+                # Last task is active
+                if timing < self.switch_timings[-1] + self.transition_width:
+                    # Transition to last task
+                    progress = (timing - self.switch_timings[-1]) / self.transition_width
+                    cos_value = torch.cos(torch.pi * progress)
+                    weights[-2] = self.min_weight + 0.5 * weight_range * (1 + cos_value)
+                    weights[-1] = self.min_weight + 0.5 * weight_range * (1 - cos_value)
+                else:
+                    # Last task fully active
+                    weights[-1] = self.max_weight
+        
+        return self._weight_norm(weights * self.input_weights)
 
 class GradNorm(WeightStratergy):
     """
