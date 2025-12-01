@@ -24,7 +24,7 @@ no_pretrain = True
 data_path = "./data/moleculenet/tox21/tox21.csv"
 pretrained_path = 'trained_models/pretrain_pubchem/model_epoch3.pth'
 
-logdir = "pretrain_pubchem"
+logdir = "finetune_gin5"
 os.makedirs(f"trained_models/{logdir}", exist_ok=True)
 
 batch_size = 64
@@ -49,8 +49,6 @@ y_cols = [
     "SR-p53",
 ]
 
-split_methods = ['S-K-fold', 'scaffold']
-split_method = 'scaffold'
 aggr = 'attention'
 
 if __name__ == "__main__":
@@ -66,7 +64,7 @@ if __name__ == "__main__":
     embed_dim = 384
 
     backbone = Embedder(num_atom_types=120, embed_dim=embed_dim)
-    neck = GNN(num_layers=7, embed_dim=embed_dim, gnn_type='gcn', JK='sum', dropout=0)
+    neck = GNN(num_layers=5, embed_dim=embed_dim, gnn_type='gin', JK='last', dropout=0)
     aggrmodel = GNNAggr(embed_dim=embed_dim, aggr=aggr)
 
     if not no_pretrain:
@@ -101,200 +99,128 @@ if __name__ == "__main__":
 
     writer = SummaryWriter(log_dir='runs/finetune_experiment')
 
-    if split_method == 'S-K-fold':
-        K = 5
-
-        dataset = []
-        created_labels = []
-        for smi, label in zip(smiles_list, labels):
-            atom_type_indices, edge_index, mol = SMILESToInputs.convert(smi, edge_output_type='edge_list', padding=False, sanitize=False)
-            if atom_type_indices is None or edge_index is None:
-                continue
-            data = Data(x=atom_type_indices.unsqueeze(1), edge_index=edge_index.t().contiguous()[:2], y=torch.tensor(label))
-            dataset.append(data)
-            # prepare label for stratification: convert -1 -> 0 and treat positives as 1
-            arr = np.array(label, dtype=float)
-            binarized = (arr == 1.0).astype(int)
-            created_labels.append(binarized)
-
+    try:
         global_step = 0
-        try:
-            # Try to use iterative stratification for multilabel data
-            try:
-                splitter = MultilabelStratifiedKFold(n_splits=K, shuffle=True, random_state=random_state)
-                splits = list(splitter.split(np.zeros(len(created_labels)), np.array(created_labels)))
-            except Exception:
-                # Fallback: collapse multilabel into a single aggregated label for stratification (imperfect)
-                collapsed = []
-                for lbl in created_labels:
-                    # collapse binary vector to a string/tuple and map to int class
-                    collapsed.append(tuple(int(x) for x in lbl))
-                lbl_map = {}
-                collapsed_ints = []
-                for t in collapsed:
-                    if t not in lbl_map:
-                        lbl_map[t] = len(lbl_map)
-                    collapsed_ints.append(lbl_map[t])
-                splitter = StratifiedKFold(n_splits=K, shuffle=True, random_state=random_state)
-                splits = list(splitter.split(np.zeros(len(created_labels)), np.array(collapsed_ints)))
+        splitter = ScaffoldSplitter()
 
-            for fold_idx, (train_idx, val_idx) in enumerate(splits):
-                k = fold_idx
-                print(f"Starting fold {k+1}/{K}")
-                train_dataset = [dataset[i] for i in train_idx]
-                val_dataset = [dataset[i] for i in val_idx]
-                train_dataloader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, collate_fn=Batch.from_data_list)
-                val_dataloader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, collate_fn=Batch.from_data_list)
+        dc_dataset = NumpyDataset(X=labels, ids=smiles_list)
+        # default split on 8:1:1
+        dc_train, dc_val, dc_test = splitter.train_valid_test_split(dc_dataset, seed=random_state)
 
-                for epoch in range(num_epochs):
-                    backbone.train()
-                    neck.train()
-                    head.train()
-                    if aggr == 'attention':
-                        aggrmodel.train()
-                    epoch_loss = 0.0
-                    for batch in tqdm(train_dataloader, desc=f"Fold {k+1} Epoch {epoch+1} Training"):
-                        batch = batch.to(device)
-                        optimizer.zero_grad()
-                        emb = backbone(batch.x.squeeze())
-                        emb = neck(Data(x=emb, edge_index=batch.edge_index))
-                        graph_emb = aggrmodel(emb, batch.batch)
-                        preds = head(graph_emb)
-                        loss = criterion(preds.reshape(-1, len(y_cols)), batch.y.reshape(-1, len(y_cols)))
-                        loss.backward()
-                        optimizer.step()
-                        epoch_loss += loss.item()
-                        writer.add_scalar('Train/Loss', loss.item(), global_step)
-                        global_step += 1
-                    avg_epoch_loss = epoch_loss / len(train_dataloader)
-                    print(f"Fold {k+1} Epoch {epoch+1} Training Loss: {avg_epoch_loss:.4f}")
-                    scheduler.step()
+        train_smiles = dc_train.ids
+        train_labels = dc_train.X
+        train_dataset = []
+        val_smiles = dc_val.ids
+        val_labels = dc_val.X
+        val_dataset = []
+        test_smiles = dc_test.ids
+        test_labels = dc_test.X
+        test_dataset = []
 
-                    # Validation
-                    backbone.eval()
-                    neck.eval()
-                    head.eval()
-                    if aggr == 'attention':
-                        aggrmodel.eval()
-                    val_loss = 0.0
-                    with torch.no_grad():
-                        for batch in tqdm(val_dataloader, desc=f"Fold {k+1} Epoch {epoch+1} Validation"):
-                            batch = batch.to(device)
-                            emb = backbone(batch.x.squeeze())
-                            emb = neck(Data(x=emb, edge_index=batch.edge_index))
-                            graph_emb = aggrmodel(emb, batch.batch)
-                            preds = head(graph_emb)
-                            loss = criterion(preds.reshape(-1, len(y_cols)), batch.y.reshape(-1, len(y_cols)))
-                            val_loss += loss.item()
-                    avg_val_loss = val_loss / len(val_dataloader)
-                    print(f"Fold {k+1} Epoch {epoch+1} Validation Loss: {avg_val_loss:.4f}")
-                    writer.add_scalar('Val/Loss', avg_val_loss, epoch + k * num_epochs)
-        except KeyboardInterrupt:
-            print("Training interrupted. Saving current model...")
-            save_model_name = f'trained_models/{logdir}/finetuned_model_interrupted_nopretrain.pth' if no_pretrain else f'trained_models/{logdir}/finetuned_model_interrupted.pth'
-            torch.save({
-                'backbone_state_dict': backbone.state_dict(),
-                'neck_state_dict': neck.state_dict(),
-                'head_state_dict': head.state_dict(),
-            }, save_model_name)
+        for smi, label in zip(train_smiles, train_labels):
+            atom_info, edge_info, mol = SMILESToInputs.convert(smi, sanitize=False)
+            if atom_info is None or edge_info is None:
+                continue
+            
+            if edge_info.dim() == 2 and edge_info.size(1) == 4:
+                edge_index = edge_info[:, :2].t().contiguous()
+                edge_attr = edge_info[:, 2:]
+                
+            else:
+                edge_index = torch.tensor([[], []], dtype=torch.long)
+                edge_attr = torch.tensor([], dtype=torch.long).view(0, 2)
+                
+            data = Data(x=atom_info, edge_index=edge_index, edge_attr=edge_attr, y=torch.tensor(label))
+            train_dataset.append(data)
 
-    elif split_method == 'scaffold':
-        try:
-            global_step = 0
-            splitter = ScaffoldSplitter()
+        for smi, label in zip(val_smiles, val_labels):
+            atom_info, edge_info, mol = SMILESToInputs.convert(smi, sanitize=False)
+            if atom_info is None or edge_info is None:
+                continue
+            
+            if edge_info.dim() == 2 and edge_info.size(1) == 4:
+                edge_index = edge_info[:, :2].t().contiguous()
+                edge_attr = edge_info[:, 2:]
+                
+            else:
+                edge_index = torch.tensor([[], []], dtype=torch.long)
+                edge_attr = torch.tensor([], dtype=torch.long).view(0, 2)
+                
+            data = Data(x=atom_info, edge_index=edge_index, edge_attr=edge_attr, y=torch.tensor(label))
+            val_dataset.append(data)
 
-            dc_dataset = NumpyDataset(X=labels, ids=smiles_list)
-            # default split on 8:1:1
-            dc_train, dc_val, dc_test = splitter.train_valid_test_split(dc_dataset, seed=random_state)
+        for smi, label in zip(test_smiles, test_labels):
+            atom_info, edge_info, mol = SMILESToInputs.convert(smi, sanitize=False)
+            if atom_info is None or edge_info is None:
+                continue
+            
+            if edge_info.dim() == 2 and edge_info.size(1) == 4:
+                edge_index = edge_info[:, :2].t().contiguous()
+                edge_attr = edge_info[:, 2:]
+                
+            else:
+                edge_index = torch.tensor([[], []], dtype=torch.long)
+                edge_attr = torch.tensor([], dtype=torch.long).view(0, 2)
+                
+            data = Data(x=atom_info, edge_index=edge_index, edge_attr=edge_attr, y=torch.tensor(label))
+            test_dataset.append(data)
 
-            train_smiles = dc_train.ids
-            train_labels = dc_train.X
-            train_dataset = []
-            val_smiles = dc_val.ids
-            val_labels = dc_val.X
-            val_dataset = []
-            test_smiles = dc_test.ids
-            test_labels = dc_test.X
-            test_dataset = []
+        train_dataloader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, collate_fn=Batch.from_data_list)
+        val_dataloader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, collate_fn=Batch.from_data_list)
+        test_dataloader = DataLoader(test_dataset, batch_size=test_batch_size, shuffle=False, collate_fn=Batch.from_data_list)
 
-            for smi, label in zip(train_smiles, train_labels):
-                atom_type_indices, edge_index, mol = SMILESToInputs.convert(smi, edge_output_type='edge_list', padding=False, sanitize=False)
-                if atom_type_indices is None or edge_index is None:
-                    continue
-                data = Data(x=atom_type_indices.unsqueeze(1), edge_index=edge_index.t().contiguous()[:2], y=torch.tensor(label))
-                train_dataset.append(data)
+        for epoch in range(num_epochs):
+            backbone.train()
+            neck.train()
+            head.train()
+            if aggr == 'attention':
+                aggrmodel.train()
+            epoch_loss = 0.0
+            for batch in tqdm(train_dataloader, desc=f"Epoch {epoch+1} Training"):
+                batch = batch.to(device)
+                optimizer.zero_grad()
+                emb = backbone(batch.x.squeeze())
+                emb = neck(Data(x=emb, edge_index=batch.edge_index, edge_attr=batch.edge_attr))
+                graph_emb = aggrmodel(emb, batch.batch)
+                preds = head(graph_emb)
+                loss = criterion(preds.reshape(-1, len(y_cols)), batch.y.reshape(-1, len(y_cols)))
+                loss.backward()
+                optimizer.step()
+                epoch_loss += loss.item()
+                writer.add_scalar('Train/Loss', loss.item(), global_step)
+                global_step += 1
+            avg_epoch_loss = epoch_loss / len(train_dataloader)
+            print(f"Epoch {epoch+1} Training Loss: {avg_epoch_loss:.4f}")
+            scheduler.step()
 
-            for smi, label in zip(val_smiles, val_labels):
-                atom_type_indices, edge_index, mol = SMILESToInputs.convert(smi, edge_output_type='edge_list', padding=False, sanitize=False)
-                if atom_type_indices is None or edge_index is None:
-                    continue
-                data = Data(x=atom_type_indices.unsqueeze(1), edge_index=edge_index.t().contiguous()[:2], y=torch.tensor(label))
-                val_dataset.append(data)
-
-            for smi, label in zip(test_smiles, test_labels):
-                atom_type_indices, edge_index, mol = SMILESToInputs.convert(smi, edge_output_type='edge_list', padding=False, sanitize=False)
-                if atom_type_indices is None or edge_index is None:
-                    continue
-                data = Data(x=atom_type_indices.unsqueeze(1), edge_index=edge_index.t().contiguous()[:2], y=torch.tensor(label))
-                test_dataset.append(data)
-
-            train_dataloader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, collate_fn=Batch.from_data_list)
-            val_dataloader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, collate_fn=Batch.from_data_list)
-            test_dataloader = DataLoader(test_dataset, batch_size=test_batch_size, shuffle=False, collate_fn=Batch.from_data_list)
-
-            for epoch in range(num_epochs):
-                backbone.train()
-                neck.train()
-                head.train()
-                if aggr == 'attention':
-                    aggrmodel.train()
-                epoch_loss = 0.0
-                for batch in tqdm(train_dataloader, desc=f"Epoch {epoch+1} Training"):
+            # Validation
+            backbone.eval()
+            neck.eval()
+            head.eval()
+            if aggr == 'attention':
+                aggrmodel.eval()
+            val_loss = 0.0
+            with torch.no_grad():
+                for batch in tqdm(val_dataloader, desc=f"Epoch {epoch+1} Validation"):
                     batch = batch.to(device)
-                    optimizer.zero_grad()
                     emb = backbone(batch.x.squeeze())
-                    emb = neck(Data(x=emb, edge_index=batch.edge_index))
+                    emb = neck(Data(x=emb, edge_index=batch.edge_index, edge_attr=batch.edge_attr))
                     graph_emb = aggrmodel(emb, batch.batch)
                     preds = head(graph_emb)
                     loss = criterion(preds.reshape(-1, len(y_cols)), batch.y.reshape(-1, len(y_cols)))
-                    loss.backward()
-                    optimizer.step()
-                    epoch_loss += loss.item()
-                    writer.add_scalar('Train/Loss', loss.item(), global_step)
-                    global_step += 1
-                avg_epoch_loss = epoch_loss / len(train_dataloader)
-                print(f"Epoch {epoch+1} Training Loss: {avg_epoch_loss:.4f}")
-                scheduler.step()
-
-                # Validation
-                backbone.eval()
-                neck.eval()
-                head.eval()
-                if aggr == 'attention':
-                    aggrmodel.eval()
-                val_loss = 0.0
-                with torch.no_grad():
-                    for batch in tqdm(val_dataloader, desc=f"Epoch {epoch+1} Validation"):
-                        batch = batch.to(device)
-                        emb = backbone(batch.x.squeeze())
-                        emb = neck(Data(x=emb, edge_index=batch.edge_index))
-                        graph_emb = aggrmodel(emb, batch.batch)
-                        preds = head(graph_emb)
-                        loss = criterion(preds.reshape(-1, len(y_cols)), batch.y.reshape(-1, len(y_cols)))
-                        val_loss += loss.item()
-                avg_val_loss = val_loss / len(val_dataloader)
-                print(f"Epoch {epoch+1} Validation Loss: {avg_val_loss:.4f}")
-                writer.add_scalar('Val/Loss', avg_val_loss, epoch)
-        except KeyboardInterrupt:
-            print("Training interrupted. Saving current model...")
-            save_model_name = f'trained_models/{logdir}/finetuned_model_interrupted_nopretrain.pth' if no_pretrain else f'trained_models/{logdir}/finetuned_model_interrupted.pth'
-            torch.save({
-                'backbone_state_dict': backbone.state_dict(),
-                'neck_state_dict': neck.state_dict(),
-                'head_state_dict': head.state_dict(),
-            }, save_model_name)
-    else:
-        raise ValueError(f"Unknown split method: {split_method}")
+                    val_loss += loss.item()
+            avg_val_loss = val_loss / len(val_dataloader)
+            print(f"Epoch {epoch+1} Validation Loss: {avg_val_loss:.4f}")
+            writer.add_scalar('Val/Loss', avg_val_loss, epoch)
+    except KeyboardInterrupt:
+        print("Training interrupted. Saving current model...")
+        save_model_name = f'trained_models/{logdir}/finetuned_model_interrupted_nopretrain.pth' if no_pretrain else f'trained_models/{logdir}/finetuned_model_interrupted.pth'
+        torch.save({
+            'backbone_state_dict': backbone.state_dict(),
+            'neck_state_dict': neck.state_dict(),
+            'head_state_dict': head.state_dict(),
+        }, save_model_name)
+            
     writer.close()
     
     # 5. Save final model
@@ -307,10 +233,6 @@ if __name__ == "__main__":
     }, save_model_name)
 
     # 6. Test on the test set, report ROC-AUC
-    if split_method == 'S-K-fold':
-        test_size = int(0.05 * len(dataset))
-        test_dataset = dataset[-test_size:]
-        test_dataloader = DataLoader(test_dataset, batch_size=test_batch_size, shuffle=False, collate_fn=Batch.from_data_list)
     
     backbone.eval()
     neck.eval()
@@ -325,7 +247,7 @@ if __name__ == "__main__":
         for batch in tqdm(test_dataloader, desc="Testing"):
             batch = batch.to(device)
             emb = backbone(batch.x.squeeze())
-            emb = neck(Data(x=emb, edge_index=batch.edge_index))
+            emb = neck(Data(x=emb, edge_index=batch.edge_index, edge_attr=batch.edge_attr))
             graph_emb = aggrmodel(emb, batch.batch)
             preds = head(graph_emb)
             # sigmoid to get probabilities

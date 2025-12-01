@@ -49,7 +49,7 @@ class SMILESToInputs:
         
         return torch.tensor(atoms, dtype=torch.long), torch.tensor(edges, dtype=torch.long), mol
 
-def smiles_to_pyg_data(smiles, max_atom_num=None):
+def smiles_to_pyg_data(smiles):
     atom_info, edge_info, mol = SMILESToInputs.convert(
         smiles=smiles,
     )
@@ -64,18 +64,18 @@ def smiles_to_pyg_data(smiles, max_atom_num=None):
     if edge_info.dim() == 2 and edge_info.size(1) == 4:
         edge_index = edge_info[:, :2].t().contiguous()
         edge_attr = edge_info[:, 2:]
+        
     else:
-        edge_index = edge_info
-        edge_attr = None
+        edge_index = torch.tensor([[], []], dtype=torch.long)
+        edge_attr = torch.tensor([], dtype=torch.long).view(0, 2)
     
     return Data(x=x, edge_index=edge_index, edge_attr=edge_attr, smiles=smiles, mol=mol)
 
 class PyGChunkDataListLoader:
-    def __init__(self, data_path, split_indices, chunk_size=65536, max_atom_num=128, batch_size=32, device=None, file_type='csv'):
+    def __init__(self, data_path, split_indices, chunk_size=65536, batch_size=32, device=None, file_type='csv'):
         self.data_path = data_path
         self.split_indices = split_indices
         self.chunk_size = chunk_size
-        self.max_atom_num = max_atom_num
         self.batch_size = batch_size
         self.current_chunk_idx = 0
         self.current_chunk_data = None
@@ -136,7 +136,7 @@ class PyGChunkDataListLoader:
             local_idx = target_idx % self.chunk_size
             smiles = self.current_chunk_data.iloc[local_idx]['SMILES']
 
-            data = smiles_to_pyg_data(smiles, self.max_atom_num)
+            data = smiles_to_pyg_data(smiles)
 
             if data is None:
                 print(f"Invalid SMILES at index {target_idx}: {smiles}")

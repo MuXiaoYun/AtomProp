@@ -41,7 +41,7 @@ class EqualWeightStratergy(WeightStratergy):
     def __init__(self, task_num, device, input_weights = None):
         super().__init__(task_num, device, input_weights)
     
-    def outputs(self):
+    def outputs(self, timing=None):
         return self.input_weights
     
 class HardSwitch(WeightStratergy):

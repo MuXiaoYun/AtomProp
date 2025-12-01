@@ -33,7 +33,7 @@ pretrain_file_type = 'txt'
 xyz_path = "data/pubchem/pubchem-xyzs.txt"
 xyz_type = 'txt'
 
-logdir = "pretrain_pubchem_hardswitch_gin5"
+logdir = "pretrain_pubchem_gn_gin5"
 os.makedirs(f"trained_models/{logdir}", exist_ok=True)
 
 fg_list = None # if none, use default rdkit fgs
@@ -45,7 +45,7 @@ less_rate = 0.1
 more_rate = 0.3
 embed_dim = 384
 
-device = torch.device("cuda:5") if torch.cuda.is_available() else torch.device("cpu")
+device = torch.device("cuda:7") if torch.cuda.is_available() else torch.device("cpu")
 
 if fg_list is None:
     fg_list = FunctionalGroups.BuildFuncGroupHierarchy()
@@ -68,7 +68,7 @@ task5 = DihedralAnglePrediction()
 task6 = FunctionalGroupsPrediction()
 
 weight_stratergy0 = GradNorm(task_num=7, device=device)
-weight_stratergy1 = SoftSwitch(task_num=4, switch_timings=switch_timings, transition_width=transition_width, device=device)
+weight_stratergy1 = EqualWeightStratergy(task_num=7, device=device)
 
 optimizer_configs = {
     "backbone": {
@@ -209,7 +209,6 @@ if __name__ == "__main__":
             data_path=data_path,
             split_indices=train_indices,
             chunk_size=chunk_size,
-            max_atom_num=max_atom_num,
             batch_size=batch_size,
             file_type=pretrain_file_type
         )
@@ -217,7 +216,6 @@ if __name__ == "__main__":
             data_path=data_path,
             split_indices=val_indices,
             chunk_size=chunk_size,
-            max_atom_num=max_atom_num,
             batch_size=batch_size,
             file_type=pretrain_file_type
         )
@@ -243,7 +241,6 @@ if __name__ == "__main__":
                                 desc=f"Epoch {epoch+1}/{num_epochs} - Training")
                 
                 for batch_idx, (data_list, mols) in train_pbar:
-                    
                     batch_data = Batch.from_data_list(data_list).to(device)
                     
                     for opt in optimizers.values():
