@@ -22,9 +22,9 @@ import os
 no_pretrain = True
 
 data_path = "./data/moleculenet/tox21/tox21.csv"
-pretrained_path = 'trained_models/pretrain_pubchem/model_epoch3.pth'
+pretrained_path = 'trained_models/pretrain_pubchem_hard_gin5/model_epoch2.pth'
 
-logdir = "finetune_gin5"
+logdir = "finetune_gn_gin5"
 os.makedirs(f"trained_models/{logdir}", exist_ok=True)
 
 batch_size = 64
@@ -64,7 +64,7 @@ if __name__ == "__main__":
     embed_dim = 384
 
     backbone = Embedder(num_atom_types=120, embed_dim=embed_dim)
-    neck = GNN(num_layers=5, embed_dim=embed_dim, gnn_type='gin', JK='last', dropout=0)
+    neck = GNN(num_layers=4, embed_dim=embed_dim, gnn_type='gin', JK='last', dropout=0)
     aggrmodel = GNNAggr(embed_dim=embed_dim, aggr=aggr)
 
     if not no_pretrain:
@@ -75,7 +75,7 @@ if __name__ == "__main__":
         neck.load_state_dict(neck_ckpt)
     
     ### 3. Define head for finetuning
-    head = MLP(input_dim=embed_dim, hidden_dim=512, output_dim=len(y_cols), num_layers=1, dropout=0.1, batch_norm=True, output_activation=None)
+    head = MLP(input_dim=embed_dim, hidden_dim=256, output_dim=len(y_cols), num_layers=2, dropout=0, batch_norm=True, output_activation=None)
     head.init_params(gain=2.0)
 
     ### 4. Train the model
@@ -89,13 +89,19 @@ if __name__ == "__main__":
     if aggr == 'attention':
         aggrmodel = aggrmodel.to(device)
 
-    optimizer = torch.optim.Adam([
+    opt_cfg = [
         {'params': backbone.parameters(), 'lr': 1e-5},
         {'params': neck.parameters(), 'lr': 1e-5},
         {'params': head.parameters(), 'lr': 1e-4}
-    ])
+    ]
+    if aggr == 'attention':
+        opt_cfg.append(
+            {'params': aggrmodel.parameters(), 'lr': 1e-4}
+        )
+    
+    optimizer = torch.optim.Adam(opt_cfg)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=num_epochs, eta_min=1e-6)
-    criterion = MaskedFocalLoss()
+    criterion = MaskedBCELoss()
 
     writer = SummaryWriter(log_dir='runs/finetune_experiment')
 
@@ -169,6 +175,9 @@ if __name__ == "__main__":
         val_dataloader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, collate_fn=Batch.from_data_list)
         test_dataloader = DataLoader(test_dataset, batch_size=test_batch_size, shuffle=False, collate_fn=Batch.from_data_list)
 
+        best_val_loss = float('inf')
+        best_epoch = -1
+
         for epoch in range(num_epochs):
             backbone.train()
             neck.train()
@@ -212,6 +221,19 @@ if __name__ == "__main__":
             avg_val_loss = val_loss / len(val_dataloader)
             print(f"Epoch {epoch+1} Validation Loss: {avg_val_loss:.4f}")
             writer.add_scalar('Val/Loss', avg_val_loss, epoch)
+
+            # Save best model based on validation loss
+            if avg_val_loss < best_val_loss:
+                best_val_loss = avg_val_loss
+                best_epoch = epoch + 1
+                save_model_name = f'trained_models/{logdir}/best_model_nopretrain.pth' if no_pretrain else f'trained_models/{logdir}/best_model.pth'
+                torch.save({
+                    'backbone_state_dict': backbone.state_dict(),
+                    'neck_state_dict': neck.state_dict(),
+                    'head_state_dict': head.state_dict(),
+                    'aggr': aggrmodel.state_dict()
+                }, save_model_name)
+                print(f"Best model saved at epoch {best_epoch} with validation loss: {best_val_loss:.4f}")
     except KeyboardInterrupt:
         print("Training interrupted. Saving current model...")
         save_model_name = f'trained_models/{logdir}/finetuned_model_interrupted_nopretrain.pth' if no_pretrain else f'trained_models/{logdir}/finetuned_model_interrupted.pth'
@@ -232,7 +254,17 @@ if __name__ == "__main__":
         'aggr': aggrmodel.state_dict()
     }, save_model_name)
 
+    print(f"Best model was at epoch {best_epoch} with validation loss: {best_val_loss:.4f}")
+
     # 6. Test on the test set, report ROC-AUC
+    # Load best model for testing
+    best_model_name = f'trained_models/{logdir}/best_model_nopretrain.pth' if no_pretrain else f'trained_models/{logdir}/best_model.pth'
+    best_checkpoint = torch.load(best_model_name)
+    backbone.load_state_dict(best_checkpoint['backbone_state_dict'])
+    neck.load_state_dict(best_checkpoint['neck_state_dict'])
+    head.load_state_dict(best_checkpoint['head_state_dict'])
+    if 'aggr' in best_checkpoint:
+        aggrmodel.load_state_dict(best_checkpoint['aggr'])
     
     backbone.eval()
     neck.eval()

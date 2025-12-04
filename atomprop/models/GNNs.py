@@ -32,21 +32,31 @@ class MaskedFocalLoss(nn.Module):
         self.alpha = alpha
         self.gamma = gamma
         self.reduction = reduction
-
+        
     def forward(self, pred, label):
+        """
+        pred: logits tensor of shape (N, *)
+        label: label tensor of shape (N, *), values in {0, 1, -1}
+        -1 indicates missing labels
+        """
         mask = (label != -1)
+        if mask.sum() == 0:
+            return torch.tensor(0.0, device=pred.device)
+            
         valid_labels = label[mask].float()
         valid_preds = pred[mask]
-
-        if valid_labels.numel() == 0:
-            return torch.tensor(0.0, device=pred.device)
-
-        bce_loss = F.binary_cross_entropy_with_logits(
-            valid_preds, valid_labels, reduction='none'
-        )
-        pt = torch.exp(-bce_loss)
-        focal_loss = self.alpha * (1 - pt) ** self.gamma * bce_loss
-
+        
+        # Convert logits to probabilities
+        p = torch.sigmoid(valid_preds)
+        # Focal Loss calculation
+        ce_loss = F.binary_cross_entropy_with_logits(valid_preds, valid_labels, reduction='none')
+        # pt = p if y=1, else 1-p
+        p_t = p * valid_labels + (1 - p) * (1 - valid_labels)
+        # alpha_t = alpha if y=1, else 1-alpha
+        alpha_t = self.alpha * valid_labels + (1 - self.alpha) * (1 - valid_labels)
+        # Focal loss
+        focal_loss = alpha_t * (1 - p_t) ** self.gamma * ce_loss
+        
         if self.reduction == 'mean':
             return focal_loss.mean()
         elif self.reduction == 'sum':
@@ -362,3 +372,4 @@ class GNNAggr(nn.Module):
         # x has shape [B_N, embed_dim]
         # batch has shape [B_N] with batch indices
         return self.aggr_fn(x, batch)  # Shape [B, embed_dim]
+    

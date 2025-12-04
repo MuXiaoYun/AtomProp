@@ -2,22 +2,22 @@
 Module for weight stratergies among pretraining tasks.
 """
 import torch
+from atomprop.utils.grads_utils import find_optimal_weights
 
 class WeightStratergy:
     """
     Base class for weight stratergy.
     """
     @staticmethod
-    def _weight_norm(weights):
+    def _weight_norm(weights, eps=1e-3):
         """
         Normalize the weights to sum to 1.
         """
         return weights / torch.sum(weights)
     
-    def __init__(self, task_num, device, input_weights = None):
+    def __init__(self, task_num, device):
         self.task_num = task_num
         self.device = device
-        self.input_weights = torch.ones(task_num, device=device) if not input_weights else input_weights.to(device)
     
     def outputs(self):
         """
@@ -38,18 +38,20 @@ class EqualWeightStratergy(WeightStratergy):
     """
     Equal weight stratergy.
     """
-    def __init__(self, task_num, device, input_weights = None):
-        super().__init__(task_num, device, input_weights)
+    def __init__(self, task_num, device):
+        super().__init__(task_num, device)
     
-    def outputs(self, timing=None):
-        return self.input_weights
+    def outputs(self, divide=False):
+        if not divide:
+            return torch.ones(self.task_num)
+        return self._weight_norm(torch.ones(self.task_num))
     
 class HardSwitch(WeightStratergy):
     """
     Hard switch weight stratergy.
     """
-    def __init__(self, task_num, device, switch_timings = None, input_weights = None):
-        super().__init__(task_num, device, input_weights)
+    def __init__(self, task_num, device, switch_timings = None):
+        super().__init__(task_num, device)
         assert switch_timings is not None, "switch_timings must be provided for HardSwitchWeightStratergy."
         assert switch_timings.shape[0] == task_num, "switch_timings length must be task_num."
         self.switch_timings = switch_timings.to(device)
@@ -61,16 +63,16 @@ class HardSwitch(WeightStratergy):
                 current_task = i
                 break
         if current_task == -1:
-            return self._weight_norm(self.input_weights)
+            self._weight_norm(torch.ones(self.task_num))
         else:
             weights = torch.zeros(self.task_num, device=self.device)
-            weights[current_task] = self.input_weights[current_task]
+            weights[current_task] = torch.tensor(1.0, dtype=torch.float32)
             return weights
         
 class SoftSwitch(WeightStratergy):
-    def __init__(self, task_num, device, switch_timings=None, input_weights=None, transition_width=10, 
+    def __init__(self, task_num, device, switch_timings=None, transition_width=10, 
                  min_weight=0.0, max_weight=1.0):
-        super().__init__(task_num, device, input_weights)
+        super().__init__(task_num, device)
         assert switch_timings is not None, "switch_timings must be provided for SoftSwitchWeightStratergy."
         assert switch_timings.shape[0] == task_num, "switch_timings length must be task_num."
         self.switch_timings = switch_timings.to(device)
@@ -114,15 +116,15 @@ class SoftSwitch(WeightStratergy):
                     # Last task fully active
                     weights[-1] = self.max_weight
         
-        return self._weight_norm(weights * self.input_weights)
+        return weights
 
 class GradNorm(WeightStratergy):
     """
     GradNorm weight stratergy.
     Reference: https://arxiv.org/abs/1705.07115
     """
-    def __init__(self, task_num, device, input_weights = None):
-        super().__init__(task_num, device, input_weights)
+    def __init__(self, task_num, device):
+        super().__init__(task_num, device)
         
     def outputs(self, grads: list):
         grads_norm = []
@@ -133,4 +135,19 @@ class GradNorm(WeightStratergy):
                 grads_norm.append(grad.norm())
         norms = torch.stack(grads_norm)
         self.inv = 1.0 / (norms.detach() + 1e-8)
-        return self._weight_norm(self.inv * self.input_weights)
+        return self._weight_norm(self.inv)
+    
+class ParetoOpt(WeightStratergy):
+    """
+    Given a group of grads g1, g2, ..., gn, this method calculates w1, w2, ..., wn so that g_opt = Σwi*gi satisfies g_opt = argmin max ∠(g_opt, gi).
+    """
+    
+    def __init__(self, task_num, device):
+        super().__init__(task_num, device) 
+    
+    def outputs(self, grads: list):
+        grads_mean = []
+        for grad in grads:
+            grads_mean.append(torch.mean(grad, dim=0))
+        ws = find_optimal_weights(grads_mean)
+        return self._weight_norm(ws.to(self.device))

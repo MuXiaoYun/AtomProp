@@ -5,7 +5,7 @@ from atomprop.utils.mlp import MLP
 from atomprop.utils.mask import MolGraphMask
 from atomprop.utils.groups import TripletGroup, QuadrupletGroup
 from atomprop.utils.features import FunctionalGroupUtils
-from atomprop.utils.weights import EqualWeightStratergy, HardSwitch, SoftSwitch, GradNorm
+from atomprop.utils.weights import EqualWeightStratergy, HardSwitch, SoftSwitch, GradNorm, ParetoOpt
 from atomprop.embeddings.AtomEmbedding import BondTypes
 import matplotlib.pyplot as plt
 import pandas as pd
@@ -33,7 +33,7 @@ pretrain_file_type = 'txt'
 xyz_path = "data/pubchem/pubchem-xyzs.txt"
 xyz_type = 'txt'
 
-logdir = "pretrain_pubchem_gn_gin5"
+logdir = "pretrain_pubchem_gn_GIN7"
 os.makedirs(f"trained_models/{logdir}", exist_ok=True)
 
 fg_list = None # if none, use default rdkit fgs
@@ -45,13 +45,13 @@ less_rate = 0.1
 more_rate = 0.3
 embed_dim = 384
 
-device = torch.device("cuda:7") if torch.cuda.is_available() else torch.device("cpu")
+device = torch.device("cuda:6") if torch.cuda.is_available() else torch.device("cpu")
 
 if fg_list is None:
     fg_list = FunctionalGroups.BuildFuncGroupHierarchy()
 
 backbone = Embedder(num_atom_types=120, embed_dim=embed_dim)
-neck = GNN(num_layers=5, embed_dim=embed_dim, gnn_type='gin', JK='last', dropout=0.5)
+neck = GNN(num_layers=7, embed_dim=embed_dim, gnn_type='gin', JK='last', dropout=0.5)
 head0 = MLP(input_dim=embed_dim, hidden_dim=128, output_dim=157, num_layers=2, dropout=0.5) # used for atom attribute prediction
 head1 = MLP(input_dim=embed_dim, hidden_dim=128, output_dim=embed_dim, num_layers=2, dropout=0.5) # used for masked node prediction
 head2 = MLP(input_dim=embed_dim*3, hidden_dim=64, output_dim=1, num_layers=2, dropout=0.5) # used for bond angle prediction
@@ -68,6 +68,7 @@ task5 = DihedralAnglePrediction()
 task6 = FunctionalGroupsPrediction()
 
 weight_stratergy0 = GradNorm(task_num=7, device=device)
+# weight_stratergy1 = ParetoOpt(task_num=7, device=device)
 weight_stratergy1 = EqualWeightStratergy(task_num=7, device=device)
 
 optimizer_configs = {
@@ -332,16 +333,16 @@ if __name__ == "__main__":
                     grads.append(g)
 
                     weights = weight_stratergy0.outputs(grads)
-                    weights_extra = weight_stratergy1.outputs(epoch * train_loader.total_batches + batch_idx)
+                    weights_extra = weight_stratergy1.outputs()
 
                     # final weighted loss
                     loss = (  weights[0] * weights_extra[0] * loss_atom_attr_pred
-                            + weights[1] * weights_extra[0] * loss_masked_atom_type_pred
-                            + weights[2] * weights_extra[3] * loss_triplet_contrast
+                            + weights[1] * weights_extra[1] * loss_masked_atom_type_pred
+                            + weights[2] * weights_extra[2] * loss_triplet_contrast
                             + weights[3] * weights_extra[3] * loss_batch_contrast
-                            + weights[4] * weights_extra[1] * loss_bond_angle_pred
-                            + weights[5] * weights_extra[1] * loss_dihedral_angle_pred
-                            + weights[6] * weights_extra[2] * loss_functional_group_pred)
+                            + weights[4] * weights_extra[4] * loss_bond_angle_pred
+                            + weights[5] * weights_extra[5] * loss_dihedral_angle_pred
+                            + weights[6] * weights_extra[6] * loss_functional_group_pred)
 
                     # backward and step
                     loss.backward()
@@ -359,16 +360,12 @@ if __name__ == "__main__":
                         writer.add_scalar('Train/Loss_functional_group', loss_functional_group_pred.item(), epoch * train_loader.total_batches + batch_idx)
                         # log weights
                         try:
-                            writer.add_scalar('TrainWeight/Weight_atom_attr', weights[0].item(), epoch * train_loader.total_batches + batch_idx)
-                            writer.add_scalar('TrainWeight/Weight_masked_atom', weights[1].item(), epoch * train_loader.total_batches + batch_idx)
-                            writer.add_scalar('TrainWeight/Weight_triplet', weights[2].item(), epoch * train_loader.total_batches + batch_idx)
-                            writer.add_scalar('TrainWeight/Weight_batch_contrast', weights[3].item(), epoch * train_loader.total_batches + batch_idx)
-                            writer.add_scalar('TrainWeight/Weight_bond_angle', weights[4].item(), epoch * train_loader.total_batches + batch_idx)
-                            writer.add_scalar('TrainWeight/Weight_dihedral_angle', weights[5].item(), epoch * train_loader.total_batches + batch_idx)
-                            writer.add_scalar('TrainWeight/Weight_func_group', weights[5].item(), epoch * train_loader.total_batches + batch_idx)
+                            for i in range(7):
+                                writer.add_scalar(f'TrainWeight/Weights', weights[i].item(), epoch * train_loader.total_batches + batch_idx)
+                                writer.add_scalar(f'TrainWeight/Weights_extra', weights_extra[i].item(), epoch * train_loader.total_batches + batch_idx)
                         except Exception:
                             # logging should not interrupt training
-                            pass
+                            print("LOGGING ERROR: PLEASE CHECK")
                     
                     if batch_idx == train_loader.total_batches - 1:
                         metrics_0 = task0.get_metrics()
