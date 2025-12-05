@@ -22,6 +22,7 @@ record_freq = 100
 dataset_size = -1
 num_epochs = 8
 batch_size = 1024
+val_num = 4  # number of validations per epoch
 
 switch_timings = torch.tensor([0, 16000, 32000, 48000])
 transition_width = 4000
@@ -33,7 +34,7 @@ pretrain_file_type = 'txt'
 xyz_path = "data/pubchem/pubchem-xyzs.txt"
 xyz_type = 'txt'
 
-logdir = "pretrain_pubchem_gn_GIN7"
+logdir = "pretrain_pubchem_gn_GIN7_sum"
 os.makedirs(f"trained_models/{logdir}", exist_ok=True)
 
 fg_list = None # if none, use default rdkit fgs
@@ -45,7 +46,7 @@ less_rate = 0.1
 more_rate = 0.3
 embed_dim = 384
 
-device = torch.device("cuda:6") if torch.cuda.is_available() else torch.device("cpu")
+device = torch.device("cuda:5") if torch.cuda.is_available() else torch.device("cpu")
 
 if fg_list is None:
     fg_list = FunctionalGroups.BuildFuncGroupHierarchy()
@@ -146,6 +147,173 @@ def create_data_splits(total_size):
     val_indices = indices[train_size:train_size + val_size]
     test_indices = indices[train_size + val_size:]
     return train_indices, val_indices, test_indices
+
+def run_validation(loader, xyz_loader, writer, global_step, epoch, iteration):
+    """
+    Run validation on the given data loader and log results
+    
+    Args:
+        loader: Data loader for validation
+        xyz_loader: XYZ coordinates loader
+        writer: TensorBoard writer
+        global_step: Current global training step for logging
+        epoch: Current epoch number for display
+        iteration: Current iteration within epoch for display
+    
+    Returns:
+        avg_val_loss: Average validation loss
+    """
+    # Switch to evaluation mode
+    backbone.eval()
+    neck.eval()
+    head0.eval()
+    head1.eval()
+    head2.eval()
+    head3.eval()
+    head4.eval()
+    
+    total_val_loss = 0.0
+    total_val_loss_atom_attr = 0.0
+    total_val_loss_masked_atom = 0.0
+    total_val_loss_triplet = 0.0
+    total_val_loss_batch_contrast = 0.0
+    total_val_loss_bond_angle = 0.0
+    total_val_loss_dihedral_angle = 0.0
+    total_val_loss_functional_group = 0.0
+    val_sample_count = 0
+    
+    desc = f"Epoch {epoch+1}/{num_epochs} - Validation"
+    if iteration > 0:
+        desc += f" (Iteration {iteration})"
+    
+    val_pbar = tqdm(enumerate(loader),
+                        total=loader.total_batches, 
+                        desc=desc)
+    
+    with torch.no_grad():
+        for batch_idx, (data_list, mols) in val_pbar:
+            batch_data = Batch.from_data_list(data_list).to(device)
+            
+            atom_emb = backbone(batch_data.x).squeeze()
+            embedded_data = Data(x=atom_emb, edge_index=batch_data.edge_index, edge_attr=batch_data.edge_attr)
+            graph_emb = neck(embedded_data)
+            graph_emb = graph_emb.view(-1, graph_emb.size(-1))
+
+            outputs = head0(graph_emb)
+            outputs = outputs.view(-1, outputs.size(-1))
+            task0.set_pred(outputs)
+            task0.run_label(mols, device)
+            loss_atom_attr_pred = task0.compute_loss()
+            
+            mask_indices = MolGraphMask.select_mask_indices(batch_data.x)
+            masked_atom_emb = MolGraphMask.mask_atoms(atom_emb, mask_indices, torch.zeros(embed_dim))
+            masked_embedded_data = Data(x=masked_atom_emb, edge_index=batch_data.edge_index, edge_attr=batch_data.edge_attr)
+            graph_emb1 = neck(masked_embedded_data)
+            graph_emb1_masked = graph_emb1.view(-1, graph_emb1.size(-1))[mask_indices]
+            outputs1 = head1(graph_emb1_masked)
+            outputs1 = outputs1.view(-1, outputs1.size(-1))
+            task1.set_pred(outputs1)
+            task1_labels = graph_emb[mask_indices]
+            task1.set_label(task1_labels)
+            loss_masked_atom_type_pred = task1.compute_loss()
+
+            less_mask_indices = MolGraphMask.select_mask_indices(batch_data.x, mask_ratio=less_rate)
+            less_masked_atom_emb = MolGraphMask.mask_atoms(atom_emb, less_mask_indices, torch.zeros(embed_dim))
+            less_masked_embedded_data = Data(x=less_masked_atom_emb, edge_index=batch_data.edge_index, edge_attr=batch_data.edge_attr)
+            less_graph_emb = neck(less_masked_embedded_data)
+            less_graph_emb = less_graph_emb.view(-1, less_graph_emb.size(-1))
+            less_outputs = aggrmodel(less_graph_emb, batch_data.batch)
+
+            more_mask_indices = MolGraphMask.select_mask_indices(batch_data.x, mask_ratio=more_rate)
+            more_masked_atom_emb = MolGraphMask.mask_atoms(atom_emb, more_mask_indices, torch.zeros(embed_dim))
+            more_masked_embedded_data = Data(x=more_masked_atom_emb, edge_index=batch_data.edge_index, edge_attr=batch_data.edge_attr)
+            more_graph_emb = neck(more_masked_embedded_data)
+            more_graph_emb = more_graph_emb.view(-1, more_graph_emb.size(-1))
+            more_outputs = aggrmodel(more_graph_emb, batch_data.batch)
+
+            anchor_outputs = aggrmodel(graph_emb, batch_data.batch)
+            task2.set_embeddings(anchor_outputs, less_outputs, more_outputs)
+            loss_triplet_contrast = task2.compute_loss()
+
+            outputs1_for_contrast = aggrmodel(graph_emb1, batch_data.batch)
+            task3.set_embeddings(anchor_outputs, outputs1_for_contrast)
+            loss_batch_contrast = task3.compute_loss()
+
+            xyzs = xyz_loader.get_batch(len(data_list)).to(device)
+            triplet_indices = TripletGroup.batch_generate(batch_data.edge_index).to(device)
+            triplet_emb = atom_emb[triplet_indices.view(-1)].view(-1, 3 * embed_dim).to(device) # (num_triplets, 3*embed_dim)
+            triplet_outputs = head2(triplet_emb) # (num_triplets, 1)
+            task4.set_label(xyzs, triplet_indices)
+            task4.set_pred(triplet_outputs)
+            loss_bond_angle_pred = task4.compute_loss()
+
+            quadruplet_indices = QuadrupletGroup.batch_generate(batch_data.edge_index).to(device)
+            task5.set_label(xyzs, quadruplet_indices)
+            quadruplet_emb = atom_emb[quadruplet_indices.view(-1)].view(-1, 4 * embed_dim).to(device) # (num_quadruplets, 4*embed_dim)
+            quadruplet_outputs = head3(quadruplet_emb) # (num_quadruplets, 1)
+            task5.set_pred(quadruplet_outputs)
+            loss_dihedral_angle_pred = task5.compute_loss()
+
+            outputs1_fg = head4(anchor_outputs)
+            fg_labels = FunctionalGroupUtils.batch_detect_with_rdkit_fg(mols, fg_list).to(device)
+            task6.set_pred(outputs1_fg)
+            task6.set_label(fg_labels)
+            loss_functional_group_pred = task6.compute_loss()
+
+            loss = (loss_atom_attr_pred
+                    + loss_masked_atom_type_pred
+                    + loss_triplet_contrast
+                    + loss_batch_contrast
+                    + loss_bond_angle_pred
+                    + loss_dihedral_angle_pred
+                    + loss_functional_group_pred)
+
+            if batch_idx == loader.total_batches - 1:
+                metrics_0 = task0.get_metrics()
+                metrics_1 = task1.get_metrics()
+                metrics_2 = task2.get_metrics()
+                metrics_3 = task3.get_metrics()
+                metrics_4 = task4.get_metrics()
+                metrics_5 = task5.get_metrics()
+                metrics_6 = task6.get_metrics()
+                metrics = {
+                "metrics_0": metrics_0,
+                "metrics_1": metrics_1,
+                "metrics_2": metrics_2,
+                "metrics_3": metrics_3,
+                "metrics_4": metrics_4,
+                "metrics_5": metrics_5,
+                "metrics_6": metrics_6
+                }
+                print(f"Batch {batch_idx+1}/{loader.total_batches} Metrics: {metrics}")
+            
+            batch_size_current = len(mols)
+            total_val_loss += loss.item() * batch_size_current
+            total_val_loss_atom_attr += loss_atom_attr_pred.item() * batch_size_current
+            total_val_loss_masked_atom += loss_masked_atom_type_pred.item() * batch_size_current
+            total_val_loss_triplet += loss_triplet_contrast.item() * batch_size_current
+            total_val_loss_batch_contrast += loss_batch_contrast.item() * batch_size_current
+            total_val_loss_bond_angle += loss_bond_angle_pred.item() * batch_size_current
+            total_val_loss_dihedral_angle += loss_dihedral_angle_pred.item() * batch_size_current
+            total_val_loss_functional_group += loss_functional_group_pred.item() * batch_size_current
+            val_sample_count += batch_size_current
+            
+            val_pbar.set_postfix({"Batch Loss": f"{loss.item():.6f}"})
+    
+    avg_val_loss = total_val_loss / val_sample_count
+    
+    # Log validation results to the same location
+    if writer is not None:
+        writer.add_scalar('Validation/Loss', avg_val_loss, global_step)
+        writer.add_scalar('Validation/Loss_atom_attr', total_val_loss_atom_attr / val_sample_count, global_step)
+        writer.add_scalar('Validation/Loss_masked_atom', total_val_loss_masked_atom / val_sample_count, global_step)
+        writer.add_scalar('Validation/Loss_triplet', total_val_loss_triplet / val_sample_count, global_step)
+        writer.add_scalar('Validation/Loss_batch_contrast', total_val_loss_batch_contrast / val_sample_count, global_step)
+        writer.add_scalar('Validation/Loss_bond_angle', total_val_loss_bond_angle / val_sample_count, global_step)
+        writer.add_scalar('Validation/Loss_dihedral_angle', total_val_loss_dihedral_angle / val_sample_count, global_step)
+        writer.add_scalar('Validation/Loss_functional_group', total_val_loss_functional_group / val_sample_count, global_step)
+    
+    return avg_val_loss
 
 if __name__ == "__main__":
     with xyzBatchLoaderContext(xyz_path) as xyz_loader:
@@ -391,154 +559,48 @@ if __name__ == "__main__":
                     train_sample_count += batch_size_current
                     
                     train_pbar.set_postfix({"Batch Loss": f"{loss.item():.6f}"})
+                    
+                    if val_num > 0 and (batch_idx + 1) % (train_loader.total_batches // val_num) == 0:
+                        iteration_num = (batch_idx + 1) // (train_loader.total_batches // val_num)
+                        global_step = epoch * train_loader.total_batches + batch_idx
+                        
+                        avg_val_loss = run_validation(
+                            loader=val_loader,
+                            xyz_loader=xyz_loader,
+                            writer=writer,
+                            global_step=global_step,
+                            epoch=epoch,
+                            iteration=iteration_num
+                        )
+                        
+                        val_losses.append(avg_val_loss)
+                        print(f"Epoch {epoch+1}/{num_epochs} - Iteration {iteration_num} - Val Loss = {avg_val_loss:.6f}")
+                        
+                        # Switch back to training mode
+                        backbone.train()
+                        neck.train()
+                        head0.train()
+                        head1.train()
                 
                 avg_train_loss = total_train_loss / train_sample_count
                 train_losses.append(avg_train_loss)
 
-                backbone.eval()
-                neck.eval()
-                head0.eval()
-                head1.eval()
-                head2.eval()
-                head3.eval()
-                head4.eval()
-
-                total_val_loss = 0.0
-                total_val_loss_atom_attr = 0.0
-                total_val_loss_masked_atom = 0.0
-                total_val_loss_triplet = 0.0
-                total_val_loss_batch_contrast = 0.0
-                total_val_loss_bond_angle = 0.0
-                total_val_loss_dihedral_angle = 0.0
-                total_val_loss_functional_group = 0.0
-                val_sample_count = 0
+                # Final validation at epoch end
+                global_step = (epoch + 1) * train_loader.total_batches - 1
+                avg_val_loss = run_validation(
+                    loader=val_loader,
+                    xyz_loader=xyz_loader,
+                    writer=writer,
+                    global_step=global_step,
+                    epoch=epoch,
+                    iteration=0
+                )
                 
-                val_pbar = tqdm(enumerate(val_loader),
-                                    total=val_loader.total_batches, 
-                                    desc=f"Epoch {epoch+1}/{num_epochs} - Validation")
-                
-                with torch.no_grad():
-                    for batch_idx, (data_list, mols) in val_pbar:
-                        batch_data = Batch.from_data_list(data_list).to(device)
-                        
-                        atom_emb = backbone(batch_data.x).squeeze()
-                        embedded_data = Data(x=atom_emb, edge_index=batch_data.edge_index, edge_attr=batch_data.edge_attr)
-                        graph_emb = neck(embedded_data)
-                        graph_emb = graph_emb.view(-1, graph_emb.size(-1))
-
-                        outputs = head0(graph_emb)
-                        outputs = outputs.view(-1, outputs.size(-1))
-                        task0.set_pred(outputs)
-                        task0.run_label(mols, device)
-                        loss_atom_attr_pred = task0.compute_loss()
-                        
-                        mask_indices = MolGraphMask.select_mask_indices(batch_data.x)
-                        masked_atom_emb = MolGraphMask.mask_atoms(atom_emb, mask_indices, torch.zeros(embed_dim))
-                        masked_embedded_data = Data(x=masked_atom_emb, edge_index=batch_data.edge_index, edge_attr=batch_data.edge_attr)
-                        graph_emb1 = neck(masked_embedded_data)
-                        graph_emb1_masked = graph_emb1.view(-1, graph_emb1.size(-1))[mask_indices]
-                        outputs1 = head1(graph_emb1_masked)
-                        outputs1 = outputs1.view(-1, outputs1.size(-1))
-                        task1.set_pred(outputs1)
-                        task1_labels = graph_emb[mask_indices]
-                        task1.set_label(task1_labels)
-                        loss_masked_atom_type_pred = task1.compute_loss()
-
-                        less_mask_indices = MolGraphMask.select_mask_indices(batch_data.x, mask_ratio=less_rate)
-                        less_masked_atom_emb = MolGraphMask.mask_atoms(atom_emb, less_mask_indices, torch.zeros(embed_dim))
-                        less_masked_embedded_data = Data(x=less_masked_atom_emb, edge_index=batch_data.edge_index, edge_attr=batch_data.edge_attr)
-                        less_graph_emb = neck(less_masked_embedded_data)
-                        less_graph_emb = less_graph_emb.view(-1, less_graph_emb.size(-1))
-                        less_outputs = aggrmodel(less_graph_emb, batch_data.batch)
-
-                        more_mask_indices = MolGraphMask.select_mask_indices(batch_data.x, mask_ratio=more_rate)
-                        more_masked_atom_emb = MolGraphMask.mask_atoms(atom_emb, more_mask_indices, torch.zeros(embed_dim))
-                        more_masked_embedded_data = Data(x=more_masked_atom_emb, edge_index=batch_data.edge_index, edge_attr=batch_data.edge_attr)
-                        more_graph_emb = neck(more_masked_embedded_data)
-                        more_graph_emb = more_graph_emb.view(-1, more_graph_emb.size(-1))
-                        more_outputs = aggrmodel(more_graph_emb, batch_data.batch)
-
-                        anchor_outputs = aggrmodel(graph_emb, batch_data.batch)
-                        task2.set_embeddings(anchor_outputs, less_outputs, more_outputs)
-                        loss_triplet_contrast = task2.compute_loss()
-
-                        outputs1_for_contrast = aggrmodel(graph_emb1, batch_data.batch)
-                        task3.set_embeddings(anchor_outputs, outputs1_for_contrast)
-                        loss_batch_contrast = task3.compute_loss()
-
-                        xyzs = xyz_loader.get_batch(len(data_list)).to(device)
-                        triplet_indices = TripletGroup.batch_generate(batch_data.edge_index).to(device)
-                        triplet_emb = atom_emb[triplet_indices.view(-1)].view(-1, 3 * embed_dim).to(device) # (num_triplets, 3*embed_dim)
-                        triplet_outputs = head2(triplet_emb) # (num_triplets, 1)
-                        task4.set_label(xyzs, triplet_indices)
-                        task4.set_pred(triplet_outputs)
-                        loss_bond_angle_pred = task4.compute_loss()
-
-                        quadruplet_indices = QuadrupletGroup.batch_generate(batch_data.edge_index).to(device)
-                        task5.set_label(xyzs, quadruplet_indices)
-                        quadruplet_emb = atom_emb[quadruplet_indices.view(-1)].view(-1, 4 * embed_dim).to(device) # (num_quadruplets, 4*embed_dim)
-                        quadruplet_outputs = head3(quadruplet_emb) # (num_quadruplets, 1)
-                        task5.set_pred(quadruplet_outputs)
-                        loss_dihedral_angle_pred = task5.compute_loss()
-
-                        outputs1_fg = head4(anchor_outputs)
-                        fg_labels = FunctionalGroupUtils.batch_detect_with_rdkit_fg(mols, fg_list).to(device)
-                        task6.set_pred(outputs1_fg)
-                        task6.set_label(fg_labels)
-                        loss_functional_group_pred = task6.compute_loss()
-
-                        loss = (loss_atom_attr_pred
-                                + loss_masked_atom_type_pred
-                                + loss_triplet_contrast
-                                + loss_batch_contrast
-                                + loss_bond_angle_pred
-                                + loss_dihedral_angle_pred
-                                + loss_functional_group_pred)
-                   
-                        if batch_idx == val_loader.total_batches - 1:
-                            metrics_0 = task0.get_metrics()
-                            metrics_1 = task1.get_metrics()
-                            metrics_2 = task2.get_metrics()
-                            metrics_3 = task3.get_metrics()
-                            metrics_4 = task4.get_metrics()
-                            metrics_5 = task5.get_metrics()
-                            metrics_6 = task6.get_metrics()
-                            metrics = {
-                            "metrics_0": metrics_0,
-                            "metrics_1": metrics_1,
-                            "metrics_2": metrics_2,
-                            "metrics_3": metrics_3,
-                            "metrics_4": metrics_4,
-                            "metrics_5": metrics_5,
-                            "metrics_6": metrics_6
-                            }
-                            print(f"Batch {batch_idx+1}/{val_loader.total_batches} Metrics: {metrics}")
-                        
-                        batch_size_current = len(mols)
-                        total_val_loss += loss.item() * batch_size_current
-                        total_val_loss_atom_attr += loss_atom_attr_pred.item() * batch_size_current
-                        total_val_loss_masked_atom += loss_masked_atom_type_pred.item() * batch_size_current
-                        total_val_loss_triplet += loss_triplet_contrast.item() * batch_size_current
-                        total_val_loss_batch_contrast += loss_batch_contrast.item() * batch_size_current
-                        total_val_loss_bond_angle += loss_bond_angle_pred.item() * batch_size_current
-                        total_val_loss_dihedral_angle += loss_dihedral_angle_pred.item() * batch_size_current
-                        total_val_loss_functional_group += loss_functional_group_pred.item() * batch_size_current
-                        val_sample_count += batch_size_current
-                        
-                        val_pbar.set_postfix({"Batch Loss": f"{loss.item():.6f}"})
-                
-                avg_val_loss = total_val_loss / val_sample_count
                 val_losses.append(avg_val_loss)
                 
-                writer.add_scalar('Epoch/Train_loss', avg_train_loss, epoch)
-                writer.add_scalar('Epoch/Val_loss', avg_val_loss, epoch)
-                writer.add_scalar('Epoch/Val_loss_atom_attr', total_val_loss_atom_attr / val_sample_count, epoch)
-                writer.add_scalar('Epoch/Val_loss_masked_atom', total_val_loss_masked_atom / val_sample_count, epoch)
-                writer.add_scalar('Epoch/Val_loss_triplet', total_val_loss_triplet / val_sample_count, epoch)
-                writer.add_scalar('Epoch/Val_loss_batch_contrast', total_val_loss_batch_contrast / val_sample_count, epoch)
-                writer.add_scalar('Epoch/Val_loss_bond_angle', total_val_loss_bond_angle / val_sample_count, epoch)
-                writer.add_scalar('Epoch/Val_loss_dihedral_angle', total_val_loss_dihedral_angle / val_sample_count, epoch)
-                writer.add_scalar('Epoch/Val_loss_functional_group', total_val_loss_functional_group / val_sample_count, epoch)
+                # Log final training loss for this epoch
+                writer.add_scalar('Train/Epoch_loss', avg_train_loss, epoch)
+                writer.add_scalar('Validation/Epoch_loss', avg_val_loss, epoch)
                 
                 for name, scheduler in schedulers.items():
                     if isinstance(scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):

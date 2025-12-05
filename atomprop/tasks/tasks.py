@@ -95,12 +95,14 @@ class GraphMaskContrast:
     By making contrast between unmasked, less-masked, and more-masked graph representations.
     """
 
-    def __init__(self, less_rate, more_rate):
+    def __init__(self, less_rate, more_rate, margin=1, p=2):
         self.anchor = None
         self.positive = None
         self.negative = None
         self.less_rate = less_rate
         self.more_rate = more_rate
+        self.margin = margin
+        self.p = p
 
     def set_embeddings(self, anchor, positive, negative):
         """
@@ -114,7 +116,7 @@ class GraphMaskContrast:
         """
         Compute the contrastive loss.
         """
-        return nn.TripletMarginLoss(margin=1, p=2)(self.anchor, self.positive, self.negative)
+        return nn.TripletMarginLoss(margin=self.margin, p=self.p)(self.anchor, self.positive, self.negative)
 
     def get_metrics(self):
         """
@@ -176,6 +178,44 @@ class BatchContrast:
         relative_accuracy = 1 - (total_positive_distance / (total_negative_distance + 1e-16))
         return {
             'relative_accuracy': relative_accuracy.item()
+        }
+        
+class ScaffoldContrast:
+    """
+    Scaffold-level contrastive learning task.
+    By making contrast on graphs in the same batch.
+    Pull embeddings of molecules with same scaffold together and push away those diffrent.
+    """
+    
+    def __init__(self, margin=1, p=2):
+        self.anchor = None
+        self.positive = None
+        self.negative = None
+        self.margin = margin
+        self.p = p
+
+    def set_embeddings(self, anchor, positive, negative):
+        """
+        Set embeddings for anchor, positive, and negative samples.
+        """
+        self.anchor = anchor
+        self.positive = positive
+        self.negative = negative
+
+    def compute_loss(self):
+        """
+        Compute the contrastive loss.
+        """
+        return nn.TripletMarginLoss(margin=self.margin, p=self.p)(self.anchor, self.positive, self.negative)
+
+    def get_metrics(self):
+        """
+        Compute metrics for the task.
+        In this case, we compute relative accuracy.
+        ra(anchor, positive, negative) = 1 - (||anchor - positive||) / ||anchor - negative||
+        """
+        return {
+            'relative_accuracy': 1 - torch.mean(torch.norm(self.anchor - self.positive) / (torch.norm(self.anchor - self.negative) + 1e-16)).item()
         }
 
 class BondAnglePrediction:
