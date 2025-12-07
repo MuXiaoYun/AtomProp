@@ -1,11 +1,12 @@
-from atomprop.tasks.tasks import NodeAttrPrediction, MaskedNodePrediction, GraphMaskContrast, BatchContrast, BondAnglePrediction, DihedralAnglePrediction, FunctionalGroupsPrediction
+from atomprop.tasks.tasks import NodeAttrPrediction, MaskedNodePrediction, GraphMaskContrast, BatchContrast, BondAnglePrediction, DihedralAnglePrediction, FunctionalGroupsPrediction, ScaffoldContrast
 from atomprop.dataloader.dataloader import SMILESToInputs, PyGChunkDataListLoader, xyzBatchLoader, xyzBatchLoaderContext
 from atomprop.models.GNNs import Embedder, GNN, GNNAggr
 from atomprop.utils.mlp import MLP
 from atomprop.utils.mask import MolGraphMask
 from atomprop.utils.groups import TripletGroup, QuadrupletGroup
 from atomprop.utils.features import FunctionalGroupUtils
-from atomprop.utils.weights import EqualWeightStratergy, HardSwitch, SoftSwitch, GradNorm, ParetoOpt
+from atomprop.utils.weights import WeightStratergy, EqualWeightStratergy, HardSwitch, SoftSwitch, GradNorm, ParetoOpt
+from atomprop.utils.scaffold import ScaffoldSimilarityMatrix
 from atomprop.embeddings.AtomEmbedding import BondTypes
 import matplotlib.pyplot as plt
 import pandas as pd
@@ -66,6 +67,7 @@ task3 = BatchContrast()
 task4 = BondAnglePrediction()
 task5 = DihedralAnglePrediction()
 task6 = FunctionalGroupsPrediction()
+task7 = ScaffoldContrast()
 
 weight_stratergy0 = GradNorm(task_num=7, device=device)
 # weight_stratergy1 = ParetoOpt(task_num=7, device=device)
@@ -150,6 +152,7 @@ def create_data_splits(total_size):
 if __name__ == "__main__":
     with xyzBatchLoaderContext(xyz_path) as xyz_loader:
         writer = SummaryWriter(log_dir=f"runs/{logdir}")
+        scaffold_calculator = ScaffoldSimilarityMatrix()
         total_rows, columns = get_dataset_info(data_path)
         print(f"Total rows in dataset: {total_rows}")
 
@@ -312,6 +315,11 @@ if __name__ == "__main__":
                     task6.set_pred(outputs1_fg)
                     task6.set_label(fg_labels)
                     loss_functional_group_pred = task6.compute_loss()
+                    
+                    scaffold_mat = scaffold_calculator.compute_similarity_matrix(mol_list=mols).fill_diagonal_(-1)
+                    task7.set_embeddings(anchor_outputs)
+                    task7.set_label(scaffold_mat)
+                    loss_scaffold_contrast = task7.compute_loss()
 
                     # --- compute per-task gradient norms (proxy: gradients w.r.t atom embeddings) ---
                     # Use atom_emb (output of backbone) as a shared representation to measure influence of each task.
@@ -334,15 +342,16 @@ if __name__ == "__main__":
 
                     weights = weight_stratergy0.outputs(grads)
                     weights_extra = weight_stratergy1.outputs()
+                    norm_weights = WeightStratergy.weight_norm(weights*weights_extra)
 
                     # final weighted loss
-                    loss = (  weights[0] * weights_extra[0] * loss_atom_attr_pred
-                            + weights[1] * weights_extra[1] * loss_masked_atom_type_pred
-                            + weights[2] * weights_extra[2] * loss_triplet_contrast
-                            + weights[3] * weights_extra[3] * loss_batch_contrast
-                            + weights[4] * weights_extra[4] * loss_bond_angle_pred
-                            + weights[5] * weights_extra[5] * loss_dihedral_angle_pred
-                            + weights[6] * weights_extra[6] * loss_functional_group_pred)
+                    loss = (  norm_weights[0] * loss_atom_attr_pred
+                            + norm_weights[1] * loss_masked_atom_type_pred
+                            + norm_weights[2] * loss_triplet_contrast
+                            + norm_weights[3] * loss_batch_contrast
+                            + norm_weights[4] * loss_bond_angle_pred
+                            + norm_weights[5] * loss_dihedral_angle_pred
+                            + norm_weights[6] * loss_functional_group_pred)
 
                     # backward and step
                     loss.backward()

@@ -63,6 +63,58 @@ class MaskedFocalLoss(nn.Module):
             return focal_loss.sum()
         else:
             return focal_loss
+        
+class MaskedCrossEntropyLoss(nn.Module):
+    def __init__(self, ignore_index=-1, reduction='mean'):
+        """
+        Masked CrossEntropy Loss for multi-class classification with missing labels.
+        
+        Args:
+            ignore_index: Value that indicates missing/invalid labels (default: -1)
+            reduction: Reduction method: 'mean', 'sum', or 'none'
+        """
+        super(MaskedCrossEntropyLoss, self).__init__()
+        self.ignore_index = ignore_index
+        self.reduction = reduction
+        
+    def forward(self, pred, label):
+        """
+        Compute masked cross-entropy loss.
+        
+        Args:
+            pred: Logits tensor of shape (N, C) or (N, C, *), where C is number of classes
+            label: Label tensor of shape (N, *) with values in {0, 1, ..., C-1, ignore_index}
+        
+        Returns:
+            Loss value
+        """
+        # Create mask for valid labels (non-ignore_index)
+        mask = (label != self.ignore_index)
+        
+        # If no valid labels, return zero loss
+        if mask.sum() == 0:
+            return torch.tensor(0.0, device=pred.device, requires_grad=True)
+        
+        # Flatten the tensors if needed (for handling multi-dimensional cases)
+        if pred.dim() > 2:
+            # For semantic segmentation or similar tasks
+            N, C = pred.shape[0], pred.shape[1]
+            pred = pred.permute(0, 2, 3, *range(4, pred.dim()), 1).contiguous()
+            pred = pred.view(-1, C)  # (N*H*W*..., C)
+            label = label.view(-1)   # (N*H*W*...)
+            mask = mask.view(-1)     # (N*H*W*...)
+        
+        # Get valid elements
+        valid_labels = label[mask].long()  # Convert to long for indexing
+        valid_preds = pred[mask] if pred.dim() > 1 else pred[mask].unsqueeze(-1)
+        
+        # Apply cross entropy loss
+        loss = F.cross_entropy(
+            valid_preds, 
+            valid_labels, 
+            reduction=self.reduction
+        )
+        return loss
 
 class GCNconv(MessagePassing):
     """
@@ -351,7 +403,7 @@ class GNNAggr(nn.Module):
     """
     A module for graph-level representation by aggregating node features.
     """
-    def __init__(self, embed_dim, aggr='mean'):
+    def __init__(self, embed_dim, aggr='mean', layers=None):
         super(GNNAggr, self).__init__()
         self.aggr = aggr
         self.aggr_fn = None
@@ -364,6 +416,10 @@ class GNNAggr(nn.Module):
         elif aggr == 'min':
             self.aggr_fn = torch_geometric.nn.global_min_pool
         elif aggr == 'attention':
+            assert layers is not None
+            self.layers = layers
+            if layers > 1:
+                self.attns = nn.ModuleList([torch_geometric.nn.GlobalAttention(gate_nn=nn.Linear(embed_dim, embed_dim)) for i in range(layers-1)])
             self.aggr_fn = torch_geometric.nn.GlobalAttention(gate_nn=nn.Linear(embed_dim, 1))
         else:
             raise ValueError("Invalid aggregation type. Choose from 'mean', 'sum', 'max', 'min', 'attention'.")
@@ -371,5 +427,8 @@ class GNNAggr(nn.Module):
     def forward(self, x, batch):
         # x has shape [B_N, embed_dim]
         # batch has shape [B_N] with batch indices
+        if self.aggr == 'attention' and self.layers > 1:
+            for attn in self.attns:
+                x = attn(x, batch)
         return self.aggr_fn(x, batch)  # Shape [B, embed_dim]
     

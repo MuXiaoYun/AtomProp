@@ -22,9 +22,9 @@ import os
 no_pretrain = True
 
 data_path = "./data/moleculenet/tox21/tox21.csv"
-pretrained_path = 'trained_models/pretrain_pubchem_gn_GIN7/model_epoch0.pth'
+pretrained_path = 'trained_models/pretrain_pubchem_gn_GIN7/model_epoch1.pth'
 
-logdir = "finetune_gn_gin5"
+logdir = "finetune_gin7"
 os.makedirs(f"trained_models/{logdir}", exist_ok=True)
 
 batch_size = 64

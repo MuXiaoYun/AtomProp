@@ -3,6 +3,7 @@ Module for pretraining tasks for GNNs.
 """
 
 from atomprop.utils.features import AtomFeaturize, AtomFeaturizeLoss 
+from atomprop.models.GNNs import MaskedBCELoss, MaskedFocalLoss
 import torch
 import torch.nn as nn
 
@@ -133,7 +134,7 @@ class GraphMaskContrast:
 class BatchContrast:
     """
     Graph-level masked contrastive learning task.
-    By making contrast on graphs in the same batch.
+    By making contrast on graphs in the same batch, calculate InfoNCE loss.
     """
 
     def __init__(self, temperature=0.1):
@@ -183,40 +184,40 @@ class BatchContrast:
 class ScaffoldContrast:
     """
     Scaffold-level contrastive learning task.
-    By making contrast on graphs in the same batch.
-    Pull embeddings of molecules with same scaffold together and push away those diffrent.
+    By making contrast on graphs in the same batch, calculate InfoNCE loss.
     """
     
-    def __init__(self, margin=1, p=2):
-        self.anchor = None
-        self.positive = None
-        self.negative = None
-        self.margin = margin
-        self.p = p
+    def __init__(self, temperature=0.1):
+        self.temperature = temperature
+        self.embeddings = None
+        self.labels = None
 
-    def set_embeddings(self, anchor, positive, negative):
+    def set_embeddings(self, embeddings):
         """
         Set embeddings for anchor, positive, and negative samples.
         """
-        self.anchor = anchor
-        self.positive = positive
-        self.negative = negative
+        self.embeddings = embeddings
+        
+    def set_label(self, labels):
+        """
+        Set scaffold similarity matrix as label.
+        """
+        self.labels = labels
 
     def compute_loss(self):
         """
         Compute the contrastive loss.
         """
-        return nn.TripletMarginLoss(margin=self.margin, p=self.p)(self.anchor, self.positive, self.negative)
+        batch_size = self.embeddings.size(0)
+        emb_norm = self.embeddings / self.embeddings.norm(dim=1, keepdim=True)
+        similarity_matrix = torch.matmul(emb_norm, emb_norm.t()) / self.temperature  # (batch_size, batch_size)
+        labels = torch.arange(batch_size).to(self.anchor.device)
+        loss = nn.CrossEntropyLoss()(similarity_matrix, labels)
+        return loss
 
     def get_metrics(self):
-        """
-        Compute metrics for the task.
-        In this case, we compute relative accuracy.
-        ra(anchor, positive, negative) = 1 - (||anchor - positive||) / ||anchor - negative||
-        """
-        return {
-            'relative_accuracy': 1 - torch.mean(torch.norm(self.anchor - self.positive) / (torch.norm(self.anchor - self.negative) + 1e-16)).item()
-        }
+        pass
+
 
 class BondAnglePrediction:
     """

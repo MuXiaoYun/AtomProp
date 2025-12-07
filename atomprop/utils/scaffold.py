@@ -21,7 +21,8 @@ class ScaffoldSimilarityMatrix:
     """
     
     def __init__(self, include_chirality: bool = False, verbose: bool = False):
-        """Initialize the ScaffoldSimilarityMatrix.
+        """
+        Initialize the ScaffoldSimilarityMatrix.
         
         Args:
             include_chirality: If True, consider chirality when comparing scaffolds.
@@ -31,7 +32,8 @@ class ScaffoldSimilarityMatrix:
         self.verbose = verbose
     
     def get_scaffold_smiles(self, mol: Chem.rdchem.Mol) -> str:
-        """Extract Murcko scaffold SMILES from a molecule object.
+        """
+        Extract Murcko scaffold SMILES from a molecule object.
         
         Args:
             mol: RDKit molecule object.
@@ -46,7 +48,8 @@ class ScaffoldSimilarityMatrix:
             return None
     
     def compute_similarity_matrix(self, mol_list: List[Chem.rdchem.Mol]) -> torch.Tensor:
-        """Compute scaffold similarity matrix for a list of molecules.
+        """
+        Compute scaffold similarity matrix for a list of molecules.
         
         This method creates an N x N binary matrix where N is the number of molecules.
         Element (i, j) = 1 if molecule i and molecule j share the same Murcko scaffold.
@@ -132,7 +135,8 @@ class ScaffoldSimilarityMatrix:
         return similarity_matrix
     
     def get_scaffold_groups(self, mol_list: List[Chem.rdchem.Mol]) -> List[List[int]]:
-        """Group molecules by their scaffolds.
+        """
+        Group molecules by their scaffolds.
         
         Args:
             mol_list: List of RDKit molecule objects.

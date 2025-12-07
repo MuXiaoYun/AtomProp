@@ -9,7 +9,7 @@ class WeightStratergy:
     Base class for weight stratergy.
     """
     @staticmethod
-    def _weight_norm(weights, eps=1e-3):
+    def weight_norm(weights, eps=1e-3):
         """
         Normalize the weights to sum to 1.
         """
@@ -44,7 +44,7 @@ class EqualWeightStratergy(WeightStratergy):
     def outputs(self, divide=False):
         if not divide:
             return torch.ones(self.task_num)
-        return self._weight_norm(torch.ones(self.task_num))
+        return torch.ones(self.task_num)
     
 class HardSwitch(WeightStratergy):
     """
@@ -63,7 +63,7 @@ class HardSwitch(WeightStratergy):
                 current_task = i
                 break
         if current_task == -1:
-            self._weight_norm(torch.ones(self.task_num))
+            return torch.ones(self.task_num)
         else:
             weights = torch.zeros(self.task_num, device=self.device)
             weights[current_task] = torch.tensor(1.0, dtype=torch.float32)
@@ -135,7 +135,7 @@ class GradNorm(WeightStratergy):
                 grads_norm.append(grad.norm())
         norms = torch.stack(grads_norm)
         self.inv = 1.0 / (norms.detach() + 1e-8)
-        return self._weight_norm(self.inv)
+        return self.inv
     
 class ParetoOpt(WeightStratergy):
     """
@@ -150,4 +150,4 @@ class ParetoOpt(WeightStratergy):
         for grad in grads:
             grads_mean.append(torch.mean(grad, dim=0))
         ws = find_optimal_weights(grads_mean)
-        return self._weight_norm(ws.to(self.device))
+        return ws.to(self.device)
