@@ -20,9 +20,9 @@ from rdkit.Chem import FunctionalGroups
 import os
 
 record_freq = 100
-dataset_size = -1
+dataset_size = 10000
 num_epochs = 8
-batch_size = 1024
+batch_size = 512
 
 switch_timings = torch.tensor([0, 16000, 32000, 48000])
 transition_width = 4000
@@ -34,7 +34,7 @@ pretrain_file_type = 'txt'
 xyz_path = "data/pubchem/pubchem-xyzs.txt"
 xyz_type = 'txt'
 
-logdir = "pretrain_pubchem_gn_GIN7"
+logdir = "pretrain_pubchem_scaffold"
 os.makedirs(f"trained_models/{logdir}", exist_ok=True)
 
 fg_list = None # if none, use default rdkit fgs
@@ -46,7 +46,7 @@ less_rate = 0.1
 more_rate = 0.3
 embed_dim = 384
 
-device = torch.device("cuda:6") if torch.cuda.is_available() else torch.device("cpu")
+device = torch.device("cuda:5") if torch.cuda.is_available() else torch.device("cpu")
 
 if fg_list is None:
     fg_list = FunctionalGroups.BuildFuncGroupHierarchy()
@@ -69,9 +69,11 @@ task5 = DihedralAnglePrediction()
 task6 = FunctionalGroupsPrediction()
 task7 = ScaffoldContrast()
 
-weight_stratergy0 = GradNorm(task_num=7, device=device)
-# weight_stratergy1 = ParetoOpt(task_num=7, device=device)
-weight_stratergy1 = EqualWeightStratergy(task_num=7, device=device)
+tasks = [task0, task1, task2, task3, task4, task5, task6, task7]
+
+weight_stratergy0 = GradNorm(task_num=8, device=device)
+# weight_stratergy1 = ParetoOpt(task_num=8, device=device)
+weight_stratergy1 = EqualWeightStratergy(task_num=8, device=device)
 
 optimizer_configs = {
     "backbone": {
@@ -316,42 +318,26 @@ if __name__ == "__main__":
                     task6.set_label(fg_labels)
                     loss_functional_group_pred = task6.compute_loss()
                     
-                    scaffold_mat = scaffold_calculator.compute_similarity_matrix(mol_list=mols).fill_diagonal_(-1)
+                    scaffold_groups = scaffold_calculator.get_scaffold_groups(mol_list=mols)
                     task7.set_embeddings(anchor_outputs)
-                    task7.set_label(scaffold_mat)
+                    task7.set_group_label(scaffold_groups)
                     loss_scaffold_contrast = task7.compute_loss()
 
+                    losses = [loss_atom_attr_pred, loss_masked_atom_type_pred, loss_triplet_contrast, loss_batch_contrast, loss_bond_angle_pred, loss_dihedral_angle_pred, loss_functional_group_pred, loss_scaffold_contrast]
                     # --- compute per-task gradient norms (proxy: gradients w.r.t atom embeddings) ---
                     # Use atom_emb (output of backbone) as a shared representation to measure influence of each task.
                     # Allow unused in case a particular loss does not depend on atom_emb for some rare batch.
                     grads = []
-                    g = torch.autograd.grad(loss_atom_attr_pred, atom_emb, retain_graph=True, create_graph=False, allow_unused=True)[0]
-                    grads.append(g)
-                    g = torch.autograd.grad(loss_masked_atom_type_pred, atom_emb, retain_graph=True, create_graph=False, allow_unused=True)[0]
-                    grads.append(g)
-                    g = torch.autograd.grad(loss_triplet_contrast, atom_emb, retain_graph=True, create_graph=False, allow_unused=True)[0]
-                    grads.append(g)
-                    g = torch.autograd.grad(loss_batch_contrast, atom_emb, retain_graph=True, create_graph=False, allow_unused=True)[0]
-                    grads.append(g)
-                    g = torch.autograd.grad(loss_bond_angle_pred, atom_emb, retain_graph=True, create_graph=False, allow_unused=True)[0]
-                    grads.append(g)
-                    g = torch.autograd.grad(loss_dihedral_angle_pred, atom_emb, retain_graph=True, create_graph=False, allow_unused=True)[0]
-                    grads.append(g)
-                    g = torch.autograd.grad(loss_functional_group_pred, atom_emb, retain_graph=True, create_graph=False, allow_unused=True)[0]
-                    grads.append(g)
+                    for single_loss in losses:
+                        g = torch.autograd.grad(single_loss, atom_emb, retain_graph=True, create_graph=False, allow_unused=True)[0]
+                        grads.append(g)
 
                     weights = weight_stratergy0.outputs(grads)
                     weights_extra = weight_stratergy1.outputs()
                     norm_weights = WeightStratergy.weight_norm(weights*weights_extra)
 
                     # final weighted loss
-                    loss = (  norm_weights[0] * loss_atom_attr_pred
-                            + norm_weights[1] * loss_masked_atom_type_pred
-                            + norm_weights[2] * loss_triplet_contrast
-                            + norm_weights[3] * loss_batch_contrast
-                            + norm_weights[4] * loss_bond_angle_pred
-                            + norm_weights[5] * loss_dihedral_angle_pred
-                            + norm_weights[6] * loss_functional_group_pred)
+                    loss = sum(norm_weights[i] * losses[i] for i in range(len(losses)))
 
                     # backward and step
                     loss.backward()
@@ -367,6 +353,7 @@ if __name__ == "__main__":
                         writer.add_scalar('Train/Loss_bond_angle', loss_bond_angle_pred.item(), epoch * train_loader.total_batches + batch_idx)
                         writer.add_scalar('Train/Loss_dihedral_angle', loss_dihedral_angle_pred.item(), epoch * train_loader.total_batches + batch_idx)
                         writer.add_scalar('Train/Loss_functional_group', loss_functional_group_pred.item(), epoch * train_loader.total_batches + batch_idx)
+                        writer.add_scalar('Train/Loss_scaffold_contrast', loss_scaffold_contrast.item(), epoch * train_loader.total_batches + batch_idx)
                         # log weights
                         try:
                             for i in range(7):
@@ -377,22 +364,7 @@ if __name__ == "__main__":
                             print("LOGGING ERROR: PLEASE CHECK")
                     
                     if batch_idx == train_loader.total_batches - 1:
-                        metrics_0 = task0.get_metrics()
-                        metrics_1 = task1.get_metrics()
-                        metrics_2 = task2.get_metrics()
-                        metrics_3 = task3.get_metrics()
-                        metrics_4 = task4.get_metrics()
-                        metrics_5 = task5.get_metrics()
-                        metrics_6 = task6.get_metrics()
-                        metrics = {
-                        "metrics_0": metrics_0,
-                        "metrics_1": metrics_1,
-                        "metrics_2": metrics_2,
-                        "metrics_3": metrics_3,
-                        "metrics_4": metrics_4,
-                        "metrics_5": metrics_5,
-                        "metrics_6": metrics_6
-                        }
+                        metrics = {f"metrics_{i}": tasks[i].get_metrics() for i in range(8)}
                         print(f"Batch {batch_idx+1}/{train_loader.total_batches} Metrics: {metrics}")
                     
                     batch_size_current = len(mols)
@@ -420,6 +392,7 @@ if __name__ == "__main__":
                 total_val_loss_bond_angle = 0.0
                 total_val_loss_dihedral_angle = 0.0
                 total_val_loss_functional_group = 0.0
+                total_val_loss_scaffold_contrast = 0.0
                 val_sample_count = 0
                 
                 val_pbar = tqdm(enumerate(val_loader),
@@ -495,32 +468,18 @@ if __name__ == "__main__":
                         task6.set_pred(outputs1_fg)
                         task6.set_label(fg_labels)
                         loss_functional_group_pred = task6.compute_loss()
+                        
+                        scaffold_groups = scaffold_calculator.get_scaffold_groups(mol_list=mols)
+                        task7.set_embeddings(anchor_outputs)
+                        task7.set_group_label(scaffold_groups)
+                        loss_scaffold_contrast = task7.compute_loss()
+                        
+                        losses = [loss_atom_attr_pred, loss_masked_atom_type_pred, loss_triplet_contrast, loss_batch_contrast, loss_bond_angle_pred, loss_dihedral_angle_pred, loss_functional_group_pred, loss_scaffold_contrast]
 
-                        loss = (loss_atom_attr_pred
-                                + loss_masked_atom_type_pred
-                                + loss_triplet_contrast
-                                + loss_batch_contrast
-                                + loss_bond_angle_pred
-                                + loss_dihedral_angle_pred
-                                + loss_functional_group_pred)
+                        loss = sum(losses[i] for i in range(len(losses)))
                    
                         if batch_idx == val_loader.total_batches - 1:
-                            metrics_0 = task0.get_metrics()
-                            metrics_1 = task1.get_metrics()
-                            metrics_2 = task2.get_metrics()
-                            metrics_3 = task3.get_metrics()
-                            metrics_4 = task4.get_metrics()
-                            metrics_5 = task5.get_metrics()
-                            metrics_6 = task6.get_metrics()
-                            metrics = {
-                            "metrics_0": metrics_0,
-                            "metrics_1": metrics_1,
-                            "metrics_2": metrics_2,
-                            "metrics_3": metrics_3,
-                            "metrics_4": metrics_4,
-                            "metrics_5": metrics_5,
-                            "metrics_6": metrics_6
-                            }
+                            metrics = {f"metrics_{i}": tasks[i].get_metrics() for i in range(8)}
                             print(f"Batch {batch_idx+1}/{val_loader.total_batches} Metrics: {metrics}")
                         
                         batch_size_current = len(mols)
@@ -532,6 +491,7 @@ if __name__ == "__main__":
                         total_val_loss_bond_angle += loss_bond_angle_pred.item() * batch_size_current
                         total_val_loss_dihedral_angle += loss_dihedral_angle_pred.item() * batch_size_current
                         total_val_loss_functional_group += loss_functional_group_pred.item() * batch_size_current
+                        total_val_loss_scaffold_contrast += loss_scaffold_contrast.item() * batch_size_current
                         val_sample_count += batch_size_current
                         
                         val_pbar.set_postfix({"Batch Loss": f"{loss.item():.6f}"})
@@ -548,6 +508,7 @@ if __name__ == "__main__":
                 writer.add_scalar('Epoch/Val_loss_bond_angle', total_val_loss_bond_angle / val_sample_count, epoch)
                 writer.add_scalar('Epoch/Val_loss_dihedral_angle', total_val_loss_dihedral_angle / val_sample_count, epoch)
                 writer.add_scalar('Epoch/Val_loss_functional_group', total_val_loss_functional_group / val_sample_count, epoch)
+                writer.add_scalar('Epoch/Val_loss_scaffold_contrast', total_val_loss_scaffold_contrast / val_sample_count, epoch)
                 
                 for name, scheduler in schedulers.items():
                     if isinstance(scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):

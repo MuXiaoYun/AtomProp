@@ -61,13 +61,7 @@ class ScaffoldSimilarityMatrix:
             torch.Tensor of shape [N, N] with dtype torch.float32.
             Diagonal elements are always 1 (a molecule shares scaffold with itself).
             Invalid molecules (None or scaffold extraction fails) are treated as unique.
-            
-        Raises:
-            ValueError: If mol_list is empty.
         """
-        if not mol_list:
-            raise ValueError("mol_list cannot be empty")
-        
         N = len(mol_list)
         
         # Step 1: Assign scaffold IDs to each molecule
@@ -77,14 +71,7 @@ class ScaffoldSimilarityMatrix:
         if self.verbose:
             print(f"Processing {N} molecules...")
         
-        for idx, mol in enumerate(mol_list):
-            if mol is None:
-                # Assign unique negative ID for invalid molecules
-                molecule_scaffold_ids[idx] = -idx - 1
-                if self.verbose:
-                    print(f"Warning: None molecule at index {idx}")
-                continue
-            
+        for idx, mol in enumerate(mol_list):  
             scaffold_smiles = self.get_scaffold_smiles(mol)
             
             if scaffold_smiles is None:
@@ -148,9 +135,6 @@ class ScaffoldSimilarityMatrix:
         scaffolds = defaultdict(list)
         
         for idx, mol in enumerate(mol_list):
-            if mol is None:
-                continue
-            
             scaffold_smiles = self.get_scaffold_smiles(mol)
             if scaffold_smiles is not None:
                 scaffolds[scaffold_smiles].append(idx)

@@ -6,6 +6,7 @@ from atomprop.utils.features import AtomFeaturize, AtomFeaturizeLoss
 from atomprop.models.GNNs import MaskedBCELoss, MaskedFocalLoss
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 class NodeAttrPrediction:
     """
@@ -190,7 +191,7 @@ class ScaffoldContrast:
     def __init__(self, temperature=0.1):
         self.temperature = temperature
         self.embeddings = None
-        self.labels = None
+        self.group_labels = None
 
     def set_embeddings(self, embeddings):
         """
@@ -198,25 +199,52 @@ class ScaffoldContrast:
         """
         self.embeddings = embeddings
         
-    def set_label(self, labels):
+    def set_group_label(self, group_labels: list[list[int]]):
         """
-        Set scaffold similarity matrix as label.
+        Set scaffold groups as label.
         """
-        self.labels = labels
+        self.group_labels = group_labels
 
     def compute_loss(self):
         """
         Compute the contrastive loss.
         """
+        emb_norm = F.normalize(self.embeddings, dim=1)
+        sim_matrix = torch.matmul(emb_norm, emb_norm.t()) / self.temperature
+        
         batch_size = self.embeddings.size(0)
-        emb_norm = self.embeddings / self.embeddings.norm(dim=1, keepdim=True)
-        similarity_matrix = torch.matmul(emb_norm, emb_norm.t()) / self.temperature  # (batch_size, batch_size)
-        labels = torch.arange(batch_size).to(self.anchor.device)
-        loss = nn.CrossEntropyLoss()(similarity_matrix, labels)
-        return loss
-
+        device = self.embeddings.device
+        
+        pos_pairs = []
+        all_indices = torch.arange(batch_size, device=device)
+        
+        for group in self.group_labels:
+            if len(group) < 2:
+                continue
+            for i in range(len(group)):
+                for j in range(i+1, len(group)):  
+                    pos_pairs.append((group[i], group[j]))
+        
+        if not pos_pairs:
+            return torch.tensor(0.0, device=device)
+        
+        total_loss = 0.0
+        
+        for anchor_idx, pos_idx in pos_pairs:
+            pos_sim = sim_matrix[anchor_idx, pos_idx]
+            
+            neg_mask = (all_indices != pos_idx)
+            neg_sims = sim_matrix[anchor_idx, neg_mask]
+            
+            numerator = torch.exp(pos_sim)
+            denominator = numerator + torch.exp(neg_sims).sum()
+            loss = -torch.log(numerator / denominator)
+            
+            total_loss += loss
+        return total_loss / len(pos_pairs)
+    
     def get_metrics(self):
-        pass
+        return {}
 
 
 class BondAnglePrediction:

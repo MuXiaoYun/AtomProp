@@ -43,8 +43,8 @@ class EqualWeightStratergy(WeightStratergy):
     
     def outputs(self, divide=False):
         if not divide:
-            return torch.ones(self.task_num)
-        return torch.ones(self.task_num)
+            return torch.ones(self.task_num).to(self.device)
+        return torch.ones(self.task_num)/self.task_num.to(self.device)
     
 class HardSwitch(WeightStratergy):
     """
