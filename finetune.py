@@ -21,39 +21,30 @@ import os
 
 no_pretrain = True
 
-data_path = "./data/moleculenet/tox21/tox21.csv"
+data_path = "./data/moleculenet/toxcast/toxcast_data.csv"
+x_col = "smiles"
+
 pretrained_path = 'trained_models/pretrain_pubchem_gn_GIN7/model_epoch1.pth'
+
+criterion = MaskedBCELoss()
 
 logdir = "finetune_gin7"
 os.makedirs(f"trained_models/{logdir}", exist_ok=True)
 
 batch_size = 64
-test_batch_size = 256
+test_batch_size = 32
 
 num_epochs = 100
 random_state = 7
-
-x_col = "smiles"
-y_cols = [
-    "NR-AR",
-    "NR-AR-LBD",
-    "NR-AhR",
-    "NR-Aromatase",
-    "NR-ER",
-    "NR-ER-LBD",
-    "NR-PPAR-gamma",
-    "SR-ARE",
-    "SR-ATAD5",
-    "SR-HSE",
-    "SR-MMP",
-    "SR-p53",
-]
 
 aggr = 'attention'
 
 if __name__ == "__main__":
     ### 1. Read from CSV
     df = pd.read_csv(data_path)
+    headers = df.columns.tolist()
+    y_cols = [col for col in headers if col != x_col]
+    
     smiles_list = df[x_col].tolist()
     # To note that, there is 0, 1 and missing value in y_cols
     # first we need to replace missing value with -1
@@ -64,8 +55,8 @@ if __name__ == "__main__":
     embed_dim = 384
 
     backbone = Embedder(num_atom_types=120, embed_dim=embed_dim)
-    neck = GNN(num_layers=4, embed_dim=embed_dim, gnn_type='gin', JK='last', dropout=0)
-    aggrmodel = GNNAggr(embed_dim=embed_dim, aggr=aggr)
+    neck = GNN(num_layers=7, embed_dim=embed_dim, gnn_type='gin', JK='last', dropout=0)
+    aggrmodel = GNNAggr(embed_dim=embed_dim, aggr=aggr, layers=1)
 
     if not no_pretrain:
         backbone_ckpt = torch.load(pretrained_path)['backbone_state_dict']
@@ -75,8 +66,12 @@ if __name__ == "__main__":
         neck.load_state_dict(neck_ckpt)
     
     ### 3. Define head for finetuning
-    head = MLP(input_dim=embed_dim, hidden_dim=256, output_dim=len(y_cols), num_layers=2, dropout=0, batch_norm=True, output_activation=None)
+    head = MLP(input_dim=embed_dim, hidden_dim=256, output_dim=len(y_cols), num_layers=3, dropout=0, batch_norm=True, output_activation=None)
     head.init_params(gain=2.0)
+    
+    print(backbone.__class__.__name__, f"Parameters: {sum(p.numel() for p in backbone.parameters() if p.requires_grad)}")
+    print(neck.__class__.__name__, f"Parameters: {sum(p.numel() for p in neck.parameters() if p.requires_grad)}")
+    print(head.__class__.__name__, f"Parameters: {sum(p.numel() for p in head.parameters() if p.requires_grad)}")
 
     ### 4. Train the model
     ### To note that, we set a bigger learning rate for head, and a small lr for backbone and neck
@@ -101,7 +96,6 @@ if __name__ == "__main__":
     
     optimizer = torch.optim.Adam(opt_cfg)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=num_epochs, eta_min=1e-6)
-    criterion = MaskedBCELoss()
 
     writer = SummaryWriter(log_dir='runs/finetune_experiment')
 
@@ -328,7 +322,7 @@ if __name__ == "__main__":
             pass
 
     if len(task_aucs) > 0:
-        mean_auc = np.mean(task_aucs)
+        mean_auc = np.nanmean(task_aucs)
     else:
         mean_auc = float('nan')
     print("Per-task thresholds:")

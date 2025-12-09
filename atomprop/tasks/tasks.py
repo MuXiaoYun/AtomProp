@@ -7,6 +7,25 @@ from atomprop.models.GNNs import MaskedBCELoss, MaskedFocalLoss
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import functools
+
+def nan_to_zero(name: str):
+    """
+    Decorator to makes sure output has not nan.
+    """
+    def decorator(func):
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs):
+            result = func(*args, **kwargs)
+            if torch.is_tensor(result) and torch.isnan(result).any():
+                nan_count = torch.isnan(result).sum().item()
+                nan_indices = torch.nonzero(torch.isnan(result), as_tuple=True)
+                zero_tensor = torch.zeros_like(result)
+                result = torch.where(torch.isnan(result), zero_tensor, result)
+                print(f"{name} detected nan.")
+            return result
+        return wrapper
+    return decorator
 
 class NodeAttrPrediction:
     """
@@ -33,6 +52,7 @@ class NodeAttrPrediction:
         self.labels = torch.cat([AtomFeaturize.featurize(mol) for mol in mol_batch], dim=0).to(device)
         return
 
+    @nan_to_zero("NodeAttrPrediction")
     def compute_loss(self):
         """
         Compute the loss for the task.
@@ -74,6 +94,7 @@ class MaskedNodePrediction:
         self.labels = labels
         return
 
+    @nan_to_zero("MaskedNodePrediction")
     def compute_loss(self):
         """
         Compute the loss for the task.
@@ -114,6 +135,7 @@ class GraphMaskContrast:
         self.positive = positive
         self.negative = negative
 
+    @nan_to_zero("GraphMaskContrast")
     def compute_loss(self):
         """
         Compute the contrastive loss.
@@ -150,6 +172,7 @@ class BatchContrast:
         self.anchor = anchor
         self.negative = negative
 
+    @nan_to_zero("BatchContrast")
     def compute_loss(self):
         """
         Compute the contrastive loss.
@@ -205,6 +228,7 @@ class ScaffoldContrast:
         """
         self.group_labels = group_labels
 
+    @nan_to_zero("ScaffoldContrast")
     def compute_loss(self):
         """
         Compute the contrastive loss.
@@ -296,6 +320,7 @@ class BondAnglePrediction:
         self.labels = cosines
         return
 
+    @nan_to_zero("BondAnglePrediction")
     def compute_loss(self):
         """
         Compute the loss for the task.
@@ -373,6 +398,7 @@ class DihedralAnglePrediction:
         self.labels = cosines
         return
 
+    @nan_to_zero("DihedralAnglePrediction")
     def compute_loss(self):
         """
         Compute the loss for the task.
@@ -423,6 +449,7 @@ class FunctionalGroupsPrediction:
         self.labels = labels
         return
 
+    @nan_to_zero("FunctionalGroupsPrediction")
     def compute_loss(self):
         """
         Compute the loss for the task.

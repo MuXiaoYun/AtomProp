@@ -20,7 +20,7 @@ from rdkit.Chem import FunctionalGroups
 import os
 
 record_freq = 100
-dataset_size = 10000
+dataset_size = -1
 num_epochs = 8
 batch_size = 512
 

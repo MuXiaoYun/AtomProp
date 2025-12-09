@@ -403,10 +403,12 @@ class GNNAggr(nn.Module):
     """
     A module for graph-level representation by aggregating node features.
     """
-    def __init__(self, embed_dim, aggr='mean', layers=None):
+    def __init__(self, embed_dim, aggr='mean', layers=None, head=8):
         super(GNNAggr, self).__init__()
         self.aggr = aggr
         self.aggr_fn = None
+        self.layers = layers
+        
         if aggr == 'mean':
             self.aggr_fn = torch_geometric.nn.global_mean_pool
         elif aggr == 'sum':
@@ -416,19 +418,49 @@ class GNNAggr(nn.Module):
         elif aggr == 'min':
             self.aggr_fn = torch_geometric.nn.global_min_pool
         elif aggr == 'attention':
-            assert layers is not None
+            assert layers is not None, "Layers must be specified for attention aggregation"
+            
             self.layers = layers
+            
+            # Initialize multi-head attention layers if multiple layers are requested
             if layers > 1:
-                self.attns = nn.ModuleList([torch_geometric.nn.GlobalAttention(gate_nn=nn.Linear(embed_dim, embed_dim)) for i in range(layers-1)])
-            self.aggr_fn = torch_geometric.nn.GlobalAttention(gate_nn=nn.Linear(embed_dim, 1))
+                self.attns = nn.ModuleList([
+                    nn.MultiheadAttention(embed_dim, head, batch_first=True) 
+                    for _ in range(layers - 1)
+                ])
+            else:
+                self.attns = nn.ModuleList()
+            
+            # Global attention with learnable gating mechanism
+            self.aggr_fn = torch_geometric.nn.GlobalAttention(
+                gate_nn=nn.Sequential(
+                    nn.Linear(embed_dim, embed_dim),
+                    nn.ReLU(),
+                    nn.Linear(embed_dim, 1)
+                )
+            )
         else:
             raise ValueError("Invalid aggregation type. Choose from 'mean', 'sum', 'max', 'min', 'attention'.")
 
     def forward(self, x, batch):
-        # x has shape [B_N, embed_dim]
-        # batch has shape [B_N] with batch indices
+        """
+        Forward pass for graph-level aggregation.
+        
+        Args:
+            x (torch.Tensor): Node features with shape [num_nodes, embed_dim]
+            batch (torch.Tensor): Batch indices with shape [num_nodes]
+            
+        Returns:
+            torch.Tensor: Graph-level representations with shape [batch_size, embed_dim]
+        """
+        # Apply multi-head attention layers if using attention aggregation with multiple layers
         if self.aggr == 'attention' and self.layers > 1:
+            # Reshape for batch_first attention (if needed)
             for attn in self.attns:
-                x = attn(x, batch)
-        return self.aggr_fn(x, batch)  # Shape [B, embed_dim]
+                x_reshaped = x.unsqueeze(0)  # Add batch dimension
+                attn_output, _ = attn(x_reshaped, x_reshaped, x_reshaped)
+                x = attn_output.squeeze(0)
+        
+        # Apply the selected aggregation function
+        return self.aggr_fn(x, batch)  # Shape: [batch_size, embed_dim]
     
