@@ -18,8 +18,6 @@ def nan_to_zero(name: str):
         def wrapper(*args, **kwargs):
             result = func(*args, **kwargs)
             if torch.is_tensor(result) and torch.isnan(result).any():
-                nan_count = torch.isnan(result).sum().item()
-                nan_indices = torch.nonzero(torch.isnan(result), as_tuple=True)
                 zero_tensor = torch.zeros_like(result)
                 result = torch.where(torch.isnan(result), zero_tensor, result)
                 print(f"{name} detected nan.")
@@ -184,7 +182,7 @@ class BatchContrast:
         negative_norm = self.negative / self.negative.norm(dim=1, keepdim=True)
         similarity_matrix = torch.matmul(anchor_norm, negative_norm.t()) / self.temperature  # (batch_size, batch_size)
         labels = torch.arange(batch_size).to(self.anchor.device)
-        loss = nn.CrossEntropyLoss()(similarity_matrix, labels)
+        loss = F.cross_entropy(similarity_matrix, labels)
         return loss
 
     def get_metrics(self):
@@ -260,9 +258,18 @@ class ScaffoldContrast:
             neg_mask = (all_indices != pos_idx)
             neg_sims = sim_matrix[anchor_idx, neg_mask]
             
-            numerator = torch.exp(pos_sim)
-            denominator = numerator + torch.exp(neg_sims).sum()
-            loss = -torch.log(numerator / denominator)
+            pos_sim = sim_matrix[anchor_idx, pos_idx]  
+            neg_mask = (all_indices != pos_idx)  
+            neg_sims = sim_matrix[anchor_idx, neg_mask]  
+            
+            # Use log-sum-exp trick for numerical stability  
+            max_sim = torch.max(torch.cat([pos_sim.unsqueeze(0), neg_sims]))  
+            pos_sim_shifted = pos_sim - max_sim  
+            neg_sims_shifted = neg_sims - max_sim  
+            
+            numerator = torch.exp(pos_sim_shifted)  
+            denominator = numerator + torch.exp(neg_sims_shifted).sum()  
+            loss = -torch.log(numerator / denominator) + max_sim  # Add back the max
             
             total_loss += loss
         return total_loss / len(pos_pairs)

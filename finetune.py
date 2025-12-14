@@ -14,28 +14,28 @@ from torch_geometric.data import Data, Batch, DataLoader
 from torch.utils.tensorboard import SummaryWriter
 from sklearn.metrics import roc_auc_score, roc_curve
 from sklearn.model_selection import StratifiedKFold
-from deepchem.splits.splitters import ScaffoldSplitter
+from atomprop.dataloader.splitter import ScaffoldSplitter
 from deepchem.data import NumpyDataset
 import csv
 import os
 
-no_pretrain = True
+no_pretrain = False
 
-data_path = "./data/moleculenet/toxcast/toxcast_data.csv"
+data_path = "./data/moleculenet/tox21/tox21.csv"
 x_col = "smiles"
 
-pretrained_path = 'trained_models/pretrain_pubchem_gn_GIN7/model_epoch1.pth'
+pretrained_path = 'trained_models/pretrain_pubchem_scaffold/model_epoch2.pth'
 
 criterion = MaskedBCELoss()
 
 logdir = "finetune_gin7"
 os.makedirs(f"trained_models/{logdir}", exist_ok=True)
 
-batch_size = 64
+batch_size = 32
 test_batch_size = 32
 
 num_epochs = 100
-random_state = 7
+random_state = 42
 
 aggr = 'attention'
 
@@ -43,7 +43,10 @@ if __name__ == "__main__":
     ### 1. Read from CSV
     df = pd.read_csv(data_path)
     headers = df.columns.tolist()
-    y_cols = [col for col in headers if col != x_col]
+    
+    exclude_list = ["mol_id", "name", "num"]
+    exclude_list.append(x_col)
+    y_cols = [col for col in headers if col not in exclude_list]
     
     smiles_list = df[x_col].tolist()
     # To note that, there is 0, 1 and missing value in y_cols
@@ -66,7 +69,7 @@ if __name__ == "__main__":
         neck.load_state_dict(neck_ckpt)
     
     ### 3. Define head for finetuning
-    head = MLP(input_dim=embed_dim, hidden_dim=256, output_dim=len(y_cols), num_layers=3, dropout=0, batch_norm=True, output_activation=None)
+    head = MLP(input_dim=embed_dim, hidden_dim=384, output_dim=len(y_cols), num_layers=2, dropout=0.5, batch_norm=True, output_activation=None)
     head.init_params(gain=2.0)
     
     print(backbone.__class__.__name__, f"Parameters: {sum(p.numel() for p in backbone.parameters() if p.requires_grad)}")
@@ -84,18 +87,33 @@ if __name__ == "__main__":
     if aggr == 'attention':
         aggrmodel = aggrmodel.to(device)
 
-    opt_cfg = [
-        {'params': backbone.parameters(), 'lr': 1e-5},
-        {'params': neck.parameters(), 'lr': 1e-5},
-        {'params': head.parameters(), 'lr': 1e-4}
-    ]
-    if aggr == 'attention':
-        opt_cfg.append(
-            {'params': aggrmodel.parameters(), 'lr': 1e-4}
-        )
+    optimizer_backbone_neck = torch.optim.Adam(
+        [
+            {'params': backbone.parameters(), 'lr': 1e-4},
+            {'params': neck.parameters(), 'lr': 1e-4}
+        ]
+    )
     
-    optimizer = torch.optim.Adam(opt_cfg)
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=num_epochs, eta_min=1e-6)
+    optimizer_head = torch.optim.Adam(
+        [{'params': head.parameters(), 'lr': 5e-4}]
+    )
+    
+    if aggr == 'attention':
+        optimizer_aggr = torch.optim.Adam(
+            [{'params': aggrmodel.parameters(), 'lr': 5e-4}]
+        )
+        optimizers = [optimizer_backbone_neck, optimizer_head, optimizer_aggr]
+    else:
+        optimizers = [optimizer_backbone_neck, optimizer_head]
+
+    scheduler_backbone_neck = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer_backbone_neck, T_max=num_epochs, eta_min=1e-6)
+    scheduler_head = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer_head, T_max=num_epochs, eta_min=4e-6)
+    
+    if aggr == 'attention':
+        scheduler_aggr = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer_aggr, T_max=num_epochs, eta_min=4e-6)
+        schedulers = [scheduler_backbone_neck, scheduler_head, scheduler_aggr]
+    else:
+        schedulers = [scheduler_backbone_neck, scheduler_head]
 
     writer = SummaryWriter(log_dir='runs/finetune_experiment')
 
@@ -104,6 +122,8 @@ if __name__ == "__main__":
         splitter = ScaffoldSplitter()
 
         dc_dataset = NumpyDataset(X=labels, ids=smiles_list)
+        print("whole dataset size: ", len(dc_dataset))
+        
         # default split on 8:1:1
         dc_train, dc_val, dc_test = splitter.train_valid_test_split(dc_dataset, seed=random_state)
 
@@ -164,12 +184,17 @@ if __name__ == "__main__":
                 
             data = Data(x=atom_info, edge_index=edge_index, edge_attr=edge_attr, y=torch.tensor(label))
             test_dataset.append(data)
+            
+        # print length of 3 datasets
+        print("train set size: ", len(train_dataset))
+        print("val set size: ", len(val_dataset))
+        print("test set size: ", len(test_dataset))
 
         train_dataloader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, collate_fn=Batch.from_data_list)
         val_dataloader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, collate_fn=Batch.from_data_list)
         test_dataloader = DataLoader(test_dataset, batch_size=test_batch_size, shuffle=False, collate_fn=Batch.from_data_list)
 
-        best_val_loss = float('inf')
+        best_val_auc = 0.0
         best_epoch = -1
 
         for epoch in range(num_epochs):
@@ -181,20 +206,23 @@ if __name__ == "__main__":
             epoch_loss = 0.0
             for batch in tqdm(train_dataloader, desc=f"Epoch {epoch+1} Training"):
                 batch = batch.to(device)
-                optimizer.zero_grad()
+                for optimizer in optimizers:
+                    optimizer.zero_grad()
                 emb = backbone(batch.x.squeeze())
                 emb = neck(Data(x=emb, edge_index=batch.edge_index, edge_attr=batch.edge_attr))
                 graph_emb = aggrmodel(emb, batch.batch)
                 preds = head(graph_emb)
                 loss = criterion(preds.reshape(-1, len(y_cols)), batch.y.reshape(-1, len(y_cols)))
                 loss.backward()
-                optimizer.step()
+                for optimizer in optimizers:
+                    optimizer.step()
                 epoch_loss += loss.item()
                 writer.add_scalar('Train/Loss', loss.item(), global_step)
                 global_step += 1
             avg_epoch_loss = epoch_loss / len(train_dataloader)
             print(f"Epoch {epoch+1} Training Loss: {avg_epoch_loss:.4f}")
-            scheduler.step()
+            for scheduler in schedulers:
+                scheduler.step()
 
             # Validation
             backbone.eval()
@@ -203,6 +231,8 @@ if __name__ == "__main__":
             if aggr == 'attention':
                 aggrmodel.eval()
             val_loss = 0.0
+            all_val_preds = []
+            all_val_labels = []
             with torch.no_grad():
                 for batch in tqdm(val_dataloader, desc=f"Epoch {epoch+1} Validation"):
                     batch = batch.to(device)
@@ -212,22 +242,51 @@ if __name__ == "__main__":
                     preds = head(graph_emb)
                     loss = criterion(preds.reshape(-1, len(y_cols)), batch.y.reshape(-1, len(y_cols)))
                     val_loss += loss.item()
+                    preds_np = F.sigmoid(preds).cpu().numpy()
+                    labels_np = batch.y.reshape(-1, len(y_cols)).cpu().numpy()
+                    all_val_preds.append(preds_np)
+                    all_val_labels.append(labels_np)
             avg_val_loss = val_loss / len(val_dataloader)
             print(f"Epoch {epoch+1} Validation Loss: {avg_val_loss:.4f}")
             writer.add_scalar('Val/Loss', avg_val_loss, epoch)
 
-            # Save best model based on validation loss
-            if avg_val_loss < best_val_loss:
-                best_val_loss = avg_val_loss
-                best_epoch = epoch + 1
-                save_model_name = f'trained_models/{logdir}/best_model_nopretrain.pth' if no_pretrain else f'trained_models/{logdir}/best_model.pth'
-                torch.save({
-                    'backbone_state_dict': backbone.state_dict(),
-                    'neck_state_dict': neck.state_dict(),
-                    'head_state_dict': head.state_dict(),
-                    'aggr': aggrmodel.state_dict()
-                }, save_model_name)
-                print(f"Best model saved at epoch {best_epoch} with validation loss: {best_val_loss:.4f}")
+            # Compute validation AUC
+            if len(all_val_preds) > 0:
+                all_val_preds = np.vstack(all_val_preds)
+                all_val_labels = np.vstack(all_val_labels)
+                val_task_aucs = []
+                for col_idx in range(len(y_cols)):
+                    valid_mask = all_val_labels[:, col_idx] != -1
+                    if valid_mask.sum() == 0:
+                        continue
+                    valid_labels = all_val_labels[valid_mask, col_idx]
+                    valid_preds = all_val_preds[valid_mask, col_idx]
+                    if len(np.unique(valid_labels)) < 2:
+                        continue
+                    try:
+                        auc = roc_auc_score(valid_labels, valid_preds)
+                        val_task_aucs.append(auc)
+                    except Exception:
+                        pass
+                if len(val_task_aucs) > 0:
+                    mean_val_auc = np.nanmean(val_task_aucs)
+                    print(f"Epoch {epoch+1} Validation AUC: {mean_val_auc:.4f}")
+                    writer.add_scalar('Val/AUC', mean_val_auc, epoch)
+                    
+                    # Save best model based on validation AUC
+                    if mean_val_auc > best_val_auc:
+                        best_val_auc = mean_val_auc
+                        best_epoch = epoch + 1
+                        save_model_name = f'trained_models/{logdir}/best_model_nopretrain.pth' if no_pretrain else f'trained_models/{logdir}/best_model.pth'
+                        torch.save({
+                            'backbone_state_dict': backbone.state_dict(),
+                            'neck_state_dict': neck.state_dict(),
+                            'head_state_dict': head.state_dict(),
+                            'aggr': aggrmodel.state_dict()
+                        }, save_model_name)
+                        print(f"Best model saved at epoch {best_epoch} with validation AUC: {best_val_auc:.4f}")
+                else:
+                    print(f"Epoch {epoch+1} Validation: No valid AUC computed")
     except KeyboardInterrupt:
         print("Training interrupted. Saving current model...")
         save_model_name = f'trained_models/{logdir}/finetuned_model_interrupted_nopretrain.pth' if no_pretrain else f'trained_models/{logdir}/finetuned_model_interrupted.pth'
@@ -248,7 +307,7 @@ if __name__ == "__main__":
         'aggr': aggrmodel.state_dict()
     }, save_model_name)
 
-    print(f"Best model was at epoch {best_epoch} with validation loss: {best_val_loss:.4f}")
+    print(f"Best model was at epoch {best_epoch} with validation AUC: {best_val_auc:.4f}")
 
     # 6. Test on the test set, report ROC-AUC
     # Load best model for testing

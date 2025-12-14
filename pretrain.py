@@ -46,7 +46,7 @@ less_rate = 0.1
 more_rate = 0.3
 embed_dim = 384
 
-device = torch.device("cuda:5") if torch.cuda.is_available() else torch.device("cpu")
+device = torch.device("cuda:7") if torch.cuda.is_available() else torch.device("cpu")
 
 if fg_list is None:
     fg_list = FunctionalGroups.BuildFuncGroupHierarchy()
@@ -357,8 +357,7 @@ if __name__ == "__main__":
                         # log weights
                         try:
                             for i in range(7):
-                                writer.add_scalar(f'TrainWeight/Weights', weights[i].item(), epoch * train_loader.total_batches + batch_idx)
-                                writer.add_scalar(f'TrainWeight/Weights_extra', weights_extra[i].item(), epoch * train_loader.total_batches + batch_idx)
+                                writer.add_scalar(f'TrainWeight/Weights{i}', norm_weights[i].item(), epoch * train_loader.total_batches + batch_idx)
                         except Exception:
                             # logging should not interrupt training
                             print("LOGGING ERROR: PLEASE CHECK")
