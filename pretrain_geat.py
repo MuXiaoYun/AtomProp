@@ -1,11 +1,12 @@
 from atomprop.tasks.tasks import NodeAttrPrediction, MaskedNodePrediction, GraphMaskContrast, BatchContrast, BondAnglePrediction, DihedralAnglePrediction, FunctionalGroupsPrediction, ScaffoldContrast
 from atomprop.dataloader.dataloader import SMILESToInputs, PyGChunkDataListLoader, xyzBatchLoader, xyzBatchLoaderContext
 from atomprop.models.GNNs import Embedder, GNN, GNNAggr
+from atomprop.models.GeAT import GeATNet
 from atomprop.utils.mlp import MLP
 from atomprop.utils.mask import MolGraphMask
 from atomprop.utils.groups import TripletGroup, QuadrupletGroup
 from atomprop.utils.features import FunctionalGroupUtils
-from atomprop.utils.weights import WeightStratergy, EqualWeightStratergy, HardSwitch, SoftSwitch, GradNorm, ParetoOpt
+from atomprop.utils.weights import WeightStratergy, EqualWeightStratergy, HardSwitch, SoftSwitch, GradNorm, ParetoOpt, UncertaintyWeighting
 from atomprop.utils.scaffold import ScaffoldSimilarityMatrix
 from atomprop.embeddings.AtomEmbedding import BondTypes
 import matplotlib.pyplot as plt
@@ -17,12 +18,13 @@ from tqdm import tqdm
 from torch_geometric.data import Data, Batch
 from torch.utils.tensorboard import SummaryWriter
 from rdkit.Chem import FunctionalGroups
+from math import ceil
 import os
 
 record_freq = 100
-dataset_size = -1
+dataset_size = 2000
 num_epochs = 8
-batch_size = 512
+batch_size = 64
 
 switch_timings = torch.tensor([0, 16000, 32000, 48000])
 transition_width = 4000
@@ -34,7 +36,7 @@ pretrain_file_type = 'txt'
 xyz_path = "data/pubchem/pubchem-xyzs.txt"
 xyz_type = 'txt'
 
-logdir = "pretrain_pubchem_scaffold"
+logdir = "pretrain_pubchem_geat"
 os.makedirs(f"trained_models/{logdir}", exist_ok=True)
 
 fg_list = None # if none, use default rdkit fgs
@@ -46,13 +48,13 @@ less_rate = 0.1
 more_rate = 0.3
 embed_dim = 384
 
-device = torch.device("cuda:7") if torch.cuda.is_available() else torch.device("cpu")
+device = torch.device("cuda:6") if torch.cuda.is_available() else torch.device("cpu")
 
 if fg_list is None:
     fg_list = FunctionalGroups.BuildFuncGroupHierarchy()
 
 backbone = Embedder(num_atom_types=120, embed_dim=embed_dim)
-neck = GNN(num_layers=7, embed_dim=embed_dim, gnn_type='gin', JK='last', dropout=0.5)
+neck = GeATNet(embed_dim=embed_dim, dropout=0.5)
 head0 = MLP(input_dim=embed_dim, hidden_dim=128, output_dim=157, num_layers=2, dropout=0.5) # used for atom attribute prediction
 head1 = MLP(input_dim=embed_dim, hidden_dim=512, output_dim=embed_dim, num_layers=2, dropout=0.5) # used for masked node prediction
 head2 = MLP(input_dim=embed_dim*3, hidden_dim=64, output_dim=1, num_layers=2, dropout=0.5) # used for bond angle prediction
@@ -71,71 +73,7 @@ task7 = ScaffoldContrast()
 
 tasks = [task0, task1, task2, task3, task4, task5, task6, task7]
 
-weight_stratergy0 = GradNorm(task_num=8, device=device)
-# weight_stratergy1 = ParetoOpt(task_num=8, device=device)
-weight_stratergy1 = EqualWeightStratergy(task_num=8, device=device)
-
-optimizer_configs = {
-    "backbone": {
-        "cls": torch.optim.Adam,
-        "kwargs": {"lr": 5e-4, "weight_decay": 5e-5}
-    },
-    "neck": {
-        "cls": torch.optim.AdamW,
-        "kwargs": {"lr": 1e-3, "weight_decay": 1e-4}
-    },
-    "head0": {
-        "cls": torch.optim.Adam,
-        "kwargs": {"lr": 5e-4, "weight_decay": 1e-5}
-    },
-    "head1": {
-        "cls": torch.optim.Adam,
-        "kwargs": {"lr": 5e-4, "weight_decay": 1e-5}
-    },
-    "head2": {
-        "cls": torch.optim.Adam,
-        "kwargs": {"lr": 5e-4, "weight_decay": 1e-5}
-    },
-    "head3": {
-        "cls": torch.optim.Adam,
-        "kwargs": {"lr": 5e-4, "weight_decay": 1e-5}
-    },
-    "head4": {
-        "cls": torch.optim.Adam,
-        "kwargs": {"lr": 5e-4, "weight_decay": 1e-5}
-    }
-}
-
-scheduler_configs = {
-    "backbone": {
-        "cls": torch.optim.lr_scheduler.ReduceLROnPlateau,
-        "kwargs": {"mode": "min", "factor": 0.7, "patience": 4, "min_lr": 1e-5}
-    },
-    "neck": {
-        "cls": torch.optim.lr_scheduler.CosineAnnealingLR,
-        "kwargs": {"T_max": 20, "eta_min": 1e-5}
-    },
-    "head0": {
-        "cls": torch.optim.lr_scheduler.StepLR,
-        "kwargs": {"step_size": 1, "gamma": 0.5}
-    },
-    "head1": {
-        "cls": torch.optim.lr_scheduler.StepLR,
-        "kwargs": {"step_size": 1, "gamma": 0.5}
-    },
-    "head2": {
-        "cls": torch.optim.lr_scheduler.StepLR,
-        "kwargs": {"step_size": 1, "gamma": 0.5}
-    },
-    "head3": {
-        "cls": torch.optim.lr_scheduler.StepLR,
-        "kwargs": {"step_size": 1, "gamma": 0.5}
-    },
-    "head4": {
-        "cls": torch.optim.lr_scheduler.StepLR,
-        "kwargs": {"step_size": 1, "gamma": 0.5}
-    }
-}
+weight_stratergy = UncertaintyWeighting(num_tasks=len(tasks))
 
 def get_dataset_info(data_path):
     total_rows = sum(1 for _ in open(data_path)) - 1
@@ -163,7 +101,7 @@ if __name__ == "__main__":
 
         train_indices, val_indices, test_indices = create_data_splits(total_rows)
         print(f"Train set size: {len(train_indices)}, Val set size: {len(val_indices)}, Test set size: {len(test_indices)}")
-
+        
         BondTypes.set_bond_types(["SINGLE", "DOUBLE", "TRIPLE", 'AROMATIC'])
 
         print(f"Using computing device: {device}")
@@ -174,6 +112,7 @@ if __name__ == "__main__":
         head2.to(device)
         head3.to(device)
         head4.to(device)
+        weight_stratergy.to(device)
 
         print(backbone.__class__.__name__, f"Parameters: {sum(p.numel() for p in backbone.parameters() if p.requires_grad)}")
         print(neck.__class__.__name__, f"Parameters: {sum(p.numel() for p in neck.parameters() if p.requires_grad)}")
@@ -182,7 +121,22 @@ if __name__ == "__main__":
         print(head2.__class__.__name__, f"Parameters: {sum(p.numel() for p in head2.parameters() if p.requires_grad)}")
         print(head3.__class__.__name__, f"Parameters: {sum(p.numel() for p in head3.parameters() if p.requires_grad)}")
         print(head4.__class__.__name__, f"Parameters: {sum(p.numel() for p in head4.parameters() if p.requires_grad)}")
-
+        
+        train_loader = PyGChunkDataListLoader(
+            data_path=data_path,
+            split_indices=train_indices,
+            chunk_size=chunk_size,
+            batch_size=batch_size,
+            file_type=pretrain_file_type
+        )
+        val_loader = PyGChunkDataListLoader(
+            data_path=data_path,
+            split_indices=val_indices,
+            chunk_size=chunk_size,
+            batch_size=batch_size,
+            file_type=pretrain_file_type
+        )
+        
         components = {
             "backbone": backbone,
             "neck": neck,
@@ -190,7 +144,134 @@ if __name__ == "__main__":
             "head1": head1,
             "head2": head2,
             "head3": head3,
-            "head4": head4
+            "head4": head4,
+            "weight_stratergy": weight_stratergy
+        }
+        
+        optimizer_configs = {
+            "backbone": {
+                "cls": torch.optim.Adam,
+                "kwargs": {"lr": 5e-4, "weight_decay": 5e-5}
+            },
+            "neck": {
+                "cls": torch.optim.AdamW,
+                "kwargs": {"lr": 1e-3, "weight_decay": 1e-4}
+            },
+            "head0": {
+                "cls": torch.optim.Adam,
+                "kwargs": {"lr": 5e-4, "weight_decay": 1e-5}
+            },
+            "head1": {
+                "cls": torch.optim.Adam,
+                "kwargs": {"lr": 5e-4, "weight_decay": 1e-5}
+            },
+            "head2": {
+                "cls": torch.optim.Adam,
+                "kwargs": {"lr": 5e-4, "weight_decay": 1e-5}
+            },
+            "head3": {
+                "cls": torch.optim.Adam,
+                "kwargs": {"lr": 5e-4, "weight_decay": 1e-5}
+            },
+            "head4": {
+                "cls": torch.optim.Adam,
+                "kwargs": {"lr": 5e-4, "weight_decay": 1e-5}
+            },
+            "weight_stratergy": {
+                "cls": torch.optim.Adam,
+                "kwargs": {"lr": 1e-2, "weight_decay": 0}
+            }
+        }
+
+        scheduler_configs = {
+            "backbone": {
+                "cls": torch.optim.lr_scheduler.OneCycleLR,
+                "kwargs": {
+                    "max_lr": 5e-4,
+                    "total_steps": train_loader.total_batches * num_epochs, 
+                    "pct_start": 0.1,
+                    "anneal_strategy": "cos", 
+                    "div_factor": 25.0, 
+                    "final_div_factor": 1e4, 
+                }
+            },
+            "neck": {
+                "cls": torch.optim.lr_scheduler.OneCycleLR,
+                "kwargs": {
+                    "max_lr": 1e-3,
+                    "total_steps": train_loader.total_batches * num_epochs,
+                    "pct_start": 0.1,
+                    "anneal_strategy": "cos",
+                    "div_factor": 25.0,
+                    "final_div_factor": 1e4,
+                }
+            },
+            "head0": {
+                "cls": torch.optim.lr_scheduler.OneCycleLR,
+                "kwargs": {
+                    "max_lr": 5e-4,
+                    "total_steps": train_loader.total_batches * num_epochs,
+                    "pct_start": 0.1,
+                    "anneal_strategy": "cos",
+                    "div_factor": 25.0,
+                    "final_div_factor": 1e4,
+                }
+            },
+            "head1": {
+                "cls": torch.optim.lr_scheduler.OneCycleLR,
+                "kwargs": {
+                    "max_lr": 5e-4,
+                    "total_steps": train_loader.total_batches * num_epochs,
+                    "pct_start": 0.1,
+                    "anneal_strategy": "cos",
+                    "div_factor": 25.0,
+                    "final_div_factor": 1e4,
+                }
+            },
+            "head2": {
+                "cls": torch.optim.lr_scheduler.OneCycleLR,
+                "kwargs": {
+                    "max_lr": 5e-4,
+                    "total_steps": train_loader.total_batches * num_epochs,
+                    "pct_start": 0.1,
+                    "anneal_strategy": "cos",
+                    "div_factor": 25.0,
+                    "final_div_factor": 1e4,
+                }
+            },
+            "head3": {
+                "cls": torch.optim.lr_scheduler.OneCycleLR,
+                "kwargs": {
+                    "max_lr": 5e-4,
+                    "total_steps": train_loader.total_batches * num_epochs,
+                    "pct_start": 0.1,
+                    "anneal_strategy": "cos",
+                    "div_factor": 25.0,
+                    "final_div_factor": 1e4,
+                }
+            },
+            "head4": {
+                "cls": torch.optim.lr_scheduler.OneCycleLR,
+                "kwargs": {
+                    "max_lr": 5e-4,
+                    "total_steps": train_loader.total_batches * num_epochs,
+                    "pct_start": 0.1,
+                    "anneal_strategy": "cos",
+                    "div_factor": 25.0,
+                    "final_div_factor": 1e4,
+                }
+            },
+            "weight_stratergy": {
+                "cls": torch.optim.lr_scheduler.OneCycleLR,
+                "kwargs": {
+                    "max_lr": 1e-2,
+                    "total_steps": train_loader.total_batches * num_epochs,
+                    "pct_start": 0.05,
+                    "anneal_strategy": "cos",
+                    "div_factor": 10.0,
+                    "final_div_factor": 1e3,
+                }
+            },
         }
 
         optimizers = {}
@@ -210,21 +291,6 @@ if __name__ == "__main__":
                 sched_cls = sched_conf.get("cls")
                 sched_kwargs = sched_conf.get("kwargs", {})
                 schedulers[name] = sched_cls(optimizers[name], **sched_kwargs)
-        
-        train_loader = PyGChunkDataListLoader(
-            data_path=data_path,
-            split_indices=train_indices,
-            chunk_size=chunk_size,
-            batch_size=batch_size,
-            file_type=pretrain_file_type
-        )
-        val_loader = PyGChunkDataListLoader(
-            data_path=data_path,
-            split_indices=val_indices,
-            chunk_size=chunk_size,
-            batch_size=batch_size,
-            file_type=pretrain_file_type
-        )
         
         best_val_loss = float('inf')
         train_losses = []
@@ -254,7 +320,7 @@ if __name__ == "__main__":
 
                     atom_emb = backbone(batch_data.x).squeeze()
                     embedded_data = Data(x=atom_emb, edge_index=batch_data.edge_index, edge_attr=batch_data.edge_attr)
-                    graph_emb = neck(embedded_data)
+                    graph_emb = neck(embedded_data, batch=batch_data.batch)
                     graph_emb = graph_emb.view(-1, graph_emb.size(-1))
 
                     outputs = head0(graph_emb)
@@ -266,7 +332,7 @@ if __name__ == "__main__":
                     mask_indices = MolGraphMask.select_mask_indices(batch_data.x)
                     masked_atom_emb = MolGraphMask.mask_atoms(atom_emb, mask_indices, torch.zeros(embed_dim))
                     masked_embedded_data = Data(x=masked_atom_emb, edge_index=batch_data.edge_index, edge_attr=batch_data.edge_attr)
-                    graph_emb1 = neck(masked_embedded_data)
+                    graph_emb1 = neck(masked_embedded_data, batch=batch_data.batch)
                     graph_emb1_masked = graph_emb1.view(-1, graph_emb1.size(-1))[mask_indices]
                     outputs1 = head1(graph_emb1_masked)
                     outputs1 = outputs1.view(-1, outputs1.size(-1))
@@ -278,14 +344,14 @@ if __name__ == "__main__":
                     less_mask_indices = MolGraphMask.select_mask_indices(batch_data.x, mask_ratio=less_rate)
                     less_masked_atom_emb = MolGraphMask.mask_atoms(atom_emb, less_mask_indices, torch.zeros(embed_dim))
                     less_masked_embedded_data = Data(x=less_masked_atom_emb, edge_index=batch_data.edge_index, edge_attr=batch_data.edge_attr)
-                    less_graph_emb = neck(less_masked_embedded_data)
+                    less_graph_emb = neck(less_masked_embedded_data, batch=batch_data.batch)
                     less_graph_emb = less_graph_emb.view(-1, less_graph_emb.size(-1))
                     less_outputs = aggrmodel(less_graph_emb, batch_data.batch)
 
                     more_mask_indices = MolGraphMask.select_mask_indices(batch_data.x, mask_ratio=more_rate)
                     more_masked_atom_emb = MolGraphMask.mask_atoms(atom_emb, more_mask_indices, torch.zeros(embed_dim))
                     more_masked_embedded_data = Data(x=more_masked_atom_emb, edge_index=batch_data.edge_index, edge_attr=batch_data.edge_attr)
-                    more_graph_emb = neck(more_masked_embedded_data)
+                    more_graph_emb = neck(more_masked_embedded_data, batch=batch_data.batch)
                     more_graph_emb = more_graph_emb.view(-1, more_graph_emb.size(-1))
                     more_outputs = aggrmodel(more_graph_emb, batch_data.batch)
 
@@ -324,25 +390,15 @@ if __name__ == "__main__":
                     loss_scaffold_contrast = task7.compute_loss()
 
                     losses = [loss_atom_attr_pred, loss_masked_atom_type_pred, loss_triplet_contrast, loss_batch_contrast, loss_bond_angle_pred, loss_dihedral_angle_pred, loss_functional_group_pred, loss_scaffold_contrast]
-                    # --- compute per-task gradient norms (proxy: gradients w.r.t atom embeddings) ---
-                    # Use atom_emb (output of backbone) as a shared representation to measure influence of each task.
-                    # Allow unused in case a particular loss does not depend on atom_emb for some rare batch.
-                    grads = []
-                    for single_loss in losses:
-                        g = torch.autograd.grad(single_loss, atom_emb, retain_graph=True, create_graph=False, allow_unused=True)[0]
-                        grads.append(g)
-
-                    weights = weight_stratergy0.outputs(grads)
-                    weights_extra = weight_stratergy1.outputs()
-                    norm_weights = WeightStratergy.weight_norm(weights*weights_extra)
-
-                    # final weighted loss
-                    loss = sum(norm_weights[i] * losses[i] for i in range(len(losses)))
+                    loss = weight_stratergy(losses)
 
                     # backward and step
                     loss.backward()
                     for opt in optimizers.values():
                         opt.step()
+                        
+                    for name, scheduler in schedulers.items():
+                        scheduler.step()
                     
                     if batch_idx == 0 or (batch_idx + 1) % record_freq == 0:
                         writer.add_scalar('Train/Loss_total', loss.item(), epoch * train_loader.total_batches + batch_idx)
@@ -356,8 +412,8 @@ if __name__ == "__main__":
                         writer.add_scalar('Train/Loss_scaffold_contrast', loss_scaffold_contrast.item(), epoch * train_loader.total_batches + batch_idx)
                         # log weights
                         try:
-                            for i in range(7):
-                                writer.add_scalar(f'TrainWeight/Weights{i}', norm_weights[i].item(), epoch * train_loader.total_batches + batch_idx)
+                            for i in range(len(tasks)):
+                                writer.add_scalar(f'Weight/Uncertainty{i}', weight_stratergy.log_vars[i].item(), epoch * train_loader.total_batches + batch_idx)
                         except Exception:
                             # logging should not interrupt training
                             print("LOGGING ERROR: PLEASE CHECK")
@@ -382,6 +438,7 @@ if __name__ == "__main__":
                 head2.eval()
                 head3.eval()
                 head4.eval()
+                weight_stratergy.eval()
 
                 total_val_loss = 0.0
                 total_val_loss_atom_attr = 0.0
@@ -404,7 +461,7 @@ if __name__ == "__main__":
                         
                         atom_emb = backbone(batch_data.x).squeeze()
                         embedded_data = Data(x=atom_emb, edge_index=batch_data.edge_index, edge_attr=batch_data.edge_attr)
-                        graph_emb = neck(embedded_data)
+                        graph_emb = neck(embedded_data, batch=batch_data.batch)
                         graph_emb = graph_emb.view(-1, graph_emb.size(-1))
 
                         outputs = head0(graph_emb)
@@ -416,7 +473,7 @@ if __name__ == "__main__":
                         mask_indices = MolGraphMask.select_mask_indices(batch_data.x)
                         masked_atom_emb = MolGraphMask.mask_atoms(atom_emb, mask_indices, torch.zeros(embed_dim))
                         masked_embedded_data = Data(x=masked_atom_emb, edge_index=batch_data.edge_index, edge_attr=batch_data.edge_attr)
-                        graph_emb1 = neck(masked_embedded_data)
+                        graph_emb1 = neck(masked_embedded_data, batch=batch_data.batch)
                         graph_emb1_masked = graph_emb1.view(-1, graph_emb1.size(-1))[mask_indices]
                         outputs1 = head1(graph_emb1_masked)
                         outputs1 = outputs1.view(-1, outputs1.size(-1))
@@ -428,14 +485,14 @@ if __name__ == "__main__":
                         less_mask_indices = MolGraphMask.select_mask_indices(batch_data.x, mask_ratio=less_rate)
                         less_masked_atom_emb = MolGraphMask.mask_atoms(atom_emb, less_mask_indices, torch.zeros(embed_dim))
                         less_masked_embedded_data = Data(x=less_masked_atom_emb, edge_index=batch_data.edge_index, edge_attr=batch_data.edge_attr)
-                        less_graph_emb = neck(less_masked_embedded_data)
+                        less_graph_emb = neck(less_masked_embedded_data, batch=batch_data.batch)
                         less_graph_emb = less_graph_emb.view(-1, less_graph_emb.size(-1))
                         less_outputs = aggrmodel(less_graph_emb, batch_data.batch)
 
                         more_mask_indices = MolGraphMask.select_mask_indices(batch_data.x, mask_ratio=more_rate)
                         more_masked_atom_emb = MolGraphMask.mask_atoms(atom_emb, more_mask_indices, torch.zeros(embed_dim))
                         more_masked_embedded_data = Data(x=more_masked_atom_emb, edge_index=batch_data.edge_index, edge_attr=batch_data.edge_attr)
-                        more_graph_emb = neck(more_masked_embedded_data)
+                        more_graph_emb = neck(more_masked_embedded_data, batch=batch_data.batch)
                         more_graph_emb = more_graph_emb.view(-1, more_graph_emb.size(-1))
                         more_outputs = aggrmodel(more_graph_emb, batch_data.batch)
 
@@ -475,7 +532,7 @@ if __name__ == "__main__":
                         
                         losses = [loss_atom_attr_pred, loss_masked_atom_type_pred, loss_triplet_contrast, loss_batch_contrast, loss_bond_angle_pred, loss_dihedral_angle_pred, loss_functional_group_pred, loss_scaffold_contrast]
 
-                        loss = sum(losses[i] for i in range(len(losses)))
+                        loss = weight_stratergy(losses)
                    
                         if batch_idx == val_loader.total_batches - 1:
                             metrics = {f"metrics_{i}": tasks[i].get_metrics() for i in range(8)}
@@ -508,12 +565,6 @@ if __name__ == "__main__":
                 writer.add_scalar('Epoch/Val_loss_dihedral_angle', total_val_loss_dihedral_angle / val_sample_count, epoch)
                 writer.add_scalar('Epoch/Val_loss_functional_group', total_val_loss_functional_group / val_sample_count, epoch)
                 writer.add_scalar('Epoch/Val_loss_scaffold_contrast', total_val_loss_scaffold_contrast / val_sample_count, epoch)
-                
-                for name, scheduler in schedulers.items():
-                    if isinstance(scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
-                        scheduler.step(avg_val_loss)
-                    else:
-                        scheduler.step()
                 
                 print(f"Epoch {epoch+1}/{num_epochs} Summary: Train Loss = {avg_train_loss:.6f}, Val Loss = {avg_val_loss:.6f}")
                 

@@ -3,6 +3,7 @@ Module for weight stratergies among pretraining tasks.
 """
 import torch
 from atomprop.utils.grads_utils import find_optimal_weights
+import torch.nn as nn
 
 class WeightStratergy:
     """
@@ -121,7 +122,7 @@ class SoftSwitch(WeightStratergy):
 class GradNorm(WeightStratergy):
     """
     GradNorm weight stratergy.
-    Reference: https://arxiv.org/abs/1705.07115
+    Reference: https://arxiv.org/abs/1711.02257
     """
     def __init__(self, task_num, device):
         super().__init__(task_num, device)
@@ -133,15 +134,14 @@ class GradNorm(WeightStratergy):
                 grads_norm.append(torch.tensor(0.0, device=self.device))
             else:
                 grads_norm.append(grad.norm())
-        norms = torch.stack(grads_norm)
-        self.inv = 1.0 / (norms.detach() + 1e-8)
+        norms = torch.stack(grads_norm).clamp(min=1e-4, max=1e4)
+        self.inv = 1.0 / (norms.detach())
         return self.inv
     
 class ParetoOpt(WeightStratergy):
     """
     Given a group of grads g1, g2, ..., gn, this method calculates w1, w2, ..., wn so that g_opt = Σwi*gi satisfies g_opt = argmin max ∠(g_opt, gi).
     """
-    
     def __init__(self, task_num, device):
         super().__init__(task_num, device) 
     
@@ -151,3 +151,24 @@ class ParetoOpt(WeightStratergy):
             grads_mean.append(torch.mean(grad, dim=0))
         ws = find_optimal_weights(grads_mean)
         return ws.to(self.device)
+    
+class UncertaintyWeighting(nn.Module):
+    """
+    Uncertainty weight stratergy.
+    Reference: https://arxiv.org/abs/1705.07115
+    """
+    def __init__(self, num_tasks):
+        super().__init__()
+        self.log_vars = nn.Parameter(torch.zeros(num_tasks))
+    
+    def forward(self, losses):
+        """
+        losses: list of task losses [L1, L2, ..., Ln]
+        """
+        total_loss = 0
+        for i, loss in enumerate(losses):
+            log_var_clamped = torch.clamp(self.log_vars[i], -10, 10)
+            precision = torch.exp(-log_var_clamped)
+            total_loss += 0.5 * precision * loss + 0.5 * log_var_clamped
+        return total_loss
+        

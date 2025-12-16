@@ -385,19 +385,19 @@ if __name__ == "__main__":
         
         # Define optimizers for this fold
         optimizer_backbone_neck = torch.optim.Adam([
-            {'params': backbone_fold.parameters(), 'lr': 1e-4},
-            {'params': neck_fold.parameters(), 'lr': 1e-4}
+            {'params': backbone_fold.parameters(), 'lr': 5e-5},
+            {'params': neck_fold.parameters(), 'lr': 5e-5}
         ])
         
         optimizer_head = torch.optim.Adam([
-            {'params': head_fold.parameters(), 'lr': 5e-4}
+            {'params': head_fold.parameters(), 'lr': 2e-4}
         ])
         
         optimizers = [optimizer_backbone_neck, optimizer_head]
         
         if aggr == 'attention':
             optimizer_aggr = torch.optim.Adam([
-                {'params': aggrmodel_fold.parameters(), 'lr': 5e-4}
+                {'params': aggrmodel_fold.parameters(), 'lr': 2e-4}
             ])
             optimizers.append(optimizer_aggr)
         
@@ -406,14 +406,14 @@ if __name__ == "__main__":
             optimizer_backbone_neck, T_max=num_epochs, eta_min=1e-6
         )
         scheduler_head = torch.optim.lr_scheduler.CosineAnnealingLR(
-            optimizer_head, T_max=num_epochs, eta_min=4e-6
+            optimizer_head, T_max=num_epochs, eta_min=2e-6
         )
         
         schedulers = [scheduler_backbone_neck, scheduler_head]
         
         if aggr == 'attention':
             scheduler_aggr = torch.optim.lr_scheduler.CosineAnnealingLR(
-                optimizer_aggr, T_max=num_epochs, eta_min=4e-6
+                optimizer_aggr, T_max=num_epochs, eta_min=2e-6
             )
             schedulers.append(scheduler_aggr)
         

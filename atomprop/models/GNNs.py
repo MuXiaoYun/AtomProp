@@ -296,7 +296,7 @@ class GINconv(MessagePassing):
         # edge_index has shape [2, E]
         # edge_attr has shape [E, 2]
         edge_embeddings = self.edge_type_embedding(edge_attr[:,0]) + self.edge_direction_embedding(edge_attr[:,1])
-        out = self.propagate(edge_index=edge_index, x=x)  # Shape [B_N, embed_dim]
+        out = self.propagate(edge_index=edge_index, x=x, edge_attr=edge_embeddings)  # Shape [B_N, embed_dim]
         out = (1 + self.eps) * x + out  # Shape [B_N, embed_dim]
         out = self.mlp(out)  # Shape [B_N, embed_dim]
         return out
