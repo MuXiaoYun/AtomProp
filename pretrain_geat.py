@@ -18,16 +18,14 @@ from tqdm import tqdm
 from torch_geometric.data import Data, Batch
 from torch.utils.tensorboard import SummaryWriter
 from rdkit.Chem import FunctionalGroups
-from math import ceil
 import os
 
+# torch.autograd.set_detect_anomaly(True)
+
 record_freq = 100
-dataset_size = 2000
+dataset_size = -1
 num_epochs = 8
 batch_size = 64
-
-switch_timings = torch.tensor([0, 16000, 32000, 48000])
-transition_width = 4000
 
 # data_path = "data/zinc15/dataset/zinc_standard_agent/processed/smiles.csv"
 data_path = "data/pubchem/pubchem-10m.txt"

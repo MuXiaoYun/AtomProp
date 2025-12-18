@@ -8,12 +8,10 @@ import torch.nn as nn
 import numpy as np
 import torch.nn.functional as F
 import argparse
-from iterstrat.ml_stratifiers import MultilabelStratifiedKFold
 from tqdm import tqdm
 from torch_geometric.data import Data, Batch, DataLoader
 from torch.utils.tensorboard import SummaryWriter
 from sklearn.metrics import roc_auc_score, roc_curve
-from sklearn.model_selection import StratifiedKFold
 from atomprop.dataloader.splitter import ScaffoldSplitter
 from deepchem.data import NumpyDataset
 import csv

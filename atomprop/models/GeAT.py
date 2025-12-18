@@ -4,7 +4,6 @@ Module for Graph Edge Attention Transformer (GeAT) for molecular property predic
   
 import torch  
 import torch.nn as nn  
-from atomprop.embeddings.AtomEmbedding import AtomEmbedding  
 from atomprop.utils.mlp import MLP  
 from atomprop.embeddings.AtomEmbedding import BondTypes, BondDirections  
 from atomprop.models.EdgeAttention import EdgeAttention, MultiHeadEdgeAttention 
@@ -130,127 +129,104 @@ class GeATBackbone(nn.Module):
         self.geat_layers = nn.ModuleList([GeATLayer(embed_dim=embed_dim, num_bond_types=num_bond_types, num_heads=num_heads, output_negative_slope=output_negative_slope, dropout=dropout) for _ in range(geat_num_layers)])  
         self.norm_layers = nn.ModuleList([nn.LayerNorm(embed_dim) for _ in range(geat_num_layers)])  
   
-    def forward(self, atom_embeddings, edge_index=None, edge_attr=None):  
-        """  
-        Forward pass with edge list inputs.  
-        :param atoms: [B_N, 2] (atom_type, chirality)  
-        :param edge_index: [2, E] - sparse edge indices  
-        :param edge_attr: [E, 2] - edge attributes  
-        """
+    def forward(self, atom_embeddings, edge_index=None, edge_attr=None):
         atom_embeddings_c = atom_embeddings.clone()
-        for i, layer in enumerate(self.geat_layers):  
-            atom_embeddings_c = atom_embeddings_c + layer(atom_embeddings_c, edge_index, edge_attr)
-        return atom_embeddings_c  
+        for i, layer in enumerate(self.geat_layers):
+            residual = atom_embeddings_c
+            atom_embeddings_c = layer(atom_embeddings_c, edge_index, edge_attr)
+            atom_embeddings_c = self.norm_layers[i](residual + atom_embeddings_c)  # ← Add this!
+        return atom_embeddings_c
   
-class GeATNeck(nn.Module):  
-    """  
-    A :class:`GeATNeck` is a module for global attention mechanism in GeAT. 
-    It leverages graph infomation from batch, uses global attention for aggregation in each graph and outputs atom embeddings.  
-    """  
+class GeATNeck(nn.Module):
+    """
+    A :class:`GeATNeck` module that applies global multi-head self-attention within each graph.
+    It processes atom embeddings in batched format (with padding) and respects graph boundaries
+    via key_padding_mask. This implementation avoids manual Q/K/V projection to ensure numerical stability.
+    """
 
-    def __init__(self, embed_dim: int, global_num_heads: int = 8, dropout: float = 0.2):  
-        super(GeATNeck, self).__init__()  
-        # Multi-head attention for global attention within each graph
+    def __init__(self, embed_dim: int, global_num_heads: int = 8, dropout: float = 0.2):
+        super(GeATNeck, self).__init__()
+        # Use MultiheadAttention with the original embed_dim.
+        # PyTorch will internally split it into `global_num_heads` heads.
         self.global_attention = nn.MultiheadAttention(
-            embed_dim=embed_dim * global_num_heads, 
-            num_heads=global_num_heads, 
+            embed_dim=embed_dim,          # ← Critical: use original embed_dim
+            num_heads=global_num_heads,
             dropout=dropout,
             batch_first=False
-        )  
-        # Linear transformations
-        self.Q_w_global = nn.Linear(embed_dim, embed_dim * global_num_heads)  
-        self.K_w_global = nn.Linear(embed_dim, embed_dim * global_num_heads)  
-        self.V_w_global = nn.Linear(embed_dim, embed_dim * global_num_heads)  
-        self.norm_layer = nn.LayerNorm(embed_dim * global_num_heads)  
+        )
+        # LayerNorm applied after residual connection
+        self.norm_layer = nn.LayerNorm(embed_dim)
         self.embed_dim = embed_dim
-        self.global_num_heads = global_num_heads
-        self.proj = nn.Linear(embed_dim * global_num_heads, embed_dim)  # Project back to original dimension
-        
-    def forward(self, atom_embeddings: torch.Tensor, batch: torch.Tensor = None) -> torch.Tensor:  
+
+    def forward(self, atom_embeddings: torch.Tensor, batch: torch.Tensor = None) -> torch.Tensor:
         """
-        Forward pass with batched processing of all graphs.
-        
+        Forward pass with batched processing of multiple graphs.
+
         Args:
-            atom_embeddings: [B_N, embed_dim] - Atom embeddings
-            batch: [B_N] - Batch indices
-            
+            atom_embeddings: [B_N, embed_dim] - Atom-level embeddings from backbone.
+            batch: [B_N] - Batch assignment vector (from PyG).
+
         Returns:
-            torch.Tensor: Updated atom embeddings
+            torch.Tensor: Updated atom embeddings of shape [B_N, embed_dim].
         """
-        assert batch is not None
-        
+        assert batch is not None, "batch tensor must be provided for graph-level attention."
+
         B_N = atom_embeddings.size(0)
         device = atom_embeddings.device
         dtype = atom_embeddings.dtype
-        
-        # Transform to multi-head dimension
-        Q = self.Q_w_global(atom_embeddings)  # [B_N, embed_dim*global_num_heads]
-        K = self.K_w_global(atom_embeddings)  # [B_N, embed_dim*global_num_heads]
-        V = self.V_w_global(atom_embeddings)  # [B_N, embed_dim*global_num_heads]
-        
-        # Get batch information
+
+        # Determine number of graphs and their sizes
         batch_size = batch.max().item() + 1
-        
-        # Find maximum graph size for padding
-        graph_sizes = []
         graph_indices_list = []
+        graph_sizes = []
+
         for i in range(batch_size):
             mask = (batch == i)
             indices = mask.nonzero(as_tuple=True)[0]
-            graph_sizes.append(len(indices))
             graph_indices_list.append(indices)
-        
+            graph_sizes.append(len(indices))
+
         max_graph_size = max(graph_sizes)
-        
-        # Create padded tensors for batch processing
-        Q_padded = torch.zeros(batch_size, max_graph_size, 
-                              self.embed_dim * self.global_num_heads,
-                              device=device, dtype=dtype)
-        K_padded = torch.zeros_like(Q_padded)
-        V_padded = torch.zeros_like(Q_padded)
-        
-        # Fill padded tensors
+
+        # Pad atom embeddings to [batch_size, max_graph_size, embed_dim]
+        X_padded = torch.zeros(
+            batch_size, max_graph_size, self.embed_dim,
+            device=device, dtype=dtype
+        )
+
         for i in range(batch_size):
             indices = graph_indices_list[i]
             if len(indices) > 0:
-                Q_padded[i, :len(indices)] = Q[indices]
-                K_padded[i, :len(indices)] = K[indices]
-                V_padded[i, :len(indices)] = V[indices]
-        
-        # Create key padding mask (for MultiheadAttention)
-        # True positions will be ignored in attention
+                X_padded[i, :len(indices)] = atom_embeddings[indices]
+
+        # Create key_padding_mask: True means ignore, False means attend
         key_padding_mask = torch.ones(batch_size, max_graph_size, dtype=torch.bool, device=device)
         for i in range(batch_size):
-            key_padding_mask[i, :graph_sizes[i]] = False  # Valid positions are False
-        
-        # Transpose for MultiheadAttention: [seq_len, batch_size, embed_dim]
-        Q_t = Q_padded.transpose(0, 1)  # [max_graph_size, batch_size, embed_dim*global_num_heads]
-        K_t = K_padded.transpose(0, 1)  # [max_graph_size, batch_size, embed_dim*global_num_heads]
-        V_t = V_padded.transpose(0, 1)  # [max_graph_size, batch_size, embed_dim*global_num_heads]
-        
-        # Apply global attention with padding mask
+            key_padding_mask[i, :graph_sizes[i]] = False
+
+        # Transpose to [seq_len, batch_size, embed_dim] for MultiheadAttention
+        X_t = X_padded.transpose(0, 1)  # [max_graph_size, batch_size, embed_dim]
+
+        # Apply global self-attention with padding mask
         attn_output, _ = self.global_attention(
-            Q_t, 
-            K_t, 
-            V_t,
+            X_t, X_t, X_t,
             key_padding_mask=key_padding_mask,
             need_weights=False
         )
-        
-        # Transpose back: [batch_size, max_graph_size, embed_dim*global_num_heads]
+
+        # Transpose back to [batch_size, max_graph_size, embed_dim]
         attn_output = attn_output.transpose(0, 1)
-        # Apply residual connection and layer norm
-        output_padded = self.norm_layer(attn_output + Q_padded)
-        # Gather back to original order
-        final_output = torch.zeros(B_N, self.embed_dim * self.global_num_heads, 
-                                 device=device, dtype=dtype)
+
+        # Residual connection + LayerNorm
+        output_padded = self.norm_layer(attn_output + X_padded)
+
+        # Scatter back to original node order [B_N, embed_dim]
+        final_output = torch.zeros(B_N, self.embed_dim, device=device, dtype=dtype)
         for i in range(batch_size):
             indices = graph_indices_list[i]
             if len(indices) > 0:
                 final_output[indices] = output_padded[i, :len(indices)]
-        
-        # Project back to original dimension
-        final_output = self.proj(final_output)  # [B_N, embed_dim]
+
         return final_output
         
 class GeATNet(nn.Module):  
