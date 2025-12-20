@@ -79,46 +79,6 @@ class GeATLayer(nn.Module):
           
         return out  
   
-class GeATLayerWithSingleHead(nn.Module):  
-    """  
-    A :class:`GeATLayerWithSingleHead` is a simplified version of :class:`GeATLayer` that uses a single head for attention.  
-    This model weighs the importance of only neighboring atoms.  
-    """  
-  
-    def __init__(self, embed_dim: int, num_bond_types: int, dropout: float = 0.2, output_negative_slope: float = 0.2):  
-        super(GeATLayerWithSingleHead, self).__init__()  
-        self.Q_w = nn.Linear(embed_dim, embed_dim)  
-        self.K_w = nn.Linear(embed_dim, embed_dim)  
-        self.V_w = nn.Linear(embed_dim, embed_dim)  
-        self.edge_attention = EdgeAttention(embed_dim, num_bond_types, output_negative_slope)  
-        self.dropout_layer = nn.Dropout(dropout)  
-        self.project = nn.Linear(embed_dim, embed_dim)  
-  
-    def forward(self, atom_embeddings, edge_index=None, edge_attr=None):  
-        B_N = atom_embeddings.size(0)  
-          
-        src_embeddings = self.Q_w(atom_embeddings)  
-        dst_embeddings = self.K_w(atom_embeddings)  
-        value_embeddings = self.V_w(atom_embeddings)  
-          
-        row, col = edge_index  
-        src_features = src_embeddings[row]  
-        dst_features = dst_embeddings[col]  
-        value_features = value_embeddings[row]  
-          
-        # Simple dot product attention  
-        attention_scores = (src_features * dst_features).sum(dim=-1) / (self.embed_dim) ** 0.5  
-        attention_scores = torch.nn.functional.leaky_relu(attention_scores, negative_slope=0.2)  
-        attention_scores = torch_geometric.utils.softmax(attention_scores, col, num_nodes=B_N)  
-        attention_scores = self.dropout_layer(attention_scores)  
-          
-        out = torch.zeros(B_N, self.embed_dim * self.num_heads, 
-                         device=atom_embeddings.device, dtype=atom_embeddings.dtype)  
-        out = out.index_add(0, col, attention_scores.unsqueeze(-1) * value_features)  
-        out = self.project(out)  
-          
-        return out  
-  
 class GeATBackbone(nn.Module):  
     """  
     A :class:`GeATBackbone` is a module for molecular representation learning using GeAT. 

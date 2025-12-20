@@ -151,7 +151,7 @@ class ParetoOpt(WeightStratergy):
             grads_mean.append(torch.mean(grad, dim=0))
         ws = find_optimal_weights(grads_mean)
         return ws.to(self.device)
-    
+
 class UncertaintyWeighting(nn.Module):
     """
     Uncertainty weight stratergy.
@@ -164,11 +164,54 @@ class UncertaintyWeighting(nn.Module):
     def forward(self, losses):
         """
         losses: list of task losses [L1, L2, ..., Ln]
+        loss_types: list of loss types [T1, T2, ..., Tn], type in ["classification", "regression"]
         """
         total_loss = 0
         for i, loss in enumerate(losses):
             log_var_clamped = torch.clamp(self.log_vars[i], -10, 10)
             precision = torch.exp(-log_var_clamped)
             total_loss += 0.5 * precision * loss + 0.5 * log_var_clamped
-        return total_loss
-        
+        return total_loss    
+
+class AdaptiveUncertaintyWeighting(nn.Module):
+    """
+    Adaptive uncertainty weight stratergy.
+    Reference: https://arxiv.org/abs/1705.07115
+    """
+    def __init__(self, num_tasks):
+        super().__init__()
+        self.log_vars = nn.Parameter(torch.zeros(num_tasks))
+    
+    def forward(self, losses, loss_types):
+        """
+        losses: list of task losses [L1, L2, ..., Ln]
+        loss_types: list of loss types [T1, T2, ..., Tn], type in ["classification", "regression"]
+        """
+        total_loss = 0
+        for i, loss in enumerate(losses):
+            log_var_clamped = torch.clamp(self.log_vars[i], -10, 10)
+            precision = torch.exp(-log_var_clamped)
+            if loss_types[i] == "regression":
+                total_loss += 0.5 * precision * loss + 0.5 * log_var_clamped
+            else:
+                total_loss += precision * loss
+        return total_loss 
+    
+class FixedUncertaintyWeighting(nn.Module):
+    """
+    Fixed uncertainty weight stratergy.
+    """
+    def __init__(self, num_tasks):
+        super().__init__()
+        self.log_vars = nn.Parameter(torch.zeros(num_tasks)) # of no use! just as placeholder
+    
+    def forward(self, losses, log_vars):
+        """
+        losses: list of task losses [L1, L2, ..., Ln]
+        log_vars: list of loss log vars
+        """
+        total_loss = 0
+        for i, loss in enumerate(losses):
+            precision = torch.exp(-log_vars[i])
+            total_loss += precision * loss
+        return total_loss    

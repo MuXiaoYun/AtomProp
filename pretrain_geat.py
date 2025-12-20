@@ -6,7 +6,7 @@ from atomprop.utils.mlp import MLP
 from atomprop.utils.mask import MolGraphMask
 from atomprop.utils.groups import TripletGroup, QuadrupletGroup
 from atomprop.utils.features import FunctionalGroupUtils
-from atomprop.utils.weights import WeightStratergy, EqualWeightStratergy, HardSwitch, SoftSwitch, GradNorm, ParetoOpt, UncertaintyWeighting
+from atomprop.utils.weights import WeightStratergy, EqualWeightStratergy, HardSwitch, SoftSwitch, GradNorm, ParetoOpt, UncertaintyWeighting, FixedUncertaintyWeighting
 from atomprop.utils.scaffold import ScaffoldSimilarityMatrix
 from atomprop.embeddings.AtomEmbedding import BondTypes
 import matplotlib.pyplot as plt
@@ -18,35 +18,35 @@ from tqdm import tqdm
 from torch_geometric.data import Data, Batch
 from torch.utils.tensorboard import SummaryWriter
 from rdkit.Chem import FunctionalGroups
+from contextlib import nullcontext
 import os
+import configs.config as cfg
+
+cfg.print_all_params()
 
 # torch.autograd.set_detect_anomaly(True)
 
-record_freq = 100
-dataset_size = -1
-num_epochs = 8
-batch_size = 64
+record_freq = cfg.record_freq
+dataset_size = cfg.dataset_size
+num_epochs = cfg.num_epochs
+batch_size = cfg.batch_size
 
-# data_path = "data/zinc15/dataset/zinc_standard_agent/processed/smiles.csv"
-data_path = "data/pubchem/pubchem-10m.txt"
-pretrain_file_type = 'txt'
+data_path = cfg.data_path
+pretrain_file_type = cfg.pretrain_file_type
 
-xyz_path = "data/pubchem/pubchem-xyzs.txt"
-xyz_type = 'txt'
-
-logdir = "pretrain_pubchem_geat"
+logdir = cfg.logdir
 os.makedirs(f"trained_models/{logdir}", exist_ok=True)
 
-fg_list = None # if none, use default rdkit fgs
+fg_list = cfg.fg_list  # if none, use default rdkit fgs
 
-chunk_size = 65536
-max_atom_num = 128
+chunk_size = cfg.chunk_size
+max_atom_num = cfg.max_atom_num
 
-less_rate = 0.1
-more_rate = 0.3
-embed_dim = 384
+less_rate = cfg.less_rate
+more_rate = cfg.more_rate
+embed_dim = cfg.embed_dim
 
-device = torch.device("cuda:6") if torch.cuda.is_available() else torch.device("cpu")
+device = torch.device(cfg.device_str) if torch.cuda.is_available() else torch.device("cpu")
 
 if fg_list is None:
     fg_list = FunctionalGroups.BuildFuncGroupHierarchy()
@@ -55,8 +55,6 @@ backbone = Embedder(num_atom_types=120, embed_dim=embed_dim)
 neck = GeATNet(embed_dim=embed_dim, dropout=0.5)
 head0 = MLP(input_dim=embed_dim, hidden_dim=128, output_dim=157, num_layers=2, dropout=0.5) # used for atom attribute prediction
 head1 = MLP(input_dim=embed_dim, hidden_dim=512, output_dim=embed_dim, num_layers=2, dropout=0.5) # used for masked node prediction
-head2 = MLP(input_dim=embed_dim*3, hidden_dim=64, output_dim=1, num_layers=2, dropout=0.5) # used for bond angle prediction
-head3 = MLP(input_dim=embed_dim*4, hidden_dim=64, output_dim=1, num_layers=2, dropout=0.5) # used for hydrogen bond prediction
 head4 = MLP(input_dim=embed_dim, hidden_dim=128, output_dim=len(fg_list), num_layers=2, dropout=0.5) # used for functional group prediction
 aggrmodel = GNNAggr(embed_dim=embed_dim, aggr='mean')
 
@@ -64,14 +62,13 @@ task0 = NodeAttrPrediction()
 task1 = MaskedNodePrediction()
 task2 = GraphMaskContrast(less_rate=less_rate, more_rate=more_rate)
 task3 = BatchContrast()
-task4 = BondAnglePrediction()
-task5 = DihedralAnglePrediction()
 task6 = FunctionalGroupsPrediction()
 task7 = ScaffoldContrast()
 
-tasks = [task0, task1, task2, task3, task4, task5, task6, task7]
+tasks = [task0, task1, task2, task3, task6, task7]
+task_types = ["classification", "regression", "other", "other", "classification", "other"]
 
-weight_stratergy = UncertaintyWeighting(num_tasks=len(tasks))
+weight_stratergy = FixedUncertaintyWeighting(num_tasks=len(tasks))
 
 def get_dataset_info(data_path):
     total_rows = sum(1 for _ in open(data_path)) - 1
@@ -88,7 +85,7 @@ def create_data_splits(total_size):
     return train_indices, val_indices, test_indices
 
 if __name__ == "__main__":
-    with xyzBatchLoaderContext(xyz_path) as xyz_loader:
+    with nullcontext():
         writer = SummaryWriter(log_dir=f"runs/{logdir}")
         scaffold_calculator = ScaffoldSimilarityMatrix()
         total_rows, columns = get_dataset_info(data_path)
@@ -107,8 +104,6 @@ if __name__ == "__main__":
         neck.to(device)
         head0.to(device)
         head1.to(device)
-        head2.to(device)
-        head3.to(device)
         head4.to(device)
         weight_stratergy.to(device)
 
@@ -116,8 +111,6 @@ if __name__ == "__main__":
         print(neck.__class__.__name__, f"Parameters: {sum(p.numel() for p in neck.parameters() if p.requires_grad)}")
         print(head0.__class__.__name__, f"Parameters: {sum(p.numel() for p in head0.parameters() if p.requires_grad)}")
         print(head1.__class__.__name__, f"Parameters: {sum(p.numel() for p in head1.parameters() if p.requires_grad)}")
-        print(head2.__class__.__name__, f"Parameters: {sum(p.numel() for p in head2.parameters() if p.requires_grad)}")
-        print(head3.__class__.__name__, f"Parameters: {sum(p.numel() for p in head3.parameters() if p.requires_grad)}")
         print(head4.__class__.__name__, f"Parameters: {sum(p.numel() for p in head4.parameters() if p.requires_grad)}")
         
         train_loader = PyGChunkDataListLoader(
@@ -140,8 +133,6 @@ if __name__ == "__main__":
             "neck": neck,
             "head0": head0,
             "head1": head1,
-            "head2": head2,
-            "head3": head3,
             "head4": head4,
             "weight_stratergy": weight_stratergy
         }
@@ -149,35 +140,35 @@ if __name__ == "__main__":
         optimizer_configs = {
             "backbone": {
                 "cls": torch.optim.Adam,
-                "kwargs": {"lr": 5e-4, "weight_decay": 5e-5}
+                "kwargs": {"lr": cfg.backbone_lr, "weight_decay": cfg.backbone_wd}
             },
             "neck": {
                 "cls": torch.optim.AdamW,
-                "kwargs": {"lr": 1e-3, "weight_decay": 1e-4}
+                "kwargs": {"lr": cfg.neck_lr, "weight_decay": cfg.neck_wd}
             },
             "head0": {
                 "cls": torch.optim.Adam,
-                "kwargs": {"lr": 5e-4, "weight_decay": 1e-5}
+                "kwargs": {"lr": cfg.head_lr, "weight_decay": cfg.head_wd}
             },
             "head1": {
                 "cls": torch.optim.Adam,
-                "kwargs": {"lr": 5e-4, "weight_decay": 1e-5}
+                "kwargs": {"lr": cfg.head_lr, "weight_decay": cfg.head_wd}
             },
             "head2": {
                 "cls": torch.optim.Adam,
-                "kwargs": {"lr": 5e-4, "weight_decay": 1e-5}
+                "kwargs": {"lr": cfg.head_lr, "weight_decay": cfg.head_wd}
             },
             "head3": {
                 "cls": torch.optim.Adam,
-                "kwargs": {"lr": 5e-4, "weight_decay": 1e-5}
+                "kwargs": {"lr": cfg.head_lr, "weight_decay": cfg.head_wd}
             },
             "head4": {
                 "cls": torch.optim.Adam,
-                "kwargs": {"lr": 5e-4, "weight_decay": 1e-5}
+                "kwargs": {"lr": cfg.head_lr, "weight_decay": cfg.head_wd}
             },
             "weight_stratergy": {
                 "cls": torch.optim.Adam,
-                "kwargs": {"lr": 1e-2, "weight_decay": 0}
+                "kwargs": {"lr": cfg.weight_strategy_lr, "weight_decay": cfg.weight_strategy_wd}
             }
         }
 
@@ -185,89 +176,89 @@ if __name__ == "__main__":
             "backbone": {
                 "cls": torch.optim.lr_scheduler.OneCycleLR,
                 "kwargs": {
-                    "max_lr": 5e-4,
+                    "max_lr": cfg.backbone_lr,
                     "total_steps": train_loader.total_batches * num_epochs, 
-                    "pct_start": 0.1,
-                    "anneal_strategy": "cos", 
-                    "div_factor": 25.0, 
-                    "final_div_factor": 1e4, 
+                    "pct_start": cfg.pct_start,
+                    "anneal_strategy": cfg.anneal_strategy, 
+                    "div_factor": cfg.div_factor, 
+                    "final_div_factor": cfg.final_div_factor, 
                 }
             },
             "neck": {
                 "cls": torch.optim.lr_scheduler.OneCycleLR,
                 "kwargs": {
-                    "max_lr": 1e-3,
+                    "max_lr": cfg.neck_scheduler_max_lr,
                     "total_steps": train_loader.total_batches * num_epochs,
-                    "pct_start": 0.1,
-                    "anneal_strategy": "cos",
-                    "div_factor": 25.0,
-                    "final_div_factor": 1e4,
+                    "pct_start": cfg.pct_start,
+                    "anneal_strategy": cfg.anneal_strategy,
+                    "div_factor": cfg.div_factor,
+                    "final_div_factor": cfg.final_div_factor,
                 }
             },
             "head0": {
                 "cls": torch.optim.lr_scheduler.OneCycleLR,
                 "kwargs": {
-                    "max_lr": 5e-4,
+                    "max_lr": cfg.head_lr,
                     "total_steps": train_loader.total_batches * num_epochs,
-                    "pct_start": 0.1,
-                    "anneal_strategy": "cos",
-                    "div_factor": 25.0,
-                    "final_div_factor": 1e4,
+                    "pct_start": cfg.pct_start,
+                    "anneal_strategy": cfg.anneal_strategy,
+                    "div_factor": cfg.div_factor,
+                    "final_div_factor": cfg.final_div_factor,
                 }
             },
             "head1": {
                 "cls": torch.optim.lr_scheduler.OneCycleLR,
                 "kwargs": {
-                    "max_lr": 5e-4,
+                    "max_lr": cfg.head_lr,
                     "total_steps": train_loader.total_batches * num_epochs,
-                    "pct_start": 0.1,
-                    "anneal_strategy": "cos",
-                    "div_factor": 25.0,
-                    "final_div_factor": 1e4,
+                    "pct_start": cfg.pct_start,
+                    "anneal_strategy": cfg.anneal_strategy,
+                    "div_factor": cfg.div_factor,
+                    "final_div_factor": cfg.final_div_factor,
                 }
             },
             "head2": {
                 "cls": torch.optim.lr_scheduler.OneCycleLR,
                 "kwargs": {
-                    "max_lr": 5e-4,
+                    "max_lr": cfg.head_lr,
                     "total_steps": train_loader.total_batches * num_epochs,
-                    "pct_start": 0.1,
-                    "anneal_strategy": "cos",
-                    "div_factor": 25.0,
-                    "final_div_factor": 1e4,
+                    "pct_start": cfg.pct_start,
+                    "anneal_strategy": cfg.anneal_strategy,
+                    "div_factor": cfg.div_factor,
+                    "final_div_factor": cfg.final_div_factor,
                 }
             },
             "head3": {
                 "cls": torch.optim.lr_scheduler.OneCycleLR,
                 "kwargs": {
-                    "max_lr": 5e-4,
+                    "max_lr": cfg.head_lr,
                     "total_steps": train_loader.total_batches * num_epochs,
-                    "pct_start": 0.1,
-                    "anneal_strategy": "cos",
-                    "div_factor": 25.0,
-                    "final_div_factor": 1e4,
+                    "pct_start": cfg.pct_start,
+                    "anneal_strategy": cfg.anneal_strategy,
+                    "div_factor": cfg.div_factor,
+                    "final_div_factor": cfg.final_div_factor,
                 }
             },
             "head4": {
                 "cls": torch.optim.lr_scheduler.OneCycleLR,
                 "kwargs": {
-                    "max_lr": 5e-4,
+                    "max_lr": cfg.head_lr,
                     "total_steps": train_loader.total_batches * num_epochs,
-                    "pct_start": 0.1,
-                    "anneal_strategy": "cos",
-                    "div_factor": 25.0,
-                    "final_div_factor": 1e4,
+                    "pct_start": cfg.pct_start,
+                    "anneal_strategy": cfg.anneal_strategy,
+                    "div_factor": cfg.div_factor,
+                    "final_div_factor": cfg.final_div_factor,
                 }
             },
             "weight_stratergy": {
                 "cls": torch.optim.lr_scheduler.OneCycleLR,
                 "kwargs": {
-                    "max_lr": 1e-2,
+                    "max_lr": cfg.weight_strategy_lr,
                     "total_steps": train_loader.total_batches * num_epochs,
-                    "pct_start": 0.05,
-                    "anneal_strategy": "cos",
-                    "div_factor": 10.0,
-                    "final_div_factor": 1e3,
+                    "pct_start": cfg.weight_strategy_pct_start,
+                    "anneal_strategy": cfg.anneal_strategy,
+                    "div_factor": cfg.weight_strategy_div_factor,
+                    "final_div_factor": cfg.final_div_factor,
                 }
             },
         }
@@ -297,8 +288,6 @@ if __name__ == "__main__":
         
         for epoch in range(num_epochs):
             try:
-                xyz_loader.reset()
-
                 backbone.train()
                 neck.train()
                 head0.train()
@@ -361,21 +350,6 @@ if __name__ == "__main__":
                     task3.set_embeddings(anchor_outputs, outputs1_for_contrast)
                     loss_batch_contrast = task3.compute_loss()
 
-                    xyzs = xyz_loader.get_batch(len(data_list)).to(device)
-                    triplet_indices = TripletGroup.batch_generate(batch_data.edge_index).to(device)
-                    triplet_emb = atom_emb[triplet_indices.view(-1)].view(-1, 3 * embed_dim).to(device) # (num_triplets, 3*embed_dim)
-                    triplet_outputs = head2(triplet_emb) # (num_triplets, 1)
-                    task4.set_label(xyzs, triplet_indices)
-                    task4.set_pred(triplet_outputs)
-                    loss_bond_angle_pred = task4.compute_loss()
-
-                    quadruplet_indices = QuadrupletGroup.batch_generate(batch_data.edge_index).to(device)
-                    task5.set_label(xyzs, quadruplet_indices)
-                    quadruplet_emb = atom_emb[quadruplet_indices.view(-1)].view(-1, 4 * embed_dim).to(device) # (num_quadruplets, 4*embed_dim)
-                    quadruplet_outputs = head3(quadruplet_emb) # (num_quadruplets, 1)
-                    task5.set_pred(quadruplet_outputs)
-                    loss_dihedral_angle_pred = task5.compute_loss()
-
                     outputs1_fg = head4(anchor_outputs)
                     fg_labels = FunctionalGroupUtils.batch_detect_with_rdkit_fg(mols, fg_list).to(device)
                     task6.set_pred(outputs1_fg)
@@ -387,8 +361,8 @@ if __name__ == "__main__":
                     task7.set_group_label(scaffold_groups)
                     loss_scaffold_contrast = task7.compute_loss()
 
-                    losses = [loss_atom_attr_pred, loss_masked_atom_type_pred, loss_triplet_contrast, loss_batch_contrast, loss_bond_angle_pred, loss_dihedral_angle_pred, loss_functional_group_pred, loss_scaffold_contrast]
-                    loss = weight_stratergy(losses)
+                    losses = [loss_atom_attr_pred, loss_masked_atom_type_pred, loss_triplet_contrast, loss_batch_contrast, loss_functional_group_pred, loss_scaffold_contrast]
+                    loss = weight_stratergy(losses, cfg.fixed_log_vars)
 
                     # backward and step
                     loss.backward()
@@ -404,20 +378,18 @@ if __name__ == "__main__":
                         writer.add_scalar('Train/Loss_masked_atom', loss_masked_atom_type_pred.item(), epoch * train_loader.total_batches + batch_idx)
                         writer.add_scalar('Train/Loss_triplet', loss_triplet_contrast.item(), epoch * train_loader.total_batches + batch_idx)
                         writer.add_scalar('Train/Loss_batch_contrast', loss_batch_contrast.item(), epoch * train_loader.total_batches + batch_idx)
-                        writer.add_scalar('Train/Loss_bond_angle', loss_bond_angle_pred.item(), epoch * train_loader.total_batches + batch_idx)
-                        writer.add_scalar('Train/Loss_dihedral_angle', loss_dihedral_angle_pred.item(), epoch * train_loader.total_batches + batch_idx)
                         writer.add_scalar('Train/Loss_functional_group', loss_functional_group_pred.item(), epoch * train_loader.total_batches + batch_idx)
                         writer.add_scalar('Train/Loss_scaffold_contrast', loss_scaffold_contrast.item(), epoch * train_loader.total_batches + batch_idx)
                         # log weights
-                        try:
-                            for i in range(len(tasks)):
-                                writer.add_scalar(f'Weight/Uncertainty{i}', weight_stratergy.log_vars[i].item(), epoch * train_loader.total_batches + batch_idx)
-                        except Exception:
-                            # logging should not interrupt training
-                            print("LOGGING ERROR: PLEASE CHECK")
+                        # try:
+                        #     for i in range(len(tasks)):
+                        #         writer.add_scalar(f'Weight/Uncertainty{i}', weight_stratergy.log_vars[i].item(), epoch * train_loader.total_batches + batch_idx)
+                        # except Exception:
+                        #     # logging should not interrupt training
+                        #     print("LOGGING ERROR: PLEASE CHECK")
                     
                     if batch_idx == train_loader.total_batches - 1:
-                        metrics = {f"metrics_{i}": tasks[i].get_metrics() for i in range(8)}
+                        metrics = {f"metrics_{i}": tasks[i].get_metrics() for i in range(len(tasks))}
                         print(f"Batch {batch_idx+1}/{train_loader.total_batches} Metrics: {metrics}")
                     
                     batch_size_current = len(mols)
@@ -433,8 +405,6 @@ if __name__ == "__main__":
                 neck.eval()
                 head0.eval()
                 head1.eval()
-                head2.eval()
-                head3.eval()
                 head4.eval()
                 weight_stratergy.eval()
 
@@ -502,21 +472,6 @@ if __name__ == "__main__":
                         task3.set_embeddings(anchor_outputs, outputs1_for_contrast)
                         loss_batch_contrast = task3.compute_loss()
 
-                        xyzs = xyz_loader.get_batch(len(data_list)).to(device)
-                        triplet_indices = TripletGroup.batch_generate(batch_data.edge_index).to(device)
-                        triplet_emb = atom_emb[triplet_indices.view(-1)].view(-1, 3 * embed_dim).to(device) # (num_triplets, 3*embed_dim)
-                        triplet_outputs = head2(triplet_emb) # (num_triplets, 1)
-                        task4.set_label(xyzs, triplet_indices)
-                        task4.set_pred(triplet_outputs)
-                        loss_bond_angle_pred = task4.compute_loss()
-
-                        quadruplet_indices = QuadrupletGroup.batch_generate(batch_data.edge_index).to(device)
-                        task5.set_label(xyzs, quadruplet_indices)
-                        quadruplet_emb = atom_emb[quadruplet_indices.view(-1)].view(-1, 4 * embed_dim).to(device) # (num_quadruplets, 4*embed_dim)
-                        quadruplet_outputs = head3(quadruplet_emb) # (num_quadruplets, 1)
-                        task5.set_pred(quadruplet_outputs)
-                        loss_dihedral_angle_pred = task5.compute_loss()
-
                         outputs1_fg = head4(anchor_outputs)
                         fg_labels = FunctionalGroupUtils.batch_detect_with_rdkit_fg(mols, fg_list).to(device)
                         task6.set_pred(outputs1_fg)
@@ -528,12 +483,12 @@ if __name__ == "__main__":
                         task7.set_group_label(scaffold_groups)
                         loss_scaffold_contrast = task7.compute_loss()
                         
-                        losses = [loss_atom_attr_pred, loss_masked_atom_type_pred, loss_triplet_contrast, loss_batch_contrast, loss_bond_angle_pred, loss_dihedral_angle_pred, loss_functional_group_pred, loss_scaffold_contrast]
+                        losses = [loss_atom_attr_pred, loss_masked_atom_type_pred, loss_triplet_contrast, loss_batch_contrast, loss_functional_group_pred, loss_scaffold_contrast]
 
-                        loss = weight_stratergy(losses)
+                        loss = weight_stratergy(losses, cfg.fixed_log_vars)
                    
                         if batch_idx == val_loader.total_batches - 1:
-                            metrics = {f"metrics_{i}": tasks[i].get_metrics() for i in range(8)}
+                            metrics = {f"metrics_{i}": tasks[i].get_metrics() for i in range(len(tasks))}
                             print(f"Batch {batch_idx+1}/{val_loader.total_batches} Metrics: {metrics}")
                         
                         batch_size_current = len(mols)
@@ -542,8 +497,6 @@ if __name__ == "__main__":
                         total_val_loss_masked_atom += loss_masked_atom_type_pred.item() * batch_size_current
                         total_val_loss_triplet += loss_triplet_contrast.item() * batch_size_current
                         total_val_loss_batch_contrast += loss_batch_contrast.item() * batch_size_current
-                        total_val_loss_bond_angle += loss_bond_angle_pred.item() * batch_size_current
-                        total_val_loss_dihedral_angle += loss_dihedral_angle_pred.item() * batch_size_current
                         total_val_loss_functional_group += loss_functional_group_pred.item() * batch_size_current
                         total_val_loss_scaffold_contrast += loss_scaffold_contrast.item() * batch_size_current
                         val_sample_count += batch_size_current

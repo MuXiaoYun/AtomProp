@@ -1,46 +1,77 @@
-"""
-AtomEmbedding configs
-"""
-atom_embedding_dim = 128
-""" Dimension of the atom embeddings """
-num_atom_types = 36
-""" Number of unique atom types in the dataset """
-num_bond_types = 4
-""" Number of unique bond types in the dataset """
+import inspect
+import sys
+import torch
 
+# configs/config.py
 
-"""
-Edge Attention configs
-"""
-edge_attetion_output_negative_slope = 0.1
-""" Negative slope for the output of the edge attention feedforward network """
-num_heads = 4
-""" Number of attention heads """
-global_num_heads = 4
-""" Number of global attention heads """
+# Dataset and I/O
+data_path = "data/zinc15/dataset/zinc_standard_agent/processed/smiles.csv"
+# data_path = "data/pubchem/pubchem-10m.txt"
+pretrain_file_type = 'txt'
 
+logdir = "pretrain_pubchem_geat"
 
-"""
-GeAT configs
-"""
-backbone_dropout = 0.2
-""" Dropout rate for the GeAT backbone """
-neck_dropout = 0.2
-""" Dropout rate for the GeAT neck """
-head_dropout = 0.1
-""" Dropout rate for the GeAT head """
-geatnet_hidden_dim = 64
-""" Hidden dimension for the egeatnet feedforward network """
-geatnet_layers = 6
-""" Number of GeAT layers in the GeATNet"""
-parallel_between_bondtypes = True
-""" Whether to use parallel attention mechanisms for different bond types """
+# Data settings
+dataset_size = -1
+chunk_size = 65536
+max_atom_num = 128
+batch_size = 64
 
+# Weight settings
+fixed_log_vars = torch.tensor([-3.077, -10.000, -0.487, 1.426, -1.763, 2.155], dtype=torch.float32)
 
-"""
-Training configs
-"""
-batch_size = 256
-""" Batch size for training """
-context_length = 32
-""" Maximum number of atoms in a molecule for padding """
+# Training settings
+num_epochs = 8
+record_freq = 100
+
+# Masking rates
+less_rate = 0.1
+more_rate = 0.3
+
+# Model dimensions
+embed_dim = 384
+
+# Functional groups
+fg_list = None  # if None, use default RDKit functional groups
+
+# Device (will be overridden in main script based on availability)
+device_str = "cuda:6"  # fallback to cpu if not available
+
+# Optimizer & Scheduler base settings
+backbone_lr = 5e-4
+neck_lr = 5e-4
+head_lr = 5e-4
+weight_strategy_lr = 1e-3
+
+backbone_wd = 5e-5
+neck_wd = 5e-5
+head_wd = 1e-5
+weight_strategy_wd = 0.0
+
+neck_scheduler_max_lr = 1e-3  # special for neck
+
+# OneCycleLR settings
+pct_start = 0.1
+anneal_strategy = "cos"
+div_factor = 25.0
+final_div_factor = 1e4
+
+weight_strategy_pct_start = 0.05
+weight_strategy_div_factor = 10.0
+
+def print_all_params():
+    """Print all configuration parameters defined in this module."""
+    # Get all variables in the current module (globals)
+    current_module = sys.modules[__name__]
+    attrs = {
+        name: value
+        for name, value in inspect.getmembers(current_module)
+        if not name.startswith("_")  # skip private/dunder names
+        and not inspect.isfunction(value)  # skip functions (including this one)
+        and not inspect.ismodule(value)   # skip imported modules
+    }
+
+    print("=== Configuration Parameters ===")
+    for key, val in sorted(attrs.items()):
+        print(f"{key} = {repr(val)}")
+    print("================================")

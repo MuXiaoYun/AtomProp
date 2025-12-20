@@ -22,14 +22,15 @@ from atomprop.models.GeAT import GeATNet
 
 no_pretrain = False
 
-data_path = "./data/moleculenet/tox21/tox21.csv"
+data_path = "./data/moleculenet/toxcast/toxcast_data.csv"
+logdir = "finetune_gin7_toxcast"
+
 x_col = "smiles"
 
-pretrained_path = 'trained_models/pretrain_pubchem_geat/best_model.pth'
+pretrained_path = 'trained_models/pretrain_pubchem_geat/model_epoch0.pth'
 
 criterion = MaskedBCELoss()
 
-logdir = "finetune_gin7_kfold"
 os.makedirs(f"trained_models/{logdir}", exist_ok=True)
 
 batch_size = 32
@@ -37,7 +38,7 @@ test_batch_size = 32
 
 num_epochs = 100
 random_state = 42
-k_folds = 3  # Number of folds for cross-validation
+k_folds = 5  # Number of folds for cross-validation
 frac_test = 0.1  # Test set fraction
 
 aggr = 'attention'
@@ -314,7 +315,7 @@ if __name__ == "__main__":
     splitter = ScaffoldKFoldSplitter(fold=k_folds, frac_test=frac_test)
     
     # 6. Prepare device
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    device = torch.device('cuda:7' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
     
     # 7. Store results from all folds
@@ -384,8 +385,8 @@ if __name__ == "__main__":
         
         # Define optimizers for this fold
         optimizer_backbone_neck = torch.optim.Adam([
-            {'params': backbone_fold.parameters(), 'lr': 5e-5},
-            {'params': neck_fold.parameters(), 'lr': 5e-5}
+            {'params': backbone_fold.parameters(), 'lr': 5e-6},
+            {'params': neck_fold.parameters(), 'lr': 5e-6}
         ])
         
         optimizer_head = torch.optim.Adam([
@@ -402,7 +403,7 @@ if __name__ == "__main__":
         
         # Define schedulers for this fold
         scheduler_backbone_neck = torch.optim.lr_scheduler.CosineAnnealingLR(
-            optimizer_backbone_neck, T_max=num_epochs, eta_min=1e-6
+            optimizer_backbone_neck, T_max=num_epochs, eta_min=1e-7
         )
         scheduler_head = torch.optim.lr_scheduler.CosineAnnealingLR(
             optimizer_head, T_max=num_epochs, eta_min=2e-6
