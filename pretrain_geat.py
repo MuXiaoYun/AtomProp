@@ -68,7 +68,7 @@ task7 = ScaffoldContrast()
 tasks = [task0, task1, task2, task3, task6, task7]
 task_types = ["classification", "regression", "other", "other", "classification", "other"]
 
-weight_stratergy = FixedUncertaintyWeighting(num_tasks=len(tasks))
+weight_stratergy = UncertaintyWeighting(num_tasks=len(tasks))
 
 def get_dataset_info(data_path):
     total_rows = sum(1 for _ in open(data_path)) - 1
@@ -362,7 +362,7 @@ if __name__ == "__main__":
                     loss_scaffold_contrast = task7.compute_loss()
 
                     losses = [loss_atom_attr_pred, loss_masked_atom_type_pred, loss_triplet_contrast, loss_batch_contrast, loss_functional_group_pred, loss_scaffold_contrast]
-                    loss = weight_stratergy(losses, cfg.fixed_log_vars)
+                    loss = weight_stratergy(losses)
 
                     # backward and step
                     loss.backward()
@@ -381,12 +381,12 @@ if __name__ == "__main__":
                         writer.add_scalar('Train/Loss_functional_group', loss_functional_group_pred.item(), epoch * train_loader.total_batches + batch_idx)
                         writer.add_scalar('Train/Loss_scaffold_contrast', loss_scaffold_contrast.item(), epoch * train_loader.total_batches + batch_idx)
                         # log weights
-                        # try:
-                        #     for i in range(len(tasks)):
-                        #         writer.add_scalar(f'Weight/Uncertainty{i}', weight_stratergy.log_vars[i].item(), epoch * train_loader.total_batches + batch_idx)
-                        # except Exception:
-                        #     # logging should not interrupt training
-                        #     print("LOGGING ERROR: PLEASE CHECK")
+                        try:
+                            for i in range(len(tasks)):
+                                writer.add_scalar(f'Weight/Uncertainty{i}', weight_stratergy.log_vars[i].item(), epoch * train_loader.total_batches + batch_idx)
+                        except Exception:
+                            # logging should not interrupt training
+                            print("LOGGING ERROR: PLEASE CHECK")
                     
                     if batch_idx == train_loader.total_batches - 1:
                         metrics = {f"metrics_{i}": tasks[i].get_metrics() for i in range(len(tasks))}
@@ -485,7 +485,7 @@ if __name__ == "__main__":
                         
                         losses = [loss_atom_attr_pred, loss_masked_atom_type_pred, loss_triplet_contrast, loss_batch_contrast, loss_functional_group_pred, loss_scaffold_contrast]
 
-                        loss = weight_stratergy(losses, cfg.fixed_log_vars)
+                        loss = weight_stratergy(losses)
                    
                         if batch_idx == val_loader.total_batches - 1:
                             metrics = {f"metrics_{i}": tasks[i].get_metrics() for i in range(len(tasks))}

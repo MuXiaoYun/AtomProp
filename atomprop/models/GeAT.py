@@ -6,78 +6,92 @@ import torch
 import torch.nn as nn  
 from atomprop.utils.mlp import MLP  
 from atomprop.embeddings.AtomEmbedding import BondTypes, BondDirections  
-from atomprop.models.EdgeAttention import EdgeAttention, MultiHeadEdgeAttention 
+from atomprop.models.EdgeAttention import EdgeAttention, MultiHeadEdgeAttention
 import torch_geometric 
   
-class GeATLayer(nn.Module):  
-    """  
-    A :class:`GeAT` (Graph Edge Attention Transformer) for molecular property prediction.  
-    This model weighs the importance of only neighboring atoms.  
-    Rewritten to handle edge lists instead of edge matrices.  
-    """  
-  
-    def __init__(self, embed_dim: int, num_bond_types: int, num_heads: int = 8, dropout: float = 0.2, output_negative_slope: float = 0.2):  
-        super(GeATLayer, self).__init__()  
-        self.num_heads = num_heads  
-        self.embed_dim = embed_dim  
-        self.num_bond_types = num_bond_types  
-          
-        # Linear layers for query, key, and value transformations  
-        self.Q_w = nn.Linear(embed_dim, embed_dim * num_heads)  
-        self.K_w = nn.Linear(embed_dim, embed_dim * num_heads)  
-        self.V_w = nn.Linear(embed_dim, embed_dim * num_heads)  
-          
-        # Edge embeddings for bond types and directions  
-        self.edge_type_embedding = nn.Embedding(len(BondTypes.get_bond_types()) + 1, embed_dim * num_heads)  
-        self.edge_direction_embedding = nn.Embedding(len(BondDirections.get_bond_directions()) + 1, embed_dim * num_heads)  
-          
-        self.dropout_layer = nn.Dropout(dropout)  
-        self.project = nn.Linear(embed_dim * num_heads, embed_dim)  
-        self.leaky_relu = nn.LeakyReLU(negative_slope=output_negative_slope)  
-  
-    def forward(self, atom_embeddings, edge_index=None, edge_attr=None):  
-        """  
-        Forward pass with edge list inputs.  
-        :param atom_embeddings: [B_N, embed_dim] or [B, N, embed_dim]  
-        :param edge_index: [2, E] - sparse edge indices  
-        :param edge_attr: [E, 2] - edge attributes (bond_type, bond_direction)   
-        """  
-        B_N = atom_embeddings.size(0)  
-          
-        # Compute Q, K, V for all nodes  
-        src_embeddings = self.Q_w(atom_embeddings)  # [B_N, embed_dim * num_heads]  
-        dst_embeddings = self.K_w(atom_embeddings)  # [B_N, embed_dim * num_heads]  
-        value_embeddings = self.V_w(atom_embeddings)  # [B_N, embed_dim * num_heads]  
-          
-        # Get source and target node features for each edge  
-        row, col = edge_index  # row=source, col=target  
-        src_features = src_embeddings[row]  # [E, embed_dim * num_heads]  
-        dst_features = dst_embeddings[col]  # [E, embed_dim * num_heads]  
-        value_features = value_embeddings[row]  # [E, embed_dim * num_heads]  
-          
-        # Compute edge embeddings  
-        edge_embeddings = (self.edge_type_embedding(edge_attr[:, 0]) +   
-                          self.edge_direction_embedding(edge_attr[:, 1]))  # [E, embed_dim * num_heads]  
-          
-        # Compute attention scores for each edge  
-        # Dot product attention between source and target, modulated by edge embeddings  
-        attention_scores = (src_features * dst_features).sum(dim=-1) / (self.embed_dim * self.num_heads) ** 0.5  
-        attention_scores = attention_scores + (src_features * edge_embeddings).sum(dim=-1) * 0.1  # Edge modulation  
-        attention_scores = self.leaky_relu(attention_scores)  
-          
-        # Apply softmax over neighbors for each target node  
-        attention_scores = torch_geometric.utils.softmax(attention_scores, col, num_nodes=B_N)  
-        attention_scores = self.dropout_layer(attention_scores)  
-          
-        # Aggregate messages  
-        out = torch.zeros(B_N, self.embed_dim * self.num_heads, 
-                         device=atom_embeddings.device, dtype=atom_embeddings.dtype) 
-        out = out.index_add(0, col, attention_scores.unsqueeze(-1) * value_features)  # Scatter add to target nodes  
-          
-        # Project back to original dimension  
-        out = self.project(out)  # [B_N, embed_dim]  
-          
-        return out  
+class GeATLayer(nn.Module):
+    """
+    Graph Edge Attention Transformer Layer using explicit Edge Attention.
+    Replaces manual attention with MultiHeadEdgeAttention_ParallelBetweenBondtypes.
+    """
+
+    def __init__(
+        self,
+        embed_dim: int,
+        num_bond_types: int,
+        num_heads: int = 8,
+        dropout: float = 0.2,
+        output_negative_slope: float = 0.2,
+    ):
+        super(GeATLayer, self).__init__()
+        self.num_heads = num_heads
+        self.embed_dim = embed_dim
+        self.num_bond_types = num_bond_types
+
+        # Linear projections for Q, K, V (shared across heads in input)
+        self.Q_w = nn.Linear(embed_dim, embed_dim * num_heads)
+        self.K_w = nn.Linear(embed_dim, embed_dim * num_heads)
+        self.V_w = nn.Linear(embed_dim, embed_dim * num_heads)
+
+        # Use the powerful edge-aware multi-head attention
+        self.edge_attention = MultiHeadEdgeAttention(
+            atom_embedding_dim=embed_dim,
+            num_bond_types=num_bond_types,
+            num_heads=num_heads,
+            output_negative_slope=output_negative_slope,
+        )
+
+        self.dropout_layer = nn.Dropout(dropout)
+        self.project = nn.Linear(embed_dim * num_heads, embed_dim)
+        self.norm_after_attn = nn.LayerNorm(embed_dim * num_heads)  # optional but stabilizing
+
+    def forward(self, atom_embeddings, edge_index=None, edge_attr=None):
+        """
+        Args:
+            atom_embeddings: [B_N, embed_dim]
+            edge_index: [2, E]
+            edge_attr: [E, 2] — (bond_type, bond_direction); only bond_type used
+        Returns:
+            out: [B_N, embed_dim]
+        """
+        B_N = atom_embeddings.size(0)
+
+        # Project to multi-head space
+        Q = self.Q_w(atom_embeddings)  # [B_N, embed_dim * num_heads]
+        K = self.K_w(atom_embeddings)  # [B_N, embed_dim * num_heads]
+        V = self.V_w(atom_embeddings)  # [B_N, embed_dim * num_heads]
+
+        # Compute multi-head edge-aware attention scores: [E, num_heads]
+        attn_scores = self.edge_attention(
+            src_embeddings=Q,
+            dst_embeddings=K,
+            edge_index=edge_index,
+            edge_attr=edge_attr,
+        )  # shape: (num_edges, num_heads)
+
+        # Apply softmax over neighbors for each target node (per head)
+        row, col = edge_index
+        attn_probs = torch_geometric.utils.softmax(attn_scores, col, num_nodes=B_N)  # [E, num_heads]
+        attn_probs = self.dropout_layer(attn_probs)
+
+        # Gather source values
+        V_src = V[row]  # [E, embed_dim * num_heads]
+        V_src = V_src.view(-1, self.num_heads, self.embed_dim)  # [E, num_heads, embed_dim]
+
+        # Weighted aggregation per head
+        messages = attn_probs.unsqueeze(-1) * V_src  # [E, num_heads, embed_dim]
+        out = torch.zeros(
+            B_N, self.num_heads, self.embed_dim,
+            device=atom_embeddings.device,
+            dtype=atom_embeddings.dtype,
+        )
+        out = out.index_add_(0, col, messages)  # [B_N, num_heads, embed_dim]
+
+        # Reshape and project back
+        out = out.view(B_N, self.embed_dim * self.num_heads)  # [B_N, embed_dim * num_heads]
+        out = self.project(out)  # [B_N, embed_dim]
+
+        return out
   
 class GeATBackbone(nn.Module):  
     """  
@@ -191,7 +205,7 @@ class GeATNeck(nn.Module):
         
 class GeATNet(nn.Module):  
     """  
-    A :class:`GeATNet` is a module for molecular property prediction using GeAT. It outputs a single scalar value representing the predicted property of the molecule.  
+    A :class:`GeATNet` is a module for molecular embeddings generation using GeAT.
     :class:`GeATNet` follows 3 steps:  
     1. uses multiple :class:`GeATLayer` instances to compute new embeddings for atoms based on their neighbors. To note, before each inner layer, the embeddings are residual added to the embeddings from the previous layer and then layer normalized.  
     2. applies an extra global attention mechanism to aggregate the information from all atoms.  

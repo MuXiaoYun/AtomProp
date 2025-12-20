@@ -15,7 +15,7 @@ logdir = "pretrain_pubchem_geat"
 dataset_size = -1
 chunk_size = 65536
 max_atom_num = 128
-batch_size = 64
+batch_size = 224
 
 # Weight settings
 fixed_log_vars = torch.tensor([-3.077, -10.000, -0.487, 1.426, -1.763, 2.155], dtype=torch.float32)
