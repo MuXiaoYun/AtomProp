@@ -4,12 +4,16 @@ import torch
 
 # configs/config.py
 
+# Training
+from_scratch = False
+from_model_path = "trained_models/pretrain_pubchem_geat/model_epoch7.pth"
+
 # Dataset and I/O
 data_path = "data/zinc15/dataset/zinc_standard_agent/processed/smiles.csv"
 # data_path = "data/pubchem/pubchem-10m.txt"
 pretrain_file_type = 'txt'
 
-logdir = "pretrain_pubchem_geat"
+logdir = "pretrain_pubchem_geat_continue"
 
 # Data settings
 dataset_size = -1
@@ -18,7 +22,7 @@ max_atom_num = 128
 batch_size = 224
 
 # Weight settings
-fixed_log_vars = torch.tensor([-3.077, -10.000, -0.487, 1.426, -1.763, 2.155], dtype=torch.float32)
+fixed_log_vars = torch.tensor([-3.0956, -10.0055, -0.0008, 0.875, -1.7909, 2.7035], dtype=torch.float32)
 
 # Training settings
 num_epochs = 8

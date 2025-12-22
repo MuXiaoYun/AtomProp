@@ -6,7 +6,7 @@ from atomprop.utils.mlp import MLP
 from atomprop.utils.mask import MolGraphMask
 from atomprop.utils.groups import TripletGroup, QuadrupletGroup
 from atomprop.utils.features import FunctionalGroupUtils
-from atomprop.utils.weights import WeightStratergy, EqualWeightStratergy, HardSwitch, SoftSwitch, GradNorm, ParetoOpt, UncertaintyWeighting, FixedUncertaintyWeighting
+from atomprop.utils.weights import WeightStratergy, EqualWeightStratergy, HardSwitch, SoftSwitch, GradNorm, ParetoOpt, UncertaintyWeighting, AdaptiveUncertaintyWeighting, FixedUncertaintyWeighting
 from atomprop.utils.scaffold import ScaffoldSimilarityMatrix
 from atomprop.embeddings.AtomEmbedding import BondTypes
 import matplotlib.pyplot as plt
@@ -58,6 +58,12 @@ head1 = MLP(input_dim=embed_dim, hidden_dim=512, output_dim=embed_dim, num_layer
 head4 = MLP(input_dim=embed_dim, hidden_dim=128, output_dim=len(fg_list), num_layers=2, dropout=0.5) # used for functional group prediction
 aggrmodel = GNNAggr(embed_dim=embed_dim, aggr='mean')
 
+if cfg.from_scratch == False:
+    # load weights
+    ckpt = torch.load(cfg.from_model_path, weights_only=False)
+    backbone.load_state_dict(ckpt['backbone_state_dict'])
+    neck.load_state_dict(ckpt['neck_state_dict'])
+
 task0 = NodeAttrPrediction()
 task1 = MaskedNodePrediction()
 task2 = GraphMaskContrast(less_rate=less_rate, more_rate=more_rate)
@@ -68,7 +74,7 @@ task7 = ScaffoldContrast()
 tasks = [task0, task1, task2, task3, task6, task7]
 task_types = ["classification", "regression", "other", "other", "classification", "other"]
 
-weight_stratergy = UncertaintyWeighting(num_tasks=len(tasks))
+weight_stratergy = FixedUncertaintyWeighting(num_tasks=len(tasks))
 
 def get_dataset_info(data_path):
     total_rows = sum(1 for _ in open(data_path)) - 1
@@ -362,7 +368,7 @@ if __name__ == "__main__":
                     loss_scaffold_contrast = task7.compute_loss()
 
                     losses = [loss_atom_attr_pred, loss_masked_atom_type_pred, loss_triplet_contrast, loss_batch_contrast, loss_functional_group_pred, loss_scaffold_contrast]
-                    loss = weight_stratergy(losses)
+                    loss = weight_stratergy(losses, cfg.fixed_log_vars)
 
                     # backward and step
                     loss.backward()
@@ -485,7 +491,7 @@ if __name__ == "__main__":
                         
                         losses = [loss_atom_attr_pred, loss_masked_atom_type_pred, loss_triplet_contrast, loss_batch_contrast, loss_functional_group_pred, loss_scaffold_contrast]
 
-                        loss = weight_stratergy(losses)
+                        loss = weight_stratergy(losses, cfg.fixed_log_vars)
                    
                         if batch_idx == val_loader.total_batches - 1:
                             metrics = {f"metrics_{i}": tasks[i].get_metrics() for i in range(len(tasks))}
@@ -524,8 +530,6 @@ if __name__ == "__main__":
                     torch.save({
                         'backbone_state_dict': backbone.state_dict(),
                         'neck_state_dict': neck.state_dict(),
-                        'head_state_dict': head0.state_dict(),
-                        'head1_state_dict': head1.state_dict(),
                         'optimizer_state_dict': {name: opt.state_dict() for name, opt in optimizers.items()},
                         'scheduler_state_dict': {name: sch.state_dict() for name, sch in schedulers.items()},
                         'epoch': epoch,
@@ -536,8 +540,6 @@ if __name__ == "__main__":
                 torch.save({
                     'backbone_state_dict': backbone.state_dict(),
                     'neck_state_dict': neck.state_dict(),
-                    'head_state_dict': head0.state_dict(),
-                    'head1_state_dict': head1.state_dict(),
                     'optimizer_state_dict': {name: opt.state_dict() for name, opt in optimizers.items()},
                     'scheduler_state_dict': {name: sch.state_dict() for name, sch in schedulers.items()},
                     'epoch': epoch,
@@ -549,8 +551,6 @@ if __name__ == "__main__":
                 torch.save({
                     'backbone_state_dict': backbone.state_dict(),
                     'neck_state_dict': neck.state_dict(),
-                    'head_state_dict': head0.state_dict(),
-                    'head1_state_dict': head1.state_dict(),
                     'optimizer_state_dict': {name: opt.state_dict() for name, opt in optimizers.items()},
                     'scheduler_state_dict': {name: sch.state_dict() for name, sch in schedulers.items()},
                     'epoch': epoch,
