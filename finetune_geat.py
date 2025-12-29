@@ -19,21 +19,9 @@ import os
 import json
 from datetime import datetime
 from atomprop.models.GeAT import GeATNet
-from configs.config_finetune import (
-    data_path, x_col, exclude_list,
-    no_pretrain, pretrained_path, logdir,
-    batch_size, test_batch_size, num_epochs, random_state,
-    k_folds, frac_test,
-    embed_dim, aggr,
-    lr_backbone_neck, lr_head, lr_aggr,
-    T_max, eta_min_backbone_neck, eta_min_head, eta_min_aggr,
-    device_id
-)
+import configs.config_finetune as cfg
 
 criterion = MaskedBCELoss()
-
-os.makedirs(f"trained_models/{logdir}", exist_ok=True)
-
 
 def create_dataset_from_smiles_labels(smiles_list, labels_list):
     """Create PyG dataset from SMILES and labels"""
@@ -42,7 +30,6 @@ def create_dataset_from_smiles_labels(smiles_list, labels_list):
         atom_info, edge_info, mol = SMILESToInputs.convert(smi, sanitize=False)
         if atom_info is None or edge_info is None:
             continue
-        
         if edge_info.dim() == 2 and edge_info.size(1) == 4:
             edge_index = edge_info[:, :2].t().contiguous()
             edge_attr = edge_info[:, 2:]
@@ -118,9 +105,7 @@ def evaluate_model(model_components, dataloader, criterion, y_cols, device, aggr
     return avg_loss, mean_auc, task_aucs, all_preds, all_labels
 
 
-def train_fold(fold_idx, train_dataloader, val_dataloader, test_dataloader, 
-               model_components, optimizers, schedulers, device, 
-               num_epochs, y_cols, logdir, no_pretrain, aggr='attention'):
+def train_fold(fold_idx, train_dataloader, val_dataloader, test_dataloader, model_components, optimizers, schedulers, device, num_epochs, y_cols, logdir, no_pretrain, aggr='attention'):
     """Train a single fold"""
     backbone, neck, head, aggrmodel = model_components
     writer = SummaryWriter(log_dir=f'runs/finetune_kfold_fold{fold_idx}')
@@ -133,7 +118,7 @@ def train_fold(fold_idx, train_dataloader, val_dataloader, test_dataloader,
         backbone.train()
         neck.train()
         head.train()
-        if aggr == 'attention':
+        if cfg.aggr == 'attention':
             aggrmodel.train()
         
         epoch_loss = 0.0
@@ -165,7 +150,7 @@ def train_fold(fold_idx, train_dataloader, val_dataloader, test_dataloader,
             scheduler.step()
         
         val_loss, val_auc, _, _, _ = evaluate_model(
-            model_components, val_dataloader, criterion, y_cols, device, aggr
+            model_components, val_dataloader, criterion, y_cols, device, cfg.aggr
         )
         print(f"Fold {fold_idx}, Epoch {epoch+1} Validation Loss: {val_loss:.4f}, AUC: {val_auc:.4f}")
         writer.add_scalar(f'Fold{fold_idx}/Val/Loss', val_loss, epoch)
@@ -184,7 +169,7 @@ def train_fold(fold_idx, train_dataloader, val_dataloader, test_dataloader,
                 'backbone_state_dict': backbone.state_dict(),
                 'neck_state_dict': neck.state_dict(),
                 'head_state_dict': head.state_dict(),
-                'aggr_state_dict': aggrmodel.state_dict() if aggr == 'attention' else None,
+                'aggr_state_dict': aggrmodel.state_dict() if cfg.aggr == 'attention' else None,
                 'val_auc': val_auc,
                 'val_loss': val_loss,
                 'optimizer_backbone_neck_state_dict': optimizers[0].state_dict(),
@@ -198,18 +183,18 @@ def train_fold(fold_idx, train_dataloader, val_dataloader, test_dataloader,
     
     # Test phase
     print(f"\n--- Testing Fold {fold_idx} ---")
-    model_suffix = "nopretrain" if no_pretrain else "pretrained"
+    model_suffix = "nopretrain" if cfg.no_pretrain else "pretrained"
     load_path = f"trained_models/{logdir}/fold{fold_idx}_best_model_{model_suffix}.pth"
-    checkpoint = torch.load(load_path, weights_only=False)
+    checkpoint = torch.load(load_path, weights_only=False, map_location=device)
     
     backbone.load_state_dict(checkpoint['backbone_state_dict'])
     neck.load_state_dict(checkpoint['neck_state_dict'])
     head.load_state_dict(checkpoint['head_state_dict'])
-    if aggr == 'attention' and checkpoint['aggr_state_dict']:
+    if cfg.aggr == 'attention' and checkpoint['aggr_state_dict']:
         aggrmodel.load_state_dict(checkpoint['aggr_state_dict'])
     
     test_loss, test_auc, test_task_aucs, all_test_preds, all_test_labels = evaluate_model(
-        model_components, test_dataloader, criterion, y_cols, device, aggr
+        model_components, test_dataloader, criterion, y_cols, device, cfg.aggr
     )
     
     print(f"Fold {fold_idx} Test Results:")
@@ -243,28 +228,42 @@ def train_fold(fold_idx, train_dataloader, val_dataloader, test_dataloader,
         'test_predictions_path': output_csv_path
     }
 
-
-if __name__ == "__main__":
-    # 1. Load data
-    df = pd.read_csv(data_path)
-    headers = df.columns.tolist()
-    y_cols = [col for col in headers if col not in exclude_list + [x_col]]
+def main(ft_dataset = None):
+    device = torch.device(cfg.device_str) if torch.cuda.is_available() else torch.device("cpu")
+    print(f"Using device: {device}")
     
-    smiles_list = df[x_col].tolist()
+    # 1. Load data
+    parser = argparse.ArgumentParser(description='Finetuning script')
+    parser.add_argument('--dataset', type=str, default = '', help='The downstream task for finetuning.')
+    args = parser.parse_args()
+    
+    if ft_dataset is None:
+        ft_dataset = args.dataset
+
+    if len(ft_dataset) > 0:
+        cfg.set_data_path(ft_dataset)
+        print(f"Finetuning on {ft_dataset}...")
+    
+    os.makedirs(f"trained_models/{cfg.logdir}", exist_ok=True)
+    df = pd.read_csv(cfg.data_path)
+    headers = df.columns.tolist()
+    y_cols = [col for col in headers if col not in cfg.exclude_list + [cfg.x_col]]
+    
+    smiles_list = df[cfg.x_col].tolist()
     df[y_cols] = df[y_cols].fillna(-1).astype(float)
     labels = df[y_cols].values.tolist()
     
     # 2. Initialize base model components (for weight loading if needed)
-    backbone = Embedder(num_atom_types=120, embed_dim=embed_dim)
-    neck = GeATNet(embed_dim=embed_dim, dropout=0.5)
-    aggrmodel = GNNAggr(embed_dim=embed_dim, aggr=aggr, layers=1)
+    backbone = Embedder(num_atom_types=120, embed_dim=cfg.embed_dim)
+    neck = GeATNet(embed_dim=cfg.embed_dim, dropout=0.5, geat_num_layers=cfg.geat_num_layers, aggr_num_layers=cfg.aggr_num_layers)
+    aggrmodel = GNNAggr(embed_dim=cfg.embed_dim, aggr=cfg.aggr, layers=1)
     
-    if no_pretrain == False:
-        ckpt = torch.load(pretrained_path, weights_only=False)
+    if cfg.no_pretrain == False:
+        ckpt = torch.load(cfg.pretrained_path, weights_only=False, map_location=device)
         backbone.load_state_dict(ckpt['backbone_state_dict'])
         neck.load_state_dict(ckpt['neck_state_dict'])
     
-    head = MLP(input_dim=embed_dim, hidden_dim=384, output_dim=len(y_cols),
+    head = MLP(input_dim=cfg.embed_dim, hidden_dim=384, output_dim=len(y_cols),
                num_layers=2, dropout=0.5, batch_norm=True, output_activation=None)
     head.init_params(gain=2.0)
     
@@ -274,25 +273,18 @@ if __name__ == "__main__":
     
     # 3. Prepare dataset and splitter
     dc_dataset = NumpyDataset(X=labels, ids=smiles_list)
-    splitter = ScaffoldKFoldSplitter(fold=k_folds, frac_test=frac_test)
+    splitter = ScaffoldKFoldSplitter(fold=cfg.k_folds, frac_test=cfg.frac_test)
     
-    # 4. Set device
-    if torch.cuda.is_available() and device_id is not None and device_id >= 0:
-        device = torch.device(f'cuda:{device_id}')
-    else:
-        device = torch.device('cpu')
-    print(f"Using device: {device}")
-    
-    # 5. K-Fold CV
+    # 4. K-Fold CV
     all_fold_results = []
-    print(f"\nStarting {k_folds}-Fold Cross-Validation...")
-    print(f"Test set fraction: {frac_test}")
-    print(f"Training/Validation fraction: {1 - frac_test}\n")
+    print(f"\nStarting {cfg.k_folds}-Fold Cross-Validation...")
+    print(f"Test set fraction: {cfg.frac_test}")
+    print(f"Training/Validation fraction: {1 - cfg.frac_test}\n")
     
     fold_idx = 0
     for train_inds, valid_inds, test_inds in splitter.k_fold_split(dc_dataset):
         print(f"\n{'='*60}")
-        print(f"Training Fold {fold_idx + 1}/{k_folds}")
+        print(f"Training Fold {fold_idx + 1}/{cfg.k_folds}")
         print(f"{'='*60}")
         
         train_smiles = [dc_dataset.ids[i] for i in train_inds]
@@ -314,52 +306,52 @@ if __name__ == "__main__":
         print(f"Valid validation graphs: {len(val_dataset)}")
         print(f"Valid test graphs: {len(test_dataset)}")
         
-        train_dataloader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, collate_fn=Batch.from_data_list)
-        val_dataloader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, collate_fn=Batch.from_data_list)
-        test_dataloader = DataLoader(test_dataset, batch_size=test_batch_size, shuffle=False, collate_fn=Batch.from_data_list)
+        train_dataloader = DataLoader(train_dataset, batch_size=cfg.batch_size, shuffle=True, collate_fn=Batch.from_data_list)
+        val_dataloader = DataLoader(val_dataset, batch_size=cfg.batch_size, shuffle=False, collate_fn=Batch.from_data_list)
+        test_dataloader = DataLoader(test_dataset, batch_size=cfg.test_batch_size, shuffle=False, collate_fn=Batch.from_data_list)
         
         # Clone models per fold
-        backbone_fold = Embedder(num_atom_types=120, embed_dim=embed_dim)
-        neck_fold = GeATNet(embed_dim=embed_dim, dropout=0.5)
-        aggrmodel_fold = GNNAggr(embed_dim=embed_dim, aggr=aggr, layers=1)
-        head_fold = MLP(input_dim=embed_dim, hidden_dim=384, output_dim=len(y_cols),
+        backbone_fold = Embedder(num_atom_types=120, embed_dim=cfg.embed_dim)
+        neck_fold = GeATNet(embed_dim=cfg.embed_dim, dropout=0.5)
+        aggrmodel_fold = GNNAggr(embed_dim=cfg.embed_dim, aggr=cfg.aggr, layers=1)
+        head_fold = MLP(input_dim=cfg.embed_dim, hidden_dim=384, output_dim=len(y_cols),
                         num_layers=2, dropout=0.5, batch_norm=True, output_activation=None)
         head_fold.init_params(gain=2.0)
         
-        if not no_pretrain:
+        if not cfg.no_pretrain:
             backbone_fold.load_state_dict(backbone.state_dict())
             neck_fold.load_state_dict(neck.state_dict())
         
         backbone_fold = backbone_fold.to(device)
         neck_fold = neck_fold.to(device)
         head_fold = head_fold.to(device)
-        if aggr == 'attention':
+        if cfg.aggr == 'attention':
             aggrmodel_fold = aggrmodel_fold.to(device)
         
         # Optimizers
         optimizer_backbone_neck = torch.optim.Adam([
-            {'params': backbone_fold.parameters(), 'lr': lr_backbone_neck},
-            {'params': neck_fold.parameters(), 'lr': lr_backbone_neck}
+            {'params': backbone_fold.parameters(), 'lr': cfg.lr_backbone_neck},
+            {'params': neck_fold.parameters(), 'lr': cfg.lr_backbone_neck}
         ])
-        optimizer_head = torch.optim.Adam(head_fold.parameters(), lr=lr_head)
+        optimizer_head = torch.optim.Adam(head_fold.parameters(), lr=cfg.lr_head)
         optimizers = [optimizer_backbone_neck, optimizer_head]
         
-        if aggr == 'attention':
-            optimizer_aggr = torch.optim.Adam(aggrmodel_fold.parameters(), lr=lr_aggr)
+        if cfg.aggr == 'attention':
+            optimizer_aggr = torch.optim.Adam(aggrmodel_fold.parameters(), lr=cfg.lr_aggr)
             optimizers.append(optimizer_aggr)
         
         # Schedulers
         scheduler_backbone_neck = torch.optim.lr_scheduler.CosineAnnealingLR(
-            optimizer_backbone_neck, T_max=T_max, eta_min=eta_min_backbone_neck
+            optimizer_backbone_neck, T_max=cfg.T_max, eta_min=cfg.eta_min_backbone_neck
         )
         scheduler_head = torch.optim.lr_scheduler.CosineAnnealingLR(
-            optimizer_head, T_max=T_max, eta_min=eta_min_head
+            optimizer_head, T_max=cfg.T_max, eta_min=cfg.eta_min_head
         )
         schedulers = [scheduler_backbone_neck, scheduler_head]
         
-        if aggr == 'attention':
+        if cfg.aggr == 'attention':
             scheduler_aggr = torch.optim.lr_scheduler.CosineAnnealingLR(
-                optimizer_aggr, T_max=T_max, eta_min=eta_min_aggr
+                optimizer_aggr, T_max=cfg.T_max, eta_min=cfg.eta_min_aggr
             )
             schedulers.append(scheduler_aggr)
         
@@ -375,11 +367,11 @@ if __name__ == "__main__":
                 optimizers=optimizers,
                 schedulers=schedulers,
                 device=device,
-                num_epochs=num_epochs,
+                num_epochs=cfg.num_epochs,
                 y_cols=y_cols,
-                logdir=logdir,
-                no_pretrain=no_pretrain,
-                aggr=aggr
+                logdir=cfg.logdir,
+                no_pretrain=cfg.no_pretrain,
+                aggr=cfg.aggr
             )
             all_fold_results.append(fold_result)
         except KeyboardInterrupt:
@@ -391,7 +383,7 @@ if __name__ == "__main__":
         
         fold_idx += 1
     
-    # 6. Summary
+    # 5. Summary
     print(f"\n{'='*60}")
     print("K-FOLD CROSS-VALIDATION SUMMARY")
     print(f"{'='*60}")
@@ -419,13 +411,13 @@ if __name__ == "__main__":
         
         summary = {
             'timestamp': datetime.now().isoformat(),
-            'dataset': data_path,
-            'k_folds': k_folds,
-            'frac_test': frac_test,
-            'num_epochs': num_epochs,
-            'batch_size': batch_size,
-            'no_pretrain': no_pretrain,
-            'aggr': aggr,
+            'dataset': cfg.data_path,
+            'k_folds': cfg.k_folds,
+            'frac_test': cfg.frac_test,
+            'num_epochs': cfg.num_epochs,
+            'batch_size': cfg.batch_size,
+            'cfg.no_pretrain': cfg.no_pretrain,
+            'aggr': cfg.aggr,
             'fold_results': all_fold_results,
             'summary_stats': {
                 'mean_val_auc': float(np.mean(val_aucs)),
@@ -437,11 +429,14 @@ if __name__ == "__main__":
             }
         }
         
-        summary_path = f"trained_models/{logdir}/kfold_summary.json"
+        summary_path = f"trained_models/{cfg.logdir}/kfold_summary.json"
         with open(summary_path, 'w') as f:
             json.dump(summary, f, indent=2)
         print(f"\nSummary saved to: {summary_path}")
     else:
         print("No folds were completed successfully.")
     
-    print(f"\nK-Fold cross-validation completed. Results saved in 'trained_models/{logdir}/'")
+    print(f"\nK-Fold cross-validation completed. Results saved in 'trained_models/{cfg.logdir}/'")
+    
+if __name__ == "__main__":
+    main()

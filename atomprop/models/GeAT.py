@@ -123,7 +123,7 @@ class GeATNeck(nn.Module):
         # Use MultiheadAttention with the original embed_dim.
         # PyTorch will internally split it into `global_num_heads` heads.
         self.global_attention = nn.MultiheadAttention(
-            embed_dim=embed_dim,          # ← Critical: use original embed_dim
+            embed_dim=embed_dim,
             num_heads=global_num_heads,
             dropout=dropout,
             batch_first=False
@@ -205,19 +205,17 @@ class GeATNeck(nn.Module):
         
 class GeATNet(nn.Module):  
     """  
-    A :class:`GeATNet` is a module for molecular embeddings generation using GeAT.
-    :class:`GeATNet` follows 3 steps:  
+    A :class:`GeATNet` is a module for molecular embeddings generation using GeAT.  
     1. uses multiple :class:`GeATLayer` instances to compute new embeddings for atoms based on their neighbors. To note, before each inner layer, the embeddings are residual added to the embeddings from the previous layer and then layer normalized.  
     2. applies an extra global attention mechanism to aggregate the information from all atoms.  
-    3. applies a feedforward network to predict the molecular property.  
     """  
       
-    def __init__(self, embed_dim: int, num_bond_types = None, num_heads: int = 8, global_num_heads = 8, output_negative_slope: float = 0.2, dropout: int = 0.2, geat_num_layers: int = 5):  
+    def __init__(self, embed_dim: int, num_bond_types = None, num_heads: int = 8, global_num_heads = 8, output_negative_slope: float = 0.2, dropout: int = 0.2, geat_num_layers: int = 5, aggr_num_layers: int = 3):  
         super(GeATNet, self).__init__()
         if num_bond_types is None:
             num_bond_types = len(BondTypes.get_bond_types())+1  
         self.backbone = GeATBackbone(embed_dim=embed_dim, num_bond_types=num_bond_types, num_heads=num_heads, output_negative_slope=output_negative_slope, dropout=dropout, geat_num_layers=geat_num_layers)  
-        self.neck = GeATNeck(embed_dim=embed_dim, global_num_heads=global_num_heads, dropout=dropout)  
+        self.neck = nn.ModuleList([GeATNeck(embed_dim=embed_dim, global_num_heads=global_num_heads, dropout=dropout) for _ in range(aggr_num_layers)])
                   
     def forward(self, data, batch=None):  
         """  
@@ -230,5 +228,6 @@ class GeATNet(nn.Module):
         edge_index = data.edge_index
         edge_attr = data.edge_attr
         atom_embeddings = self.backbone(x, edge_index, edge_attr)  
-        output = self.neck(atom_embeddings, batch)
-        return output
+        for aggr_layer in self.neck:
+            atom_embeddings = aggr_layer(atom_embeddings, batch)
+        return atom_embeddings

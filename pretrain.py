@@ -46,6 +46,8 @@ less_rate = 0.1
 more_rate = 0.3
 embed_dim = 384
 
+BondTypes.set_bond_types(["SINGLE", "DOUBLE", "TRIPLE", 'AROMATIC'])
+
 device = torch.device("cuda:7") if torch.cuda.is_available() else torch.device("cpu")
 
 if fg_list is None:
@@ -163,8 +165,6 @@ if __name__ == "__main__":
 
         train_indices, val_indices, test_indices = create_data_splits(total_rows)
         print(f"Train set size: {len(train_indices)}, Val set size: {len(val_indices)}, Test set size: {len(test_indices)}")
-
-        BondTypes.set_bond_types(["SINGLE", "DOUBLE", "TRIPLE", 'AROMATIC'])
 
         print(f"Using computing device: {device}")
         backbone.to(device)

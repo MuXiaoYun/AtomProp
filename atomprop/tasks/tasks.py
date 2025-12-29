@@ -8,6 +8,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import functools
+from atomprop.utils.weights import log_var_lower_bound, log_var_upper_bound
 
 def nan_to_zero(name: str):
     """
@@ -73,7 +74,7 @@ class MaskedNodePrediction:
     Masked node type prediction task.
     """
 
-    def __init__(self, criterion=nn.MSELoss()):
+    def __init__(self, criterion=nn.BCEWithLogitsLoss()):
         self.criterion = criterion
         self.preds = None
         self.labels = None

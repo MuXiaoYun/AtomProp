@@ -5,6 +5,9 @@ import torch
 from atomprop.utils.grads_utils import find_optimal_weights
 import torch.nn as nn
 
+log_var_lower_bound = -10
+log_var_upper_bound = 10
+
 class WeightStratergy:
     """
     Base class for weight stratergy.
@@ -168,7 +171,7 @@ class UncertaintyWeighting(nn.Module):
         """
         total_loss = 0
         for i, loss in enumerate(losses):
-            log_var_clamped = torch.clamp(self.log_vars[i], -10, 10)
+            log_var_clamped = torch.clamp(self.log_vars[i], log_var_lower_bound, log_var_upper_bound)
             precision = torch.exp(-log_var_clamped)
             total_loss += 0.5 * precision * loss + 0.5 * log_var_clamped
         return total_loss    
@@ -190,7 +193,7 @@ class AdaptiveUncertaintyWeighting(nn.Module):
         """
         total_loss = 0
         for i, loss in enumerate(losses):
-            log_var_clamped = torch.clamp(self.log_vars[i], -10, 10)
+            log_var_clamped = torch.clamp(self.log_vars[i], log_var_lower_bound, log_var_upper_bound)
             precision = torch.exp(-log_var_clamped)
             if self.loss_types[i] == "regression":
                 total_loss += 0.5 * precision * loss + 0.5 * log_var_clamped

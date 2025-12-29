@@ -54,7 +54,7 @@ if fg_list is None:
 backbone = Embedder(num_atom_types=120, embed_dim=embed_dim)
 neck = GeATNet(embed_dim=embed_dim, dropout=0.5)
 head0 = MLP(input_dim=embed_dim, hidden_dim=128, output_dim=157, num_layers=2, dropout=0.5) # used for atom attribute prediction
-head1 = MLP(input_dim=embed_dim, hidden_dim=512, output_dim=embed_dim, num_layers=2, dropout=0.5) # used for masked node prediction
+head1 = MLP(input_dim=embed_dim, hidden_dim=128, output_dim=120, num_layers=2, dropout=0.5) # used for masked node prediction
 head4 = MLP(input_dim=embed_dim, hidden_dim=128, output_dim=len(fg_list), num_layers=2, dropout=0.5) # used for functional group prediction
 aggrmodel = GNNAggr(embed_dim=embed_dim, aggr='mean')
 
@@ -330,7 +330,7 @@ if __name__ == "__main__":
                     outputs1 = head1(graph_emb1_masked)
                     outputs1 = outputs1.view(-1, outputs1.size(-1))
                     task1.set_pred(outputs1)
-                    task1_labels = graph_emb[mask_indices]
+                    task1_labels = nn.functional.one_hot(batch_data.x[mask_indices], num_classes=120)
                     task1.set_label(task1_labels)
                     loss_masked_atom_type_pred = task1.compute_loss()
 
@@ -452,7 +452,7 @@ if __name__ == "__main__":
                         outputs1 = head1(graph_emb1_masked)
                         outputs1 = outputs1.view(-1, outputs1.size(-1))
                         task1.set_pred(outputs1)
-                        task1_labels = graph_emb[mask_indices]
+                        task1_labels = nn.functional.one_hot(batch_data.x[mask_indices], num_classes=120)
                         task1.set_label(task1_labels)
                         loss_masked_atom_type_pred = task1.compute_loss()
 
