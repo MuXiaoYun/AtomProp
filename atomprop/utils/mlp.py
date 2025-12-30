@@ -93,7 +93,7 @@ class MoE(nn.Module):
         batch_norm: bool = False,
         hidden_activation=F.relu,
         output_activation=None,
-        gating_dropout: float = 0.5,
+        gating_dropout: float = 0.2,
     ):
         super(MoE, self).__init__()
         self.num_experts = num_experts

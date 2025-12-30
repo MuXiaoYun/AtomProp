@@ -102,16 +102,16 @@ class GeATConv(nn.Module):
     A :class:`GeATConv` is a module for molecular representation learning using GeAT. 
     It uses residual connections and outputs atom embeddings.  
     """  
-    def __init__(self, embed_dim: int, num_bond_types: int, num_heads: int = 8, output_negative_slope: float = 0.2, dropout: int = 0.2, geat_num_layers: int = 5):  
+    def __init__(self, embed_dim: int, num_bond_types: int, num_heads: int = 8, output_negative_slope: float = 0.2, dropout: float = 0.2, geat_num_layers: int = 5):  
         super(GeATConv, self).__init__()  
         self.geat_layers = nn.ModuleList([GeATLayer(embed_dim=embed_dim, num_bond_types=num_bond_types, num_heads=num_heads, output_negative_slope=output_negative_slope, dropout=dropout) for _ in range(geat_num_layers)])  
         self.norm_layers = nn.ModuleList([nn.LayerNorm(embed_dim) for _ in range(geat_num_layers)])  
   
     def forward(self, atom_embeddings, edge_embeddings, edge_index=None, edge_attr=None):
-        atom_embeddings_c = atom_embeddings + edge_embeddings
+        atom_embeddings_c = atom_embeddings.clone()
         for i, layer in enumerate(self.geat_layers):
             residual = atom_embeddings_c
-            atom_embeddings_c = layer(atom_embeddings_c, edge_index, edge_attr)
+            atom_embeddings_c = layer(atom_embeddings_c, edge_embeddings, edge_index, edge_attr)
             atom_embeddings_c = self.norm_layers[i](residual + atom_embeddings_c)
         return atom_embeddings_c
   
@@ -126,10 +126,10 @@ class GlobalAttnConv(nn.Module):
         self.norm_layers = nn.ModuleList([nn.LayerNorm(embed_dim) for _ in range(attn_num_layers)])
         
     def forward(self, atom_embeddings, edge_embeddings, batch=None):
-        atom_embeddings_c = atom_embeddings + edge_embeddings
+        atom_embeddings_c = atom_embeddings.clone()
         for i, layer in enumerate(self.global_attns):
             residual = atom_embeddings_c
-            atom_embeddings_c = layer(atom_embeddings_c, batch)
+            atom_embeddings_c = layer(atom_embeddings_c, edge_embeddings, batch)
             atom_embeddings_c = self.norm_layers[i](residual + atom_embeddings_c)
         return atom_embeddings_c
         
@@ -179,6 +179,7 @@ class GeATNet(nn.Module):
                        batch_norm=True,
                        hidden_activation=nn.ReLU(),
                        output_activation=None)
+        self.edge_type_embedding = nn.Embedding(len(BondTypes.get_bond_types())+1, embed_dim)
         self.edge_direction_embedding = nn.Embedding(len(BondDirections.get_bond_directions())+1, embed_dim)
         
         self.reset_parameters()
@@ -205,3 +206,44 @@ class GeATNet(nn.Module):
         aggr_embeddings = self.neck(geat_embeddings, edge_embeddings, batch)  
         output = self.ffn(aggr_embeddings)
         return output
+
+    def print_params(self):
+        """  
+        Print the number of trainable parameters for each sub-module and total.  
+        """
+        def count_params(module):
+            return sum(p.numel() for p in module.parameters() if p.requires_grad)
+
+        total_params = 0
+        print("=" * 60)
+        print("Parameter Count per Submodule in GeATNet")
+        print("=" * 60)
+
+        # Backbone (GeATConv)
+        backbone_params = count_params(self.backbone)
+        print(f"{'Backbone (GeATConv)':<40}: {backbone_params:>12,}")
+        total_params += backbone_params
+
+        # Neck (GlobalAttnConv)
+        neck_params = count_params(self.neck)
+        print(f"{'Neck (GlobalAttnConv)':<40}: {neck_params:>12,}")
+        total_params += neck_params
+
+        # FFN (MoE)
+        ffn_params = count_params(self.ffn)
+        print(f"{'FFN (MoE)':<40}: {ffn_params:>12,}")
+        total_params += ffn_params
+
+        # Edge type embedding
+        edge_type_params = count_params(self.edge_type_embedding)
+        print(f"{'Edge Type Embedding':<40}: {edge_type_params:>12,}")
+        total_params += edge_type_params
+
+        # Edge direction embedding
+        edge_dir_params = count_params(self.edge_direction_embedding)
+        print(f"{'Edge Direction Embedding':<40}: {edge_dir_params:>12,}")
+        total_params += edge_dir_params
+
+        print("-" * 60)
+        print(f"{'Total Trainable Parameters':<40}: {total_params:>12,}")
+        print("=" * 60)
