@@ -14,14 +14,15 @@ class BondTypes:
     """
     A utility class to handle bond types.
     """
-    bond_types = [
-        "UNSPECIFIED", "SINGLE", "DOUBLE", "TRIPLE",
-        "QUADRUPLE", "QUINTUPLE", "HEXTUPLE", "ONEANDAHALF",
-        "TWOANDAHALF", "THREEANDAHALF", "FOURANDAHALF", "FIVEANDAHALF",
-        "AROMATIC", "IONIC", "HYDROGEN", "THREECENTER",
-        "DATIVEONE", "DATIVE", "DATIVEL", "DATIVER",
-        "OTHER", "ZERO"
-    ]
+    # bond_types = [
+    #     "UNSPECIFIED", "SINGLE", "DOUBLE", "TRIPLE",
+    #     "QUADRUPLE", "QUINTUPLE", "HEXTUPLE", "ONEANDAHALF",
+    #     "TWOANDAHALF", "THREEANDAHALF", "FOURANDAHALF", "FIVEANDAHALF",
+    #     "AROMATIC", "IONIC", "HYDROGEN", "THREECENTER",
+    #     "DATIVEONE", "DATIVE", "DATIVEL", "DATIVER",
+    #     "OTHER", "ZERO"
+    # ]
+    bond_types = ["SINGLE", "DOUBLE", "TRIPLE", "AROMATIC"]
 
     @staticmethod
     def get_bond_types():
@@ -39,14 +40,19 @@ class BondDirections:
     """
     A utility class to handle bond directions.
     """
+    # bond_directions = [
+    #     "NONE",
+    #     "BEGINWEDGE",
+    #     "BEGINDASH",
+    #     "ENDDOWNRIGHT",
+    #     "ENDUPRIGHT",
+    #     "EITHERDOUBLE",
+    #     "UNKNOWN"
+    # ]
     bond_directions = [
         "NONE",
-        "BEGINWEDGE",
-        "BEGINDASH",
         "ENDDOWNRIGHT",
         "ENDUPRIGHT",
-        "EITHERDOUBLE",
-        "UNKNOWN"
     ]
     
     @staticmethod
@@ -65,14 +71,18 @@ class AtomChirals:
     """
     A utility class to handle atom chirals.
     """
+    # atom_chirals = [
+    #     Chem.rdchem.ChiralType.CHI_ALLENE,
+    #     Chem.rdchem.ChiralType.CHI_OCTAHEDRAL,
+    #     Chem.rdchem.ChiralType.CHI_SQUAREPLANAR,
+    #     Chem.rdchem.ChiralType.CHI_TETRAHEDRAL,
+    #     Chem.rdchem.ChiralType.CHI_TETRAHEDRAL_CCW,
+    #     Chem.rdchem.ChiralType.CHI_TETRAHEDRAL_CW,
+    #     Chem.rdchem.ChiralType.CHI_TRIGONALBIPYRAMIDAL
+    # ]
     atom_chirals = [
-        Chem.rdchem.ChiralType.CHI_ALLENE,
-        Chem.rdchem.ChiralType.CHI_OCTAHEDRAL,
-        Chem.rdchem.ChiralType.CHI_SQUAREPLANAR,
-        Chem.rdchem.ChiralType.CHI_TETRAHEDRAL,
         Chem.rdchem.ChiralType.CHI_TETRAHEDRAL_CCW,
-        Chem.rdchem.ChiralType.CHI_TETRAHEDRAL_CW,
-        Chem.rdchem.ChiralType.CHI_TRIGONALBIPYRAMIDAL
+        Chem.rdchem.ChiralType.CHI_TETRAHEDRAL_CW
     ]
 
     @staticmethod

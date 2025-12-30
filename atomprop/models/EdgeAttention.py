@@ -20,7 +20,7 @@ class EdgeAttention(nn.Module):
   
     def __init__(self, atom_embedding_dim: int, num_bond_types: int, 
                  output_negative_slope: float = 0.2, attention_type: str = default_attention_type,
-                 mlp_hidden_dim: int = 512, mlp_num_layers: int = 3):  
+                 mlp_hidden_dim: int = 512, mlp_num_layers: int = 2):  
         super(EdgeAttention, self).__init__()  
         self.atom_d = atom_embedding_dim  
         self.num_bond_types = num_bond_types  
@@ -49,7 +49,7 @@ class EdgeAttention(nn.Module):
             for mlp in self.mlps:
                 mlp.init_params(gain=1.414)
   
-    def forward(self, src_embeddings, dst_embeddings, edge_index=None, edge_attr=None, edges=None):  
+    def forward(self, src_embeddings, dst_embeddings, edge_embeddings, edge_index=None, edge_attr=None):  
         """  
         Compute attention scores for edges between source and destination atom embeddings.  
         :param src_embeddings: Source atom embeddings of shape (batch_size, num_atoms, atom_embedding_dim) or (total_atoms, atom_embedding_dim)  
@@ -59,31 +59,10 @@ class EdgeAttention(nn.Module):
         :param edges: Optional edges tensor of shape (batch_size, num_atoms, num_atoms) for dense format (deprecated)  
         :return: Attention scores of shape (batch_size, num_atoms, num_atoms) or (num_edges,)  
         """  
-        # Handle both old edge matrix and new edge list formats  
-        if edges is not None:  
-            # Legacy behavior for backward compatibility - only supported for bilinear attention
-            if self.attention_type == 'mlp':
-                raise NotImplementedError("MLP attention does not support legacy edge matrix format. Use edge_index instead.")
-                
-            B, N, d = src_embeddings.shape  
-            T = self.num_bond_types  
-            # attention = qT a k
-            transformed_src = (src_embeddings @ self.a.view(d, d*T)).view(B, N, d, T)  # (B, N, d, T)  
-            attention_scores = (transformed_src.transpose(2, 3).reshape(B, N*T, d) @ dst_embeddings.transpose(1, 2)).transpose(1, 2).view(B, N, N, T)  # (B, N, N, T)  
-            # Edge mask  
-            attention_scores = attention_scores.gather(-1, edges.clamp(min=0).unsqueeze(-1)).squeeze(-1)  # (B, N, N)  
-            attention_scores = attention_scores.masked_fill(edges==-1, -1e10)  # (B, N, N)  
-            # Leaky ReLU activation  
-            attention_scores = torch.nn.functional.leaky_relu(attention_scores, negative_slope=self.output_negative_slope)  
-            return attention_scores  
-          
-        # New edge list implementation  
-        atom_embedding_dim = src_embeddings.shape[-1]  
-          
         # Get source and target node features for each edge  
         row, col = edge_index  # row=source, col=target  
         src_features = src_embeddings[row]  # [E, d]  
-        dst_features = dst_embeddings[col]  # [E, d]  
+        dst_features = (dst_embeddings+edge_embeddings)[col]  # [E, d]  
           
         # Get bond types from edge_attr  
         bond_types = edge_attr[:, 0]  # [E]  
@@ -180,7 +159,7 @@ class MultiHeadEdgeAttention_ParallelBetweenBondtypes(nn.Module):
         output_negative_slope: float = 0.2,
         attention_type: str = default_attention_type,
         mlp_hidden_dim: int = 512,
-        mlp_num_layers: int = 3,
+        mlp_num_layers: int = 2,
     ):
         super().__init__()
         self.atom_embedding_dim = atom_embedding_dim
@@ -218,13 +197,7 @@ class MultiHeadEdgeAttention_ParallelBetweenBondtypes(nn.Module):
         # Optional: keep LeakyReLU if needed elsewhere (not used in score computation here)
         self.leakyrelu = nn.LeakyReLU(negative_slope=output_negative_slope)
  
-    def forward(
-        self,
-        src_embeddings: torch.Tensor,
-        dst_embeddings: torch.Tensor,
-        edge_index: torch.Tensor,
-        edge_attr: torch.Tensor,
-    ) -> torch.Tensor:
+    def forward(self, src_embeddings, dst_embeddings, edge_embeddings, edge_index=None, edge_attr=None):
         """
         Compute edge-wise attention scores using bond-type-specific bilinear forms or MLPs.
  
@@ -243,7 +216,7 @@ class MultiHeadEdgeAttention_ParallelBetweenBondtypes(nn.Module):
         # Reshape to multi-head format: [N, H, D]
         N = src_embeddings.size(0)
         src = src_embeddings.view(N, self.num_heads, self.atom_embedding_dim)
-        dst = dst_embeddings.view(N, self.num_heads, self.atom_embedding_dim)
+        dst = (dst_embeddings+edge_embeddings).view(N, self.num_heads, self.atom_embedding_dim)
  
         # Initialize output scores
         attn_scores = torch.zeros(E, self.num_heads, device=device, dtype=src.dtype)
@@ -293,7 +266,7 @@ class MultiHeadEdgeAttention_SerialBetweenBondtypes(nn.Module):
   
     def __init__(self, atom_embedding_dim: int, num_bond_types: int, num_heads: int = 8, 
                  output_negative_slope: float = 0.2, attention_type: str = default_attention_type,
-                 mlp_hidden_dim: int = 512, mlp_num_layers: int = 3):  
+                 mlp_hidden_dim: int = 512, mlp_num_layers: int = 2):  
         super(MultiHeadEdgeAttention_SerialBetweenBondtypes, self).__init__()  
         self.num_heads = num_heads  
         self.atom_d = atom_embedding_dim  
@@ -325,7 +298,7 @@ class MultiHeadEdgeAttention_SerialBetweenBondtypes(nn.Module):
                 for h in range(num_heads):
                     self.mlps[t][h].init_params(gain=1.414)
   
-    def forward(self, src_embeddings, dst_embeddings, edge_index=None, edge_attr=None, edges=None):  
+    def forward(self, src_embeddings, dst_embeddings, edge_embeddings, edge_index=None, edge_attr=None):  
         """  
         Compute multi-head attention scores for edges between source and destination atom embeddings.  
         :param src_embeddings: Source atom embeddings of shape (batch_size, num_atoms, atom_embedding_dim * num_heads) or (total_atoms, atom_embedding_dim * num_heads)  
@@ -334,41 +307,14 @@ class MultiHeadEdgeAttention_SerialBetweenBondtypes(nn.Module):
         :param edge_attr: Edge attributes of shape (num_edges, 2) for sparse format  
         :param edges: Optional edges tensor of shape (batch_size, num_atoms, num_atoms) for dense format (deprecated)  
         :return: Attention scores of shape (batch_size, num_heads, num_atoms, num_atoms) or (num_edges, num_heads)  
-        """  
-        # Handle both old edge matrix and new edge list formats  
-        if edges is not None:  
-            # Legacy behavior for backward compatibility - only supported for bilinear attention
-            if self.attention_type == 'mlp':
-                raise NotImplementedError("MLP attention does not support legacy edge matrix format. Use edge_index instead.")
-                
-            B, N, d_ = src_embeddings.shape  
-            d = d_ // self.num_heads  
-            T = self.num_bond_types  
-            # attention = qT a k  
-            src_embeddings = src_embeddings.reshape(B, N, self.num_heads, d).permute(0, 2, 1, 3)  # (B, num_heads, N, d)  
-            dst_embeddings = dst_embeddings.reshape(B, N, self.num_heads, d).permute(0, 2, 1, 3)  # (B, num_heads, N, d)  
-            attention_scores = []  
-            for t in range(T):  
-                transformed_src = (src_embeddings @ self.a[:, :, t].view(self.num_heads, d, 1)).view(B, self.num_heads, N, d)  
-                attention_scores_t = (transformed_src.transpose(2, 3).reshape(B, self.num_heads, N, d) @ dst_embeddings.transpose(2, 3)).transpose(2, 3).view(B, self.num_heads, N, N)  # (B, num_heads, N, N)  
-                # Edge mask  
-                edges_t = edges == t  
-                attention_scores_t = attention_scores_t.masked_fill(edges_t.unsqueeze(1), -1e10)  # (B, num_heads, N, N)  
-                # Leaky ReLU activation  
-                attention_scores_t = torch.nn.functional.leaky_relu(attention_scores_t, negative_slope=self.output_negative_slope)  
-                attention_scores.append(attention_scores_t.unsqueeze(-1))  # (B, num_heads, N, N, 1)  
-            attention_scores = torch.cat(attention_scores, dim=-1)  # (B, num_heads, N, N, T)  
-            attention_scores = attention_scores.sum(dim=-1)  # Sum over bond types to get final attention scores  
-            return attention_scores  # (B, num_heads, N, N)  
-          
-        # New edge list implementation - serial processing  
+        """   
         B_N, d_ = src_embeddings.shape  
         d = d_ // self.num_heads  
           
         # Get source and target node features for each edge  
         row, col = edge_index  # row=source, col=target  
         src_features = src_embeddings[row]  # [E, d*num_heads]  
-        dst_features = dst_embeddings[col]  # [E, d*num_heads]  
+        dst_features = (dst_embeddings+edge_embeddings)[col]  # [E, d*num_heads]  
           
         # Reshape for multi-head processing  
         src_features = src_features.view(-1, self.num_heads, d)  # [E, num_heads, d]  

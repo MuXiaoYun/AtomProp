@@ -32,6 +32,8 @@ class GeATLayer(nn.Module):
         self.Q_w = nn.Linear(embed_dim, embed_dim * num_heads)
         self.K_w = nn.Linear(embed_dim, embed_dim * num_heads)
         self.V_w = nn.Linear(embed_dim, embed_dim * num_heads)
+        
+        self.edge_w = nn.Linear(embed_dim, embed_dim * num_heads)
 
         # Use the powerful edge-aware multi-head attention
         self.edge_attention = MultiHeadEdgeAttention(
@@ -45,7 +47,7 @@ class GeATLayer(nn.Module):
         self.project = nn.Linear(embed_dim * num_heads, embed_dim)
         self.norm_after_attn = nn.LayerNorm(embed_dim * num_heads)  # optional but stabilizing
 
-    def forward(self, atom_embeddings, edge_index=None, edge_attr=None):
+    def forward(self, atom_embeddings, edge_embeddings, edge_index=None, edge_attr=None):
         """
         Args:
             atom_embeddings: [B_N, embed_dim]
@@ -60,11 +62,13 @@ class GeATLayer(nn.Module):
         Q = self.Q_w(atom_embeddings)  # [B_N, embed_dim * num_heads]
         K = self.K_w(atom_embeddings)  # [B_N, embed_dim * num_heads]
         V = self.V_w(atom_embeddings)  # [B_N, embed_dim * num_heads]
+        E = self.edge_w(edge_embeddings)
 
         # Compute multi-head edge-aware attention scores: [E, num_heads]
         attn_scores = self.edge_attention(
             src_embeddings=Q,
             dst_embeddings=K,
+            edge_embeddings=E,
             edge_index=edge_index,
             edge_attr=edge_attr,
         )  # shape: (num_edges, num_heads)
@@ -103,12 +107,12 @@ class GeATBackbone(nn.Module):
         self.geat_layers = nn.ModuleList([GeATLayer(embed_dim=embed_dim, num_bond_types=num_bond_types, num_heads=num_heads, output_negative_slope=output_negative_slope, dropout=dropout) for _ in range(geat_num_layers)])  
         self.norm_layers = nn.ModuleList([nn.LayerNorm(embed_dim) for _ in range(geat_num_layers)])  
   
-    def forward(self, atom_embeddings, edge_index=None, edge_attr=None):
-        atom_embeddings_c = atom_embeddings.clone()
+    def forward(self, atom_embeddings, edge_embeddings, edge_index=None, edge_attr=None):
+        atom_embeddings_c = atom_embeddings + edge_embeddings
         for i, layer in enumerate(self.geat_layers):
             residual = atom_embeddings_c
             atom_embeddings_c = layer(atom_embeddings_c, edge_index, edge_attr)
-            atom_embeddings_c = self.norm_layers[i](residual + atom_embeddings_c)  # ← Add this!
+            atom_embeddings_c = self.norm_layers[i](residual + atom_embeddings_c)
         return atom_embeddings_c
   
 class GeATNeck(nn.Module):
@@ -130,9 +134,9 @@ class GeATNeck(nn.Module):
         )
         # LayerNorm applied after residual connection
         self.norm_layer = nn.LayerNorm(embed_dim)
-        self.embed_dim = embed_dim
+        self.embed_dim = embed_dim  
 
-    def forward(self, atom_embeddings: torch.Tensor, batch: torch.Tensor = None) -> torch.Tensor:
+    def forward(self, atom_embeddings, edge_embeddings, batch=None):
         """
         Forward pass with batched processing of multiple graphs.
 
@@ -171,7 +175,7 @@ class GeATNeck(nn.Module):
         for i in range(batch_size):
             indices = graph_indices_list[i]
             if len(indices) > 0:
-                X_padded[i, :len(indices)] = atom_embeddings[indices]
+                X_padded[i, :len(indices)] = (atom_embeddings+edge_embeddings)[indices]
 
         # Create key_padding_mask: True means ignore, False means attend
         key_padding_mask = torch.ones(batch_size, max_graph_size, dtype=torch.bool, device=device)
@@ -216,7 +220,17 @@ class GeATNet(nn.Module):
             num_bond_types = len(BondTypes.get_bond_types())+1  
         self.backbone = GeATBackbone(embed_dim=embed_dim, num_bond_types=num_bond_types, num_heads=num_heads, output_negative_slope=output_negative_slope, dropout=dropout, geat_num_layers=geat_num_layers)  
         self.neck = nn.ModuleList([GeATNeck(embed_dim=embed_dim, global_num_heads=global_num_heads, dropout=dropout) for _ in range(aggr_num_layers)])
-                  
+        self.edge_type_embedding = nn.Embedding(len(BondTypes.get_bond_types())+1, embed_dim)
+        self.edge_direction_embedding = nn.Embedding(len(BondDirections.get_bond_directions())+1, embed_dim)
+        self.reset_parameters()
+        
+    def reset_parameters(self):
+        """  
+        Reset parameters of the model.  
+        """  
+        nn.init.xavier_uniform_(self.edge_direction_embedding.weight)
+        nn.init.xavier_uniform_(self.edge_type_embedding.weight)      
+    
     def forward(self, data, batch=None):  
         """  
         Forward pass of the GeATNet.  
@@ -227,7 +241,8 @@ class GeATNet(nn.Module):
         x = data.x
         edge_index = data.edge_index
         edge_attr = data.edge_attr
-        atom_embeddings = self.backbone(x, edge_index, edge_attr)  
+        edge_embeddings = self.edge_type_embedding(edge_attr[:,0]) + self.edge_direction_embedding(edge_attr[:,1])
+        atom_embeddings = self.backbone(x, edge_embeddings, edge_index, edge_attr)  
         for aggr_layer in self.neck:
-            atom_embeddings = aggr_layer(atom_embeddings, batch)
+            atom_embeddings = aggr_layer(atom_embeddings, edge_embeddings, batch)
         return atom_embeddings

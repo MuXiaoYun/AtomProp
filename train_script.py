@@ -69,7 +69,7 @@ def run_task_on_gpu(args):
 
             # Import inside subprocess to avoid cross-process contamination
             import configs.config_finetune as cfg
-            from finetune_geat import main
+            from finetune import main
 
             # Override config
             cfg.geat_num_layers = geat_l

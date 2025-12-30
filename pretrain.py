@@ -1,11 +1,12 @@
 from atomprop.tasks.tasks import NodeAttrPrediction, MaskedNodePrediction, GraphMaskContrast, BatchContrast, BondAnglePrediction, DihedralAnglePrediction, FunctionalGroupsPrediction, ScaffoldContrast
 from atomprop.dataloader.dataloader import SMILESToInputs, PyGChunkDataListLoader, xyzBatchLoader, xyzBatchLoaderContext
 from atomprop.models.GNNs import Embedder, GNN, GNNAggr
+from atomprop.models.GeAT import GeATNet
 from atomprop.utils.mlp import MLP
 from atomprop.utils.mask import MolGraphMask
 from atomprop.utils.groups import TripletGroup, QuadrupletGroup
 from atomprop.utils.features import FunctionalGroupUtils
-from atomprop.utils.weights import WeightStratergy, EqualWeightStratergy, HardSwitch, SoftSwitch, GradNorm, ParetoOpt
+from atomprop.utils.weights import WeightStratergy, EqualWeightStratergy, HardSwitch, SoftSwitch, GradNorm, ParetoOpt, UncertaintyWeighting, AdaptiveUncertaintyWeighting, FixedUncertaintyWeighting
 from atomprop.utils.scaffold import ScaffoldSimilarityMatrix
 from atomprop.embeddings.AtomEmbedding import BondTypes
 import matplotlib.pyplot as plt
@@ -17,127 +18,63 @@ from tqdm import tqdm
 from torch_geometric.data import Data, Batch
 from torch.utils.tensorboard import SummaryWriter
 from rdkit.Chem import FunctionalGroups
+from contextlib import nullcontext
 import os
+import configs.config as cfg
 
-record_freq = 100
-dataset_size = -1
-num_epochs = 8
-batch_size = 512
+cfg.print_all_params()
 
-switch_timings = torch.tensor([0, 16000, 32000, 48000])
-transition_width = 4000
+# torch.autograd.set_detect_anomaly(True)
 
-# data_path = "data/zinc15/dataset/zinc_standard_agent/processed/smiles.csv"
-data_path = "data/pubchem/pubchem-10m.txt"
-pretrain_file_type = 'txt'
+record_freq = cfg.record_freq
+dataset_size = cfg.dataset_size
+num_epochs = cfg.num_epochs
+batch_size = cfg.batch_size
 
-xyz_path = "data/pubchem/pubchem-xyzs.txt"
-xyz_type = 'txt'
+data_path = cfg.data_path
+pretrain_file_type = cfg.pretrain_file_type
 
-logdir = "pretrain_pubchem_scaffold"
+logdir = cfg.logdir
 os.makedirs(f"trained_models/{logdir}", exist_ok=True)
 
-fg_list = None # if none, use default rdkit fgs
+fg_list = cfg.fg_list  # if none, use default rdkit fgs
 
-chunk_size = 65536
-max_atom_num = 128
+chunk_size = cfg.chunk_size
+max_atom_num = cfg.max_atom_num
 
-less_rate = 0.1
-more_rate = 0.3
-embed_dim = 384
+less_rate = cfg.less_rate
+more_rate = cfg.more_rate
+embed_dim = cfg.embed_dim
 
-BondTypes.set_bond_types(["SINGLE", "DOUBLE", "TRIPLE", 'AROMATIC'])
-
-device = torch.device("cuda:7") if torch.cuda.is_available() else torch.device("cpu")
+device = torch.device(cfg.device_str) if torch.cuda.is_available() else torch.device("cpu")
 
 if fg_list is None:
     fg_list = FunctionalGroups.BuildFuncGroupHierarchy()
 
 backbone = Embedder(num_atom_types=120, embed_dim=embed_dim)
-neck = GNN(num_layers=7, embed_dim=embed_dim, gnn_type='gin', JK='last', dropout=0.5)
+neck = GeATNet(embed_dim=embed_dim, dropout=0.5)
 head0 = MLP(input_dim=embed_dim, hidden_dim=128, output_dim=157, num_layers=2, dropout=0.5) # used for atom attribute prediction
-head1 = MLP(input_dim=embed_dim, hidden_dim=512, output_dim=embed_dim, num_layers=2, dropout=0.5) # used for masked node prediction
-head2 = MLP(input_dim=embed_dim*3, hidden_dim=64, output_dim=1, num_layers=2, dropout=0.5) # used for bond angle prediction
-head3 = MLP(input_dim=embed_dim*4, hidden_dim=64, output_dim=1, num_layers=2, dropout=0.5) # used for hydrogen bond prediction
+head1 = MLP(input_dim=embed_dim, hidden_dim=128, output_dim=120, num_layers=2, dropout=0.5) # used for masked node prediction
 head4 = MLP(input_dim=embed_dim, hidden_dim=128, output_dim=len(fg_list), num_layers=2, dropout=0.5) # used for functional group prediction
 aggrmodel = GNNAggr(embed_dim=embed_dim, aggr='mean')
+
+if cfg.from_scratch == False:
+    # load weights
+    ckpt = torch.load(cfg.from_model_path, weights_only=False)
+    backbone.load_state_dict(ckpt['backbone_state_dict'])
+    neck.load_state_dict(ckpt['neck_state_dict'])
 
 task0 = NodeAttrPrediction()
 task1 = MaskedNodePrediction()
 task2 = GraphMaskContrast(less_rate=less_rate, more_rate=more_rate)
 task3 = BatchContrast()
-task4 = BondAnglePrediction()
-task5 = DihedralAnglePrediction()
 task6 = FunctionalGroupsPrediction()
 task7 = ScaffoldContrast()
 
-tasks = [task0, task1, task2, task3, task4, task5, task6, task7]
+tasks = [task0, task1, task2, task3, task6, task7]
+task_types = ["classification", "regression", "other", "other", "classification", "other"]
 
-weight_stratergy0 = GradNorm(task_num=8, device=device)
-# weight_stratergy1 = ParetoOpt(task_num=8, device=device)
-weight_stratergy1 = EqualWeightStratergy(task_num=8, device=device)
-
-optimizer_configs = {
-    "backbone": {
-        "cls": torch.optim.Adam,
-        "kwargs": {"lr": 5e-4, "weight_decay": 5e-5}
-    },
-    "neck": {
-        "cls": torch.optim.AdamW,
-        "kwargs": {"lr": 1e-3, "weight_decay": 1e-4}
-    },
-    "head0": {
-        "cls": torch.optim.Adam,
-        "kwargs": {"lr": 5e-4, "weight_decay": 1e-5}
-    },
-    "head1": {
-        "cls": torch.optim.Adam,
-        "kwargs": {"lr": 5e-4, "weight_decay": 1e-5}
-    },
-    "head2": {
-        "cls": torch.optim.Adam,
-        "kwargs": {"lr": 5e-4, "weight_decay": 1e-5}
-    },
-    "head3": {
-        "cls": torch.optim.Adam,
-        "kwargs": {"lr": 5e-4, "weight_decay": 1e-5}
-    },
-    "head4": {
-        "cls": torch.optim.Adam,
-        "kwargs": {"lr": 5e-4, "weight_decay": 1e-5}
-    }
-}
-
-scheduler_configs = {
-    "backbone": {
-        "cls": torch.optim.lr_scheduler.ReduceLROnPlateau,
-        "kwargs": {"mode": "min", "factor": 0.7, "patience": 4, "min_lr": 1e-5}
-    },
-    "neck": {
-        "cls": torch.optim.lr_scheduler.CosineAnnealingLR,
-        "kwargs": {"T_max": 20, "eta_min": 1e-5}
-    },
-    "head0": {
-        "cls": torch.optim.lr_scheduler.StepLR,
-        "kwargs": {"step_size": 1, "gamma": 0.5}
-    },
-    "head1": {
-        "cls": torch.optim.lr_scheduler.StepLR,
-        "kwargs": {"step_size": 1, "gamma": 0.5}
-    },
-    "head2": {
-        "cls": torch.optim.lr_scheduler.StepLR,
-        "kwargs": {"step_size": 1, "gamma": 0.5}
-    },
-    "head3": {
-        "cls": torch.optim.lr_scheduler.StepLR,
-        "kwargs": {"step_size": 1, "gamma": 0.5}
-    },
-    "head4": {
-        "cls": torch.optim.lr_scheduler.StepLR,
-        "kwargs": {"step_size": 1, "gamma": 0.5}
-    }
-}
+weight_stratergy = FixedUncertaintyWeighting(num_tasks=len(tasks))
 
 def get_dataset_info(data_path):
     total_rows = sum(1 for _ in open(data_path)) - 1
@@ -154,7 +91,7 @@ def create_data_splits(total_size):
     return train_indices, val_indices, test_indices
 
 if __name__ == "__main__":
-    with xyzBatchLoaderContext(xyz_path) as xyz_loader:
+    with nullcontext():
         writer = SummaryWriter(log_dir=f"runs/{logdir}")
         scaffold_calculator = ScaffoldSimilarityMatrix()
         total_rows, columns = get_dataset_info(data_path)
@@ -165,32 +102,171 @@ if __name__ == "__main__":
 
         train_indices, val_indices, test_indices = create_data_splits(total_rows)
         print(f"Train set size: {len(train_indices)}, Val set size: {len(val_indices)}, Test set size: {len(test_indices)}")
+        
+        BondTypes.set_bond_types(["SINGLE", "DOUBLE", "TRIPLE", 'AROMATIC'])
 
         print(f"Using computing device: {device}")
         backbone.to(device)
         neck.to(device)
         head0.to(device)
         head1.to(device)
-        head2.to(device)
-        head3.to(device)
         head4.to(device)
+        weight_stratergy.to(device)
 
         print(backbone.__class__.__name__, f"Parameters: {sum(p.numel() for p in backbone.parameters() if p.requires_grad)}")
         print(neck.__class__.__name__, f"Parameters: {sum(p.numel() for p in neck.parameters() if p.requires_grad)}")
         print(head0.__class__.__name__, f"Parameters: {sum(p.numel() for p in head0.parameters() if p.requires_grad)}")
         print(head1.__class__.__name__, f"Parameters: {sum(p.numel() for p in head1.parameters() if p.requires_grad)}")
-        print(head2.__class__.__name__, f"Parameters: {sum(p.numel() for p in head2.parameters() if p.requires_grad)}")
-        print(head3.__class__.__name__, f"Parameters: {sum(p.numel() for p in head3.parameters() if p.requires_grad)}")
         print(head4.__class__.__name__, f"Parameters: {sum(p.numel() for p in head4.parameters() if p.requires_grad)}")
-
+        
+        train_loader = PyGChunkDataListLoader(
+            data_path=data_path,
+            split_indices=train_indices,
+            chunk_size=chunk_size,
+            batch_size=batch_size,
+            file_type=pretrain_file_type
+        )
+        val_loader = PyGChunkDataListLoader(
+            data_path=data_path,
+            split_indices=val_indices,
+            chunk_size=chunk_size,
+            batch_size=batch_size,
+            file_type=pretrain_file_type
+        )
+        
         components = {
             "backbone": backbone,
             "neck": neck,
             "head0": head0,
             "head1": head1,
-            "head2": head2,
-            "head3": head3,
-            "head4": head4
+            "head4": head4,
+            "weight_stratergy": weight_stratergy
+        }
+        
+        optimizer_configs = {
+            "backbone": {
+                "cls": torch.optim.Adam,
+                "kwargs": {"lr": cfg.backbone_lr, "weight_decay": cfg.backbone_wd}
+            },
+            "neck": {
+                "cls": torch.optim.AdamW,
+                "kwargs": {"lr": cfg.neck_lr, "weight_decay": cfg.neck_wd}
+            },
+            "head0": {
+                "cls": torch.optim.Adam,
+                "kwargs": {"lr": cfg.head_lr, "weight_decay": cfg.head_wd}
+            },
+            "head1": {
+                "cls": torch.optim.Adam,
+                "kwargs": {"lr": cfg.head_lr, "weight_decay": cfg.head_wd}
+            },
+            "head2": {
+                "cls": torch.optim.Adam,
+                "kwargs": {"lr": cfg.head_lr, "weight_decay": cfg.head_wd}
+            },
+            "head3": {
+                "cls": torch.optim.Adam,
+                "kwargs": {"lr": cfg.head_lr, "weight_decay": cfg.head_wd}
+            },
+            "head4": {
+                "cls": torch.optim.Adam,
+                "kwargs": {"lr": cfg.head_lr, "weight_decay": cfg.head_wd}
+            },
+            "weight_stratergy": {
+                "cls": torch.optim.Adam,
+                "kwargs": {"lr": cfg.weight_strategy_lr, "weight_decay": cfg.weight_strategy_wd}
+            }
+        }
+
+        scheduler_configs = {
+            "backbone": {
+                "cls": torch.optim.lr_scheduler.OneCycleLR,
+                "kwargs": {
+                    "max_lr": cfg.backbone_lr,
+                    "total_steps": train_loader.total_batches * num_epochs, 
+                    "pct_start": cfg.pct_start,
+                    "anneal_strategy": cfg.anneal_strategy, 
+                    "div_factor": cfg.div_factor, 
+                    "final_div_factor": cfg.final_div_factor, 
+                }
+            },
+            "neck": {
+                "cls": torch.optim.lr_scheduler.OneCycleLR,
+                "kwargs": {
+                    "max_lr": cfg.neck_scheduler_max_lr,
+                    "total_steps": train_loader.total_batches * num_epochs,
+                    "pct_start": cfg.pct_start,
+                    "anneal_strategy": cfg.anneal_strategy,
+                    "div_factor": cfg.div_factor,
+                    "final_div_factor": cfg.final_div_factor,
+                }
+            },
+            "head0": {
+                "cls": torch.optim.lr_scheduler.OneCycleLR,
+                "kwargs": {
+                    "max_lr": cfg.head_lr,
+                    "total_steps": train_loader.total_batches * num_epochs,
+                    "pct_start": cfg.pct_start,
+                    "anneal_strategy": cfg.anneal_strategy,
+                    "div_factor": cfg.div_factor,
+                    "final_div_factor": cfg.final_div_factor,
+                }
+            },
+            "head1": {
+                "cls": torch.optim.lr_scheduler.OneCycleLR,
+                "kwargs": {
+                    "max_lr": cfg.head_lr,
+                    "total_steps": train_loader.total_batches * num_epochs,
+                    "pct_start": cfg.pct_start,
+                    "anneal_strategy": cfg.anneal_strategy,
+                    "div_factor": cfg.div_factor,
+                    "final_div_factor": cfg.final_div_factor,
+                }
+            },
+            "head2": {
+                "cls": torch.optim.lr_scheduler.OneCycleLR,
+                "kwargs": {
+                    "max_lr": cfg.head_lr,
+                    "total_steps": train_loader.total_batches * num_epochs,
+                    "pct_start": cfg.pct_start,
+                    "anneal_strategy": cfg.anneal_strategy,
+                    "div_factor": cfg.div_factor,
+                    "final_div_factor": cfg.final_div_factor,
+                }
+            },
+            "head3": {
+                "cls": torch.optim.lr_scheduler.OneCycleLR,
+                "kwargs": {
+                    "max_lr": cfg.head_lr,
+                    "total_steps": train_loader.total_batches * num_epochs,
+                    "pct_start": cfg.pct_start,
+                    "anneal_strategy": cfg.anneal_strategy,
+                    "div_factor": cfg.div_factor,
+                    "final_div_factor": cfg.final_div_factor,
+                }
+            },
+            "head4": {
+                "cls": torch.optim.lr_scheduler.OneCycleLR,
+                "kwargs": {
+                    "max_lr": cfg.head_lr,
+                    "total_steps": train_loader.total_batches * num_epochs,
+                    "pct_start": cfg.pct_start,
+                    "anneal_strategy": cfg.anneal_strategy,
+                    "div_factor": cfg.div_factor,
+                    "final_div_factor": cfg.final_div_factor,
+                }
+            },
+            "weight_stratergy": {
+                "cls": torch.optim.lr_scheduler.OneCycleLR,
+                "kwargs": {
+                    "max_lr": cfg.weight_strategy_lr,
+                    "total_steps": train_loader.total_batches * num_epochs,
+                    "pct_start": cfg.weight_strategy_pct_start,
+                    "anneal_strategy": cfg.anneal_strategy,
+                    "div_factor": cfg.weight_strategy_div_factor,
+                    "final_div_factor": cfg.final_div_factor,
+                }
+            },
         }
 
         optimizers = {}
@@ -211,21 +287,6 @@ if __name__ == "__main__":
                 sched_kwargs = sched_conf.get("kwargs", {})
                 schedulers[name] = sched_cls(optimizers[name], **sched_kwargs)
         
-        train_loader = PyGChunkDataListLoader(
-            data_path=data_path,
-            split_indices=train_indices,
-            chunk_size=chunk_size,
-            batch_size=batch_size,
-            file_type=pretrain_file_type
-        )
-        val_loader = PyGChunkDataListLoader(
-            data_path=data_path,
-            split_indices=val_indices,
-            chunk_size=chunk_size,
-            batch_size=batch_size,
-            file_type=pretrain_file_type
-        )
-        
         best_val_loss = float('inf')
         train_losses = []
         val_losses = []
@@ -233,8 +294,6 @@ if __name__ == "__main__":
         
         for epoch in range(num_epochs):
             try:
-                xyz_loader.reset()
-
                 backbone.train()
                 neck.train()
                 head0.train()
@@ -254,7 +313,7 @@ if __name__ == "__main__":
 
                     atom_emb = backbone(batch_data.x).squeeze()
                     embedded_data = Data(x=atom_emb, edge_index=batch_data.edge_index, edge_attr=batch_data.edge_attr)
-                    graph_emb = neck(embedded_data)
+                    graph_emb = neck(embedded_data, batch=batch_data.batch)
                     graph_emb = graph_emb.view(-1, graph_emb.size(-1))
 
                     outputs = head0(graph_emb)
@@ -266,26 +325,26 @@ if __name__ == "__main__":
                     mask_indices = MolGraphMask.select_mask_indices(batch_data.x)
                     masked_atom_emb = MolGraphMask.mask_atoms(atom_emb, mask_indices, torch.zeros(embed_dim))
                     masked_embedded_data = Data(x=masked_atom_emb, edge_index=batch_data.edge_index, edge_attr=batch_data.edge_attr)
-                    graph_emb1 = neck(masked_embedded_data)
+                    graph_emb1 = neck(masked_embedded_data, batch=batch_data.batch)
                     graph_emb1_masked = graph_emb1.view(-1, graph_emb1.size(-1))[mask_indices]
                     outputs1 = head1(graph_emb1_masked)
                     outputs1 = outputs1.view(-1, outputs1.size(-1))
                     task1.set_pred(outputs1)
-                    task1_labels = graph_emb[mask_indices]
+                    task1_labels = nn.functional.one_hot(batch_data.x[mask_indices], num_classes=120)
                     task1.set_label(task1_labels)
                     loss_masked_atom_type_pred = task1.compute_loss()
 
                     less_mask_indices = MolGraphMask.select_mask_indices(batch_data.x, mask_ratio=less_rate)
                     less_masked_atom_emb = MolGraphMask.mask_atoms(atom_emb, less_mask_indices, torch.zeros(embed_dim))
                     less_masked_embedded_data = Data(x=less_masked_atom_emb, edge_index=batch_data.edge_index, edge_attr=batch_data.edge_attr)
-                    less_graph_emb = neck(less_masked_embedded_data)
+                    less_graph_emb = neck(less_masked_embedded_data, batch=batch_data.batch)
                     less_graph_emb = less_graph_emb.view(-1, less_graph_emb.size(-1))
                     less_outputs = aggrmodel(less_graph_emb, batch_data.batch)
 
                     more_mask_indices = MolGraphMask.select_mask_indices(batch_data.x, mask_ratio=more_rate)
                     more_masked_atom_emb = MolGraphMask.mask_atoms(atom_emb, more_mask_indices, torch.zeros(embed_dim))
                     more_masked_embedded_data = Data(x=more_masked_atom_emb, edge_index=batch_data.edge_index, edge_attr=batch_data.edge_attr)
-                    more_graph_emb = neck(more_masked_embedded_data)
+                    more_graph_emb = neck(more_masked_embedded_data, batch=batch_data.batch)
                     more_graph_emb = more_graph_emb.view(-1, more_graph_emb.size(-1))
                     more_outputs = aggrmodel(more_graph_emb, batch_data.batch)
 
@@ -296,21 +355,6 @@ if __name__ == "__main__":
                     outputs1_for_contrast = aggrmodel(graph_emb1, batch_data.batch)
                     task3.set_embeddings(anchor_outputs, outputs1_for_contrast)
                     loss_batch_contrast = task3.compute_loss()
-
-                    xyzs = xyz_loader.get_batch(len(data_list)).to(device)
-                    triplet_indices = TripletGroup.batch_generate(batch_data.edge_index).to(device)
-                    triplet_emb = atom_emb[triplet_indices.view(-1)].view(-1, 3 * embed_dim).to(device) # (num_triplets, 3*embed_dim)
-                    triplet_outputs = head2(triplet_emb) # (num_triplets, 1)
-                    task4.set_label(xyzs, triplet_indices)
-                    task4.set_pred(triplet_outputs)
-                    loss_bond_angle_pred = task4.compute_loss()
-
-                    quadruplet_indices = QuadrupletGroup.batch_generate(batch_data.edge_index).to(device)
-                    task5.set_label(xyzs, quadruplet_indices)
-                    quadruplet_emb = atom_emb[quadruplet_indices.view(-1)].view(-1, 4 * embed_dim).to(device) # (num_quadruplets, 4*embed_dim)
-                    quadruplet_outputs = head3(quadruplet_emb) # (num_quadruplets, 1)
-                    task5.set_pred(quadruplet_outputs)
-                    loss_dihedral_angle_pred = task5.compute_loss()
 
                     outputs1_fg = head4(anchor_outputs)
                     fg_labels = FunctionalGroupUtils.batch_detect_with_rdkit_fg(mols, fg_list).to(device)
@@ -323,26 +367,16 @@ if __name__ == "__main__":
                     task7.set_group_label(scaffold_groups)
                     loss_scaffold_contrast = task7.compute_loss()
 
-                    losses = [loss_atom_attr_pred, loss_masked_atom_type_pred, loss_triplet_contrast, loss_batch_contrast, loss_bond_angle_pred, loss_dihedral_angle_pred, loss_functional_group_pred, loss_scaffold_contrast]
-                    # --- compute per-task gradient norms (proxy: gradients w.r.t atom embeddings) ---
-                    # Use atom_emb (output of backbone) as a shared representation to measure influence of each task.
-                    # Allow unused in case a particular loss does not depend on atom_emb for some rare batch.
-                    grads = []
-                    for single_loss in losses:
-                        g = torch.autograd.grad(single_loss, atom_emb, retain_graph=True, create_graph=False, allow_unused=True)[0]
-                        grads.append(g)
-
-                    weights = weight_stratergy0.outputs(grads)
-                    weights_extra = weight_stratergy1.outputs()
-                    norm_weights = WeightStratergy.weight_norm(weights*weights_extra)
-
-                    # final weighted loss
-                    loss = sum(norm_weights[i] * losses[i] for i in range(len(losses)))
+                    losses = [loss_atom_attr_pred, loss_masked_atom_type_pred, loss_triplet_contrast, loss_batch_contrast, loss_functional_group_pred, loss_scaffold_contrast]
+                    loss = weight_stratergy(losses, cfg.fixed_log_vars)
 
                     # backward and step
                     loss.backward()
                     for opt in optimizers.values():
                         opt.step()
+                        
+                    for name, scheduler in schedulers.items():
+                        scheduler.step()
                     
                     if batch_idx == 0 or (batch_idx + 1) % record_freq == 0:
                         writer.add_scalar('Train/Loss_total', loss.item(), epoch * train_loader.total_batches + batch_idx)
@@ -350,20 +384,18 @@ if __name__ == "__main__":
                         writer.add_scalar('Train/Loss_masked_atom', loss_masked_atom_type_pred.item(), epoch * train_loader.total_batches + batch_idx)
                         writer.add_scalar('Train/Loss_triplet', loss_triplet_contrast.item(), epoch * train_loader.total_batches + batch_idx)
                         writer.add_scalar('Train/Loss_batch_contrast', loss_batch_contrast.item(), epoch * train_loader.total_batches + batch_idx)
-                        writer.add_scalar('Train/Loss_bond_angle', loss_bond_angle_pred.item(), epoch * train_loader.total_batches + batch_idx)
-                        writer.add_scalar('Train/Loss_dihedral_angle', loss_dihedral_angle_pred.item(), epoch * train_loader.total_batches + batch_idx)
                         writer.add_scalar('Train/Loss_functional_group', loss_functional_group_pred.item(), epoch * train_loader.total_batches + batch_idx)
                         writer.add_scalar('Train/Loss_scaffold_contrast', loss_scaffold_contrast.item(), epoch * train_loader.total_batches + batch_idx)
                         # log weights
                         try:
-                            for i in range(7):
-                                writer.add_scalar(f'TrainWeight/Weights{i}', norm_weights[i].item(), epoch * train_loader.total_batches + batch_idx)
+                            for i in range(len(tasks)):
+                                writer.add_scalar(f'Weight/Uncertainty{i}', weight_stratergy.log_vars[i].item(), epoch * train_loader.total_batches + batch_idx)
                         except Exception:
                             # logging should not interrupt training
                             print("LOGGING ERROR: PLEASE CHECK")
                     
                     if batch_idx == train_loader.total_batches - 1:
-                        metrics = {f"metrics_{i}": tasks[i].get_metrics() for i in range(8)}
+                        metrics = {f"metrics_{i}": tasks[i].get_metrics() for i in range(len(tasks))}
                         print(f"Batch {batch_idx+1}/{train_loader.total_batches} Metrics: {metrics}")
                     
                     batch_size_current = len(mols)
@@ -379,9 +411,8 @@ if __name__ == "__main__":
                 neck.eval()
                 head0.eval()
                 head1.eval()
-                head2.eval()
-                head3.eval()
                 head4.eval()
+                weight_stratergy.eval()
 
                 total_val_loss = 0.0
                 total_val_loss_atom_attr = 0.0
@@ -404,7 +435,7 @@ if __name__ == "__main__":
                         
                         atom_emb = backbone(batch_data.x).squeeze()
                         embedded_data = Data(x=atom_emb, edge_index=batch_data.edge_index, edge_attr=batch_data.edge_attr)
-                        graph_emb = neck(embedded_data)
+                        graph_emb = neck(embedded_data, batch=batch_data.batch)
                         graph_emb = graph_emb.view(-1, graph_emb.size(-1))
 
                         outputs = head0(graph_emb)
@@ -416,26 +447,26 @@ if __name__ == "__main__":
                         mask_indices = MolGraphMask.select_mask_indices(batch_data.x)
                         masked_atom_emb = MolGraphMask.mask_atoms(atom_emb, mask_indices, torch.zeros(embed_dim))
                         masked_embedded_data = Data(x=masked_atom_emb, edge_index=batch_data.edge_index, edge_attr=batch_data.edge_attr)
-                        graph_emb1 = neck(masked_embedded_data)
+                        graph_emb1 = neck(masked_embedded_data, batch=batch_data.batch)
                         graph_emb1_masked = graph_emb1.view(-1, graph_emb1.size(-1))[mask_indices]
                         outputs1 = head1(graph_emb1_masked)
                         outputs1 = outputs1.view(-1, outputs1.size(-1))
                         task1.set_pred(outputs1)
-                        task1_labels = graph_emb[mask_indices]
+                        task1_labels = nn.functional.one_hot(batch_data.x[mask_indices], num_classes=120)
                         task1.set_label(task1_labels)
                         loss_masked_atom_type_pred = task1.compute_loss()
 
                         less_mask_indices = MolGraphMask.select_mask_indices(batch_data.x, mask_ratio=less_rate)
                         less_masked_atom_emb = MolGraphMask.mask_atoms(atom_emb, less_mask_indices, torch.zeros(embed_dim))
                         less_masked_embedded_data = Data(x=less_masked_atom_emb, edge_index=batch_data.edge_index, edge_attr=batch_data.edge_attr)
-                        less_graph_emb = neck(less_masked_embedded_data)
+                        less_graph_emb = neck(less_masked_embedded_data, batch=batch_data.batch)
                         less_graph_emb = less_graph_emb.view(-1, less_graph_emb.size(-1))
                         less_outputs = aggrmodel(less_graph_emb, batch_data.batch)
 
                         more_mask_indices = MolGraphMask.select_mask_indices(batch_data.x, mask_ratio=more_rate)
                         more_masked_atom_emb = MolGraphMask.mask_atoms(atom_emb, more_mask_indices, torch.zeros(embed_dim))
                         more_masked_embedded_data = Data(x=more_masked_atom_emb, edge_index=batch_data.edge_index, edge_attr=batch_data.edge_attr)
-                        more_graph_emb = neck(more_masked_embedded_data)
+                        more_graph_emb = neck(more_masked_embedded_data, batch=batch_data.batch)
                         more_graph_emb = more_graph_emb.view(-1, more_graph_emb.size(-1))
                         more_outputs = aggrmodel(more_graph_emb, batch_data.batch)
 
@@ -446,21 +477,6 @@ if __name__ == "__main__":
                         outputs1_for_contrast = aggrmodel(graph_emb1, batch_data.batch)
                         task3.set_embeddings(anchor_outputs, outputs1_for_contrast)
                         loss_batch_contrast = task3.compute_loss()
-
-                        xyzs = xyz_loader.get_batch(len(data_list)).to(device)
-                        triplet_indices = TripletGroup.batch_generate(batch_data.edge_index).to(device)
-                        triplet_emb = atom_emb[triplet_indices.view(-1)].view(-1, 3 * embed_dim).to(device) # (num_triplets, 3*embed_dim)
-                        triplet_outputs = head2(triplet_emb) # (num_triplets, 1)
-                        task4.set_label(xyzs, triplet_indices)
-                        task4.set_pred(triplet_outputs)
-                        loss_bond_angle_pred = task4.compute_loss()
-
-                        quadruplet_indices = QuadrupletGroup.batch_generate(batch_data.edge_index).to(device)
-                        task5.set_label(xyzs, quadruplet_indices)
-                        quadruplet_emb = atom_emb[quadruplet_indices.view(-1)].view(-1, 4 * embed_dim).to(device) # (num_quadruplets, 4*embed_dim)
-                        quadruplet_outputs = head3(quadruplet_emb) # (num_quadruplets, 1)
-                        task5.set_pred(quadruplet_outputs)
-                        loss_dihedral_angle_pred = task5.compute_loss()
 
                         outputs1_fg = head4(anchor_outputs)
                         fg_labels = FunctionalGroupUtils.batch_detect_with_rdkit_fg(mols, fg_list).to(device)
@@ -473,12 +489,12 @@ if __name__ == "__main__":
                         task7.set_group_label(scaffold_groups)
                         loss_scaffold_contrast = task7.compute_loss()
                         
-                        losses = [loss_atom_attr_pred, loss_masked_atom_type_pred, loss_triplet_contrast, loss_batch_contrast, loss_bond_angle_pred, loss_dihedral_angle_pred, loss_functional_group_pred, loss_scaffold_contrast]
+                        losses = [loss_atom_attr_pred, loss_masked_atom_type_pred, loss_triplet_contrast, loss_batch_contrast, loss_functional_group_pred, loss_scaffold_contrast]
 
-                        loss = sum(losses[i] for i in range(len(losses)))
+                        loss = weight_stratergy(losses, cfg.fixed_log_vars)
                    
                         if batch_idx == val_loader.total_batches - 1:
-                            metrics = {f"metrics_{i}": tasks[i].get_metrics() for i in range(8)}
+                            metrics = {f"metrics_{i}": tasks[i].get_metrics() for i in range(len(tasks))}
                             print(f"Batch {batch_idx+1}/{val_loader.total_batches} Metrics: {metrics}")
                         
                         batch_size_current = len(mols)
@@ -487,8 +503,6 @@ if __name__ == "__main__":
                         total_val_loss_masked_atom += loss_masked_atom_type_pred.item() * batch_size_current
                         total_val_loss_triplet += loss_triplet_contrast.item() * batch_size_current
                         total_val_loss_batch_contrast += loss_batch_contrast.item() * batch_size_current
-                        total_val_loss_bond_angle += loss_bond_angle_pred.item() * batch_size_current
-                        total_val_loss_dihedral_angle += loss_dihedral_angle_pred.item() * batch_size_current
                         total_val_loss_functional_group += loss_functional_group_pred.item() * batch_size_current
                         total_val_loss_scaffold_contrast += loss_scaffold_contrast.item() * batch_size_current
                         val_sample_count += batch_size_current
@@ -509,12 +523,6 @@ if __name__ == "__main__":
                 writer.add_scalar('Epoch/Val_loss_functional_group', total_val_loss_functional_group / val_sample_count, epoch)
                 writer.add_scalar('Epoch/Val_loss_scaffold_contrast', total_val_loss_scaffold_contrast / val_sample_count, epoch)
                 
-                for name, scheduler in schedulers.items():
-                    if isinstance(scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
-                        scheduler.step(avg_val_loss)
-                    else:
-                        scheduler.step()
-                
                 print(f"Epoch {epoch+1}/{num_epochs} Summary: Train Loss = {avg_train_loss:.6f}, Val Loss = {avg_val_loss:.6f}")
                 
                 if avg_val_loss < best_val_loss:
@@ -522,8 +530,6 @@ if __name__ == "__main__":
                     torch.save({
                         'backbone_state_dict': backbone.state_dict(),
                         'neck_state_dict': neck.state_dict(),
-                        'head_state_dict': head0.state_dict(),
-                        'head1_state_dict': head1.state_dict(),
                         'optimizer_state_dict': {name: opt.state_dict() for name, opt in optimizers.items()},
                         'scheduler_state_dict': {name: sch.state_dict() for name, sch in schedulers.items()},
                         'epoch': epoch,
@@ -534,8 +540,6 @@ if __name__ == "__main__":
                 torch.save({
                     'backbone_state_dict': backbone.state_dict(),
                     'neck_state_dict': neck.state_dict(),
-                    'head_state_dict': head0.state_dict(),
-                    'head1_state_dict': head1.state_dict(),
                     'optimizer_state_dict': {name: opt.state_dict() for name, opt in optimizers.items()},
                     'scheduler_state_dict': {name: sch.state_dict() for name, sch in schedulers.items()},
                     'epoch': epoch,
@@ -547,8 +551,6 @@ if __name__ == "__main__":
                 torch.save({
                     'backbone_state_dict': backbone.state_dict(),
                     'neck_state_dict': neck.state_dict(),
-                    'head_state_dict': head0.state_dict(),
-                    'head1_state_dict': head1.state_dict(),
                     'optimizer_state_dict': {name: opt.state_dict() for name, opt in optimizers.items()},
                     'scheduler_state_dict': {name: sch.state_dict() for name, sch in schedulers.items()},
                     'epoch': epoch,
