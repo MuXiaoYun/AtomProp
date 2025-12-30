@@ -20,7 +20,7 @@ class EdgeAttention(nn.Module):
   
     def __init__(self, atom_embedding_dim: int, num_bond_types: int, 
                  output_negative_slope: float = 0.2, attention_type: str = default_attention_type,
-                 mlp_hidden_dim: int = 512, mlp_num_layers: int = 2):  
+                 mlp_hidden_dim: int = 768, mlp_num_layers: int = 2):  
         super(EdgeAttention, self).__init__()  
         self.atom_d = atom_embedding_dim  
         self.num_bond_types = num_bond_types  
@@ -158,7 +158,7 @@ class MultiHeadEdgeAttention_ParallelBetweenBondtypes(nn.Module):
         num_heads: int = 8,
         output_negative_slope: float = 0.2,
         attention_type: str = default_attention_type,
-        mlp_hidden_dim: int = 512,
+        mlp_hidden_dim: int = 768,
         mlp_num_layers: int = 2,
     ):
         super().__init__()
@@ -266,7 +266,7 @@ class MultiHeadEdgeAttention_SerialBetweenBondtypes(nn.Module):
   
     def __init__(self, atom_embedding_dim: int, num_bond_types: int, num_heads: int = 8, 
                  output_negative_slope: float = 0.2, attention_type: str = default_attention_type,
-                 mlp_hidden_dim: int = 512, mlp_num_layers: int = 2):  
+                 mlp_hidden_dim: int = 768, mlp_num_layers: int = 2):  
         super(MultiHeadEdgeAttention_SerialBetweenBondtypes, self).__init__()  
         self.num_heads = num_heads  
         self.atom_d = atom_embedding_dim  
@@ -359,3 +359,95 @@ class MultiHeadEdgeAttention_SerialBetweenBondtypes(nn.Module):
         attention_scores = torch.nn.functional.leaky_relu(attention_scores, negative_slope=self.output_negative_slope)  
           
         return attention_scores
+    
+class GlobalEdgeAttn(nn.Module):
+    """
+    A :class:`GlobalEdgeAttn` module that applies global multi-head self-attention within each graph.
+    It processes atom embeddings in batched format (with padding) and respects graph boundaries
+    via key_padding_mask. This implementation avoids manual Q/K/V projection to ensure numerical stability.
+    """
+
+    def __init__(self, embed_dim: int, global_num_heads: int = 8, dropout: float = 0.2):
+        super(GlobalEdgeAttn, self).__init__()
+        # Use MultiheadAttention with the original embed_dim.
+        # PyTorch will internally split it into `global_num_heads` heads.
+        self.global_attention = nn.MultiheadAttention(
+            embed_dim=embed_dim,
+            num_heads=global_num_heads,
+            dropout=dropout,
+            batch_first=False
+        )
+        # LayerNorm applied after residual connection
+        self.norm_layer = nn.LayerNorm(embed_dim)
+        self.embed_dim = embed_dim  
+
+    def forward(self, atom_embeddings, edge_embeddings, batch=None):
+        """
+        Forward pass with batched processing of multiple graphs.
+
+        Args:
+            atom_embeddings: [B_N, embed_dim] - Atom-level embeddings from backbone.
+            batch: [B_N] - Batch assignment vector (from PyG).
+
+        Returns:
+            torch.Tensor: Updated atom embeddings of shape [B_N, embed_dim].
+        """
+        assert batch is not None, "batch tensor must be provided for graph-level attention."
+
+        B_N = atom_embeddings.size(0)
+        device = atom_embeddings.device
+        dtype = atom_embeddings.dtype
+
+        # Determine number of graphs and their sizes
+        batch_size = batch.max().item() + 1
+        graph_indices_list = []
+        graph_sizes = []
+
+        for i in range(batch_size):
+            mask = (batch == i)
+            indices = mask.nonzero(as_tuple=True)[0]
+            graph_indices_list.append(indices)
+            graph_sizes.append(len(indices))
+
+        max_graph_size = max(graph_sizes)
+
+        # Pad atom embeddings to [batch_size, max_graph_size, embed_dim]
+        X_padded = torch.zeros(
+            batch_size, max_graph_size, self.embed_dim,
+            device=device, dtype=dtype
+        )
+
+        for i in range(batch_size):
+            indices = graph_indices_list[i]
+            if len(indices) > 0:
+                X_padded[i, :len(indices)] = (atom_embeddings+edge_embeddings)[indices]
+
+        # Create key_padding_mask: True means ignore, False means attend
+        key_padding_mask = torch.ones(batch_size, max_graph_size, dtype=torch.bool, device=device)
+        for i in range(batch_size):
+            key_padding_mask[i, :graph_sizes[i]] = False
+
+        # Transpose to [seq_len, batch_size, embed_dim] for MultiheadAttention
+        X_t = X_padded.transpose(0, 1)  # [max_graph_size, batch_size, embed_dim]
+
+        # Apply global self-attention with padding mask
+        attn_output, _ = self.global_attention(
+            X_t, X_t, X_t,
+            key_padding_mask=key_padding_mask,
+            need_weights=False
+        )
+
+        # Transpose back to [batch_size, max_graph_size, embed_dim]
+        attn_output = attn_output.transpose(0, 1)
+
+        # Residual connection + LayerNorm
+        output_padded = self.norm_layer(attn_output + X_padded)
+
+        # Scatter back to original node order [B_N, embed_dim]
+        final_output = torch.zeros(B_N, self.embed_dim, device=device, dtype=dtype)
+        for i in range(batch_size):
+            indices = graph_indices_list[i]
+            if len(indices) > 0:
+                final_output[indices] = output_padded[i, :len(indices)]
+
+        return final_output

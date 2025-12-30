@@ -33,7 +33,7 @@ less_rate = 0.1
 more_rate = 0.3
 
 # Model dimensions
-embed_dim = 384
+embed_dim = 512
 
 # Functional groups
 fg_list = None  # if None, use default RDKit functional groups

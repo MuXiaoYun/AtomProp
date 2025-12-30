@@ -30,7 +30,7 @@ k_folds = 5
 frac_test = 0.1
 
 # Model architecture
-embed_dim = 384
+embed_dim = 512
 aggr = 'mean'  # options: 'mean', 'sum', 'max', 'attention'
 
 # Optimizer settings

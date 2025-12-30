@@ -4,9 +4,9 @@ Module for Graph Edge Attention Transformer (GeAT) for molecular property predic
   
 import torch  
 import torch.nn as nn  
-from atomprop.utils.mlp import MLP  
+from atomprop.utils.mlp import MLP, MoE 
 from atomprop.embeddings.AtomEmbedding import BondTypes, BondDirections  
-from atomprop.models.EdgeAttention import EdgeAttention, MultiHeadEdgeAttention
+from atomprop.models.EdgeAttention import EdgeAttention, MultiHeadEdgeAttention, GlobalEdgeAttn
 import torch_geometric 
   
 class GeATLayer(nn.Module):
@@ -97,13 +97,13 @@ class GeATLayer(nn.Module):
 
         return out
   
-class GeATBackbone(nn.Module):  
+class GeATConv(nn.Module):  
     """  
-    A :class:`GeATBackbone` is a module for molecular representation learning using GeAT. 
-    It outputs atom embeddings.  
+    A :class:`GeATConv` is a module for molecular representation learning using GeAT. 
+    It uses residual connections and outputs atom embeddings.  
     """  
-    def __init__(self, embed_dim: int, num_bond_types: int, num_heads: int = 8, output_negative_slope: float = 0.2, dropout: int = 0.2, geat_num_layers: int = 3):  
-        super(GeATBackbone, self).__init__()  
+    def __init__(self, embed_dim: int, num_bond_types: int, num_heads: int = 8, output_negative_slope: float = 0.2, dropout: int = 0.2, geat_num_layers: int = 5):  
+        super(GeATConv, self).__init__()  
         self.geat_layers = nn.ModuleList([GeATLayer(embed_dim=embed_dim, num_bond_types=num_bond_types, num_heads=num_heads, output_negative_slope=output_negative_slope, dropout=dropout) for _ in range(geat_num_layers)])  
         self.norm_layers = nn.ModuleList([nn.LayerNorm(embed_dim) for _ in range(geat_num_layers)])  
   
@@ -115,113 +115,72 @@ class GeATBackbone(nn.Module):
             atom_embeddings_c = self.norm_layers[i](residual + atom_embeddings_c)
         return atom_embeddings_c
   
-class GeATNeck(nn.Module):
-    """
-    A :class:`GeATNeck` module that applies global multi-head self-attention within each graph.
-    It processes atom embeddings in batched format (with padding) and respects graph boundaries
-    via key_padding_mask. This implementation avoids manual Q/K/V projection to ensure numerical stability.
-    """
-
-    def __init__(self, embed_dim: int, global_num_heads: int = 8, dropout: float = 0.2):
-        super(GeATNeck, self).__init__()
-        # Use MultiheadAttention with the original embed_dim.
-        # PyTorch will internally split it into `global_num_heads` heads.
-        self.global_attention = nn.MultiheadAttention(
-            embed_dim=embed_dim,
-            num_heads=global_num_heads,
-            dropout=dropout,
-            batch_first=False
-        )
-        # LayerNorm applied after residual connection
-        self.norm_layer = nn.LayerNorm(embed_dim)
-        self.embed_dim = embed_dim  
-
+class GlobalAttnConv(nn.Module):  
+    """  
+    A :class:`GlobalAttnConv` is a module for global attention over all atoms in the molecule.
+    It uses residual connections and outputs atom embeddings.   
+    """  
+    def __init__(self, embed_dim: int, global_num_heads: int = 8, dropout: int = 0.2, attn_num_layers: int = 2):  
+        super(GlobalAttnConv, self).__init__()  
+        self.global_attns = nn.ModuleList([GlobalEdgeAttn(embed_dim=embed_dim, global_num_heads=global_num_heads, dropout=dropout) for _ in range(attn_num_layers)])
+        self.norm_layers = nn.ModuleList([nn.LayerNorm(embed_dim) for _ in range(attn_num_layers)])
+        
     def forward(self, atom_embeddings, edge_embeddings, batch=None):
-        """
-        Forward pass with batched processing of multiple graphs.
-
-        Args:
-            atom_embeddings: [B_N, embed_dim] - Atom-level embeddings from backbone.
-            batch: [B_N] - Batch assignment vector (from PyG).
-
-        Returns:
-            torch.Tensor: Updated atom embeddings of shape [B_N, embed_dim].
-        """
-        assert batch is not None, "batch tensor must be provided for graph-level attention."
-
-        B_N = atom_embeddings.size(0)
-        device = atom_embeddings.device
-        dtype = atom_embeddings.dtype
-
-        # Determine number of graphs and their sizes
-        batch_size = batch.max().item() + 1
-        graph_indices_list = []
-        graph_sizes = []
-
-        for i in range(batch_size):
-            mask = (batch == i)
-            indices = mask.nonzero(as_tuple=True)[0]
-            graph_indices_list.append(indices)
-            graph_sizes.append(len(indices))
-
-        max_graph_size = max(graph_sizes)
-
-        # Pad atom embeddings to [batch_size, max_graph_size, embed_dim]
-        X_padded = torch.zeros(
-            batch_size, max_graph_size, self.embed_dim,
-            device=device, dtype=dtype
-        )
-
-        for i in range(batch_size):
-            indices = graph_indices_list[i]
-            if len(indices) > 0:
-                X_padded[i, :len(indices)] = (atom_embeddings+edge_embeddings)[indices]
-
-        # Create key_padding_mask: True means ignore, False means attend
-        key_padding_mask = torch.ones(batch_size, max_graph_size, dtype=torch.bool, device=device)
-        for i in range(batch_size):
-            key_padding_mask[i, :graph_sizes[i]] = False
-
-        # Transpose to [seq_len, batch_size, embed_dim] for MultiheadAttention
-        X_t = X_padded.transpose(0, 1)  # [max_graph_size, batch_size, embed_dim]
-
-        # Apply global self-attention with padding mask
-        attn_output, _ = self.global_attention(
-            X_t, X_t, X_t,
-            key_padding_mask=key_padding_mask,
-            need_weights=False
-        )
-
-        # Transpose back to [batch_size, max_graph_size, embed_dim]
-        attn_output = attn_output.transpose(0, 1)
-
-        # Residual connection + LayerNorm
-        output_padded = self.norm_layer(attn_output + X_padded)
-
-        # Scatter back to original node order [B_N, embed_dim]
-        final_output = torch.zeros(B_N, self.embed_dim, device=device, dtype=dtype)
-        for i in range(batch_size):
-            indices = graph_indices_list[i]
-            if len(indices) > 0:
-                final_output[indices] = output_padded[i, :len(indices)]
-
-        return final_output
+        atom_embeddings_c = atom_embeddings + edge_embeddings
+        for i, layer in enumerate(self.global_attns):
+            residual = atom_embeddings_c
+            atom_embeddings_c = layer(atom_embeddings_c, batch)
+            atom_embeddings_c = self.norm_layers[i](residual + atom_embeddings_c)
+        return atom_embeddings_c
         
 class GeATNet(nn.Module):  
     """  
     A :class:`GeATNet` is a module for molecular embeddings generation using GeAT.  
     1. uses multiple :class:`GeATLayer` instances to compute new embeddings for atoms based on their neighbors. To note, before each inner layer, the embeddings are residual added to the embeddings from the previous layer and then layer normalized.  
-    2. applies an extra global attention mechanism to aggregate the information from all atoms.  
+    2. applies an extra global attention mechanism to aggregate the information from all atoms.
+    3. FFN for all atoms to get the final atom embeddings.  
     """  
       
-    def __init__(self, embed_dim: int, num_bond_types = None, num_heads: int = 8, global_num_heads = 8, output_negative_slope: float = 0.2, dropout: int = 0.2, geat_num_layers: int = 5, aggr_num_layers: int = 3):  
+    def __init__(self,
+                 embed_dim: int,
+                 num_bond_types = None,
+                 num_heads: int = 8,
+                 global_num_heads = 8,
+                 output_negative_slope: float = 0.2,
+                 dropout: int = 0.2,
+                 geat_num_layers: int = 5,
+                 aggr_num_layers: int = 3,
+                 FFN_num_layers: int = 2,
+                 FFN_hidden_dim: int = 2048,
+                 FFN_num_experts: int = 8,
+                 FFN_top_k: int = 2,
+                 ):  
         super(GeATNet, self).__init__()
         if num_bond_types is None:
             num_bond_types = len(BondTypes.get_bond_types())+1  
-        self.backbone = GeATBackbone(embed_dim=embed_dim, num_bond_types=num_bond_types, num_heads=num_heads, output_negative_slope=output_negative_slope, dropout=dropout, geat_num_layers=geat_num_layers)  
-        self.neck = nn.ModuleList([GeATNeck(embed_dim=embed_dim, global_num_heads=global_num_heads, dropout=dropout) for _ in range(aggr_num_layers)])
-        self.edge_type_embedding = nn.Embedding(len(BondTypes.get_bond_types())+1, embed_dim)
+        self.backbone = GeATConv(embed_dim=embed_dim,
+                                 num_bond_types=num_bond_types,
+                                 num_heads=num_heads,
+                                 output_negative_slope=output_negative_slope,
+                                 dropout=dropout,
+                                 geat_num_layers=geat_num_layers)  
+        self.neck = GlobalAttnConv(embed_dim=embed_dim,
+                                   global_num_heads=global_num_heads,
+                                   dropout=dropout,
+                                   attn_num_layers=aggr_num_layers)
+        # self.ffn = MLP(input_dim=embed_dim, hidden_dim=FFN_hidden_dim, output_dim=embed_dim, num_layers=FFN_num_layers, dropout=dropout, activation='relu')
+        self.ffn = MoE(input_dim=embed_dim,
+                       hidden_dim=FFN_hidden_dim,
+                       output_dim=embed_dim,
+                       num_experts=FFN_num_experts,
+                       top_k=FFN_top_k,
+                       expert_hidden_layers=FFN_num_layers,
+                       dropout=dropout,
+                       batch_norm=True,
+                       hidden_activation=nn.ReLU(),
+                       output_activation=None)
         self.edge_direction_embedding = nn.Embedding(len(BondDirections.get_bond_directions())+1, embed_dim)
+        
         self.reset_parameters()
         
     def reset_parameters(self):
@@ -242,7 +201,7 @@ class GeATNet(nn.Module):
         edge_index = data.edge_index
         edge_attr = data.edge_attr
         edge_embeddings = self.edge_type_embedding(edge_attr[:,0]) + self.edge_direction_embedding(edge_attr[:,1])
-        atom_embeddings = self.backbone(x, edge_embeddings, edge_index, edge_attr)  
-        for aggr_layer in self.neck:
-            atom_embeddings = aggr_layer(atom_embeddings, edge_embeddings, batch)
-        return atom_embeddings
+        geat_embeddings = self.backbone(x, edge_embeddings, edge_index, edge_attr)  
+        aggr_embeddings = self.neck(geat_embeddings, edge_embeddings, batch)  
+        output = self.ffn(aggr_embeddings)
+        return output
