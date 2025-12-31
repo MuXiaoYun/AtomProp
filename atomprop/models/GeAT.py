@@ -176,7 +176,6 @@ class GeATNet(nn.Module):
                        top_k=FFN_top_k,
                        expert_hidden_layers=FFN_num_layers,
                        dropout=dropout,
-                       batch_norm=True,
                        hidden_activation=nn.ReLU(),
                        output_activation=None)
         self.edge_type_embedding = nn.Embedding(len(BondTypes.get_bond_types())+1, embed_dim)

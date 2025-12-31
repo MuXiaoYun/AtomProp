@@ -60,7 +60,7 @@ class EdgeAttention(nn.Module):
         # Get source and target node features for each edge  
         row, col = edge_index  # row=source, col=target  
         src_features = src_embeddings[row]  # [E, d]  
-        dst_features = (dst_embeddings+edge_embeddings)[col]  # [E, d]  
+        dst_features = dst_embeddings[col]+edge_embeddings  # [E, d]  
           
         # Get bond types from edge_attr  
         bond_types = edge_attr[:, 0]  # [E]  
@@ -214,7 +214,7 @@ class MultiHeadEdgeAttention_ParallelBetweenBondtypes(nn.Module):
         # Reshape to multi-head format: [N, H, D]
         N = src_embeddings.size(0)
         src = src_embeddings.view(N, self.num_heads, self.atom_embedding_dim)
-        dst = (dst_embeddings+edge_embeddings).view(N, self.num_heads, self.atom_embedding_dim)
+        dst = dst_embeddings.view(N, self.num_heads, self.atom_embedding_dim)
  
         # Initialize output scores
         attn_scores = torch.zeros(E, self.num_heads, device=device, dtype=src.dtype)
@@ -230,8 +230,9 @@ class MultiHeadEdgeAttention_ParallelBetweenBondtypes(nn.Module):
             src_idx = edge_index[0, mask_t]  # [E_t]
             dst_idx = edge_index[1, mask_t]  # [E_t]
  
+            N_E = dst_idx.shape[0]
             src_t = src[src_idx]  # [E_t, H, D]
-            dst_t = dst[dst_idx]  # [E_t, H, D]
+            dst_t = dst[dst_idx] + edge_embeddings[mask_t].view(N_E, self.num_heads, -1)  # [E_t, H, D]
  
             if self.attention_type == 'bilinear':
                 A_t = self.a[t]  # [H, D, D]
@@ -312,7 +313,7 @@ class MultiHeadEdgeAttention_SerialBetweenBondtypes(nn.Module):
         # Get source and target node features for each edge  
         row, col = edge_index  # row=source, col=target  
         src_features = src_embeddings[row]  # [E, d*num_heads]  
-        dst_features = (dst_embeddings+edge_embeddings)[col]  # [E, d*num_heads]  
+        dst_features = dst_embeddings[col]+edge_embeddings  # [E, d*num_heads]  
           
         # Reshape for multi-head processing  
         src_features = src_features.view(-1, self.num_heads, d)  # [E, num_heads, d]  
@@ -418,7 +419,7 @@ class GlobalEdgeAttn(nn.Module):
         for i in range(batch_size):
             indices = graph_indices_list[i]
             if len(indices) > 0:
-                X_padded[i, :len(indices)] = (atom_embeddings+edge_embeddings)[indices]
+                X_padded[i, :len(indices)] = atom_embeddings[indices]
 
         # Create key_padding_mask: True means ignore, False means attend
         key_padding_mask = torch.ones(batch_size, max_graph_size, dtype=torch.bool, device=device)

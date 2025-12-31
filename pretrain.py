@@ -74,7 +74,11 @@ task7 = ScaffoldContrast()
 tasks = [task0, task1, task2, task3, task6, task7]
 task_types = ["classification", "regression", "other", "other", "classification", "other"]
 
-weight_stratergy = FixedUncertaintyWeighting(num_tasks=len(tasks))
+weight_stratergy = None
+if cfg.fix_uncertainty == True:
+    weight_stratergy = FixedUncertaintyWeighting(num_tasks=len(tasks))
+else:
+    weight_stratergy = UncertaintyWeighting(num_tasks=len(tasks))
 
 def get_dataset_info(data_path):
     total_rows = sum(1 for _ in open(data_path)) - 1
@@ -330,7 +334,7 @@ if __name__ == "__main__":
                     outputs1 = head1(graph_emb1_masked)
                     outputs1 = outputs1.view(-1, outputs1.size(-1))
                     task1.set_pred(outputs1)
-                    task1_labels = nn.functional.one_hot(batch_data.x[mask_indices], num_classes=120)
+                    task1_labels = batch_data.x[:,0][mask_indices]
                     task1.set_label(task1_labels)
                     loss_masked_atom_type_pred = task1.compute_loss()
 
@@ -368,7 +372,7 @@ if __name__ == "__main__":
                     loss_scaffold_contrast = task7.compute_loss()
 
                     losses = [loss_atom_attr_pred, loss_masked_atom_type_pred, loss_triplet_contrast, loss_batch_contrast, loss_functional_group_pred, loss_scaffold_contrast]
-                    loss = weight_stratergy(losses, cfg.fixed_log_vars)
+                    loss = weight_stratergy(losses)
 
                     # backward and step
                     loss.backward()
@@ -452,7 +456,7 @@ if __name__ == "__main__":
                         outputs1 = head1(graph_emb1_masked)
                         outputs1 = outputs1.view(-1, outputs1.size(-1))
                         task1.set_pred(outputs1)
-                        task1_labels = nn.functional.one_hot(batch_data.x[mask_indices], num_classes=120)
+                        task1_labels = batch_data.x[:,0][mask_indices]
                         task1.set_label(task1_labels)
                         loss_masked_atom_type_pred = task1.compute_loss()
 
@@ -491,7 +495,7 @@ if __name__ == "__main__":
                         
                         losses = [loss_atom_attr_pred, loss_masked_atom_type_pred, loss_triplet_contrast, loss_batch_contrast, loss_functional_group_pred, loss_scaffold_contrast]
 
-                        loss = weight_stratergy(losses, cfg.fixed_log_vars)
+                        loss = weight_stratergy(losses)
                    
                         if batch_idx == val_loader.total_batches - 1:
                             metrics = {f"metrics_{i}": tasks[i].get_metrics() for i in range(len(tasks))}

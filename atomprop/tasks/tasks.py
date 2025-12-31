@@ -3,12 +3,10 @@ Module for pretraining tasks for GNNs.
 """
 
 from atomprop.utils.features import AtomFeaturize, AtomFeaturizeLoss 
-from atomprop.models.GNNs import MaskedBCELoss, MaskedFocalLoss
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import functools
-from atomprop.utils.weights import log_var_lower_bound, log_var_upper_bound
 
 def nan_to_zero(name: str):
     """
@@ -74,7 +72,7 @@ class MaskedNodePrediction:
     Masked node type prediction task.
     """
 
-    def __init__(self, criterion=nn.BCEWithLogitsLoss()):
+    def __init__(self, criterion=nn.CrossEntropyLoss()):
         self.criterion = criterion
         self.preds = None
         self.labels = None
@@ -104,11 +102,10 @@ class MaskedNodePrediction:
     def get_metrics(self):
         """
         Compute metrics for the task.
-        In this case, we compute relative accuracy.
-        ra(label, pred) = 1 - (||label - pred||) / ||label||
+        In this case, we uses loss.
         """
         return {
-            'relative_accuracy': 1 - torch.mean(torch.norm(self.labels - self.preds) / (torch.norm(self.labels) + 1e-16)).item()
+            'loss': self.criterion(self.preds, self.labels).item()
         }
 
 class GraphMaskContrast:
