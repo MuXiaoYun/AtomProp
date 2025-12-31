@@ -15,12 +15,10 @@ class EdgeAttention(nn.Module):
     This module supports two attention mechanisms: 'bilinear' and 'mlp'.  
     - 'bilinear': Uses bilinear transformation to compute attention scores (default)  
     - 'mlp': Uses a small MLP on concatenated inputs to compute attention scores  
-    Rewritten to handle edge lists.  
     """  
-  
     def __init__(self, atom_embedding_dim: int, num_bond_types: int, 
                  output_negative_slope: float = 0.2, attention_type: str = default_attention_type,
-                 mlp_hidden_dim: int = 768, mlp_num_layers: int = 2):  
+                 mlp_hidden_dim: int = 1024, mlp_num_layers: int = 2):  
         super(EdgeAttention, self).__init__()  
         self.atom_d = atom_embedding_dim  
         self.num_bond_types = num_bond_types  
@@ -158,7 +156,7 @@ class MultiHeadEdgeAttention_ParallelBetweenBondtypes(nn.Module):
         num_heads: int = 8,
         output_negative_slope: float = 0.2,
         attention_type: str = default_attention_type,
-        mlp_hidden_dim: int = 768,
+        mlp_hidden_dim: int = 1024,
         mlp_num_layers: int = 2,
     ):
         super().__init__()
@@ -266,7 +264,7 @@ class MultiHeadEdgeAttention_SerialBetweenBondtypes(nn.Module):
   
     def __init__(self, atom_embedding_dim: int, num_bond_types: int, num_heads: int = 8, 
                  output_negative_slope: float = 0.2, attention_type: str = default_attention_type,
-                 mlp_hidden_dim: int = 768, mlp_num_layers: int = 2):  
+                 mlp_hidden_dim: int = 1024, mlp_num_layers: int = 2):  
         super(MultiHeadEdgeAttention_SerialBetweenBondtypes, self).__init__()  
         self.num_heads = num_heads  
         self.atom_d = atom_embedding_dim  
