@@ -108,7 +108,7 @@ def evaluate_model(model_components, dataloader, criterion, y_cols, device, aggr
 def train_fold(fold_idx, train_dataloader, val_dataloader, test_dataloader, model_components, optimizers, schedulers, device, num_epochs, y_cols, logdir, no_pretrain, aggr='attention'):
     """Train a single fold"""
     backbone, neck, head, aggrmodel = model_components
-    writer = SummaryWriter(log_dir=f'runs/finetune_kfold_fold{fold_idx}')
+    writer = SummaryWriter(log_dir=f'runs/finetune_kfold_fold{fold_idx}_{logdir}')
     
     best_val_auc = 0.0
     best_epoch = -1
@@ -201,7 +201,7 @@ def train_fold(fold_idx, train_dataloader, val_dataloader, test_dataloader, mode
     print(f"  Test Loss: {test_loss:.4f}")
     print(f"  Mean Test AUC: {test_auc:.4f}")
     
-    output_csv_path = f"trained_models/{logdir}/fold{fold_idx}_test_predictions.csv"
+    output_csv_path = f"trained_models/{logdir}/fold{fold_idx}_test_predictions_{model_suffix}.csv"
     if len(all_test_preds) > 0:
         all_test_preds = np.vstack(all_test_preds)
         all_test_labels = np.vstack(all_test_labels)
@@ -255,8 +255,7 @@ def main(ft_dataset = None):
     
     # 2. Initialize base model components (for weight loading if needed)
     backbone = Embedder(num_atom_types=120, embed_dim=cfg.embed_dim)
-    neck = GeATNet(embed_dim=cfg.embed_dim, dropout=0.5, geat_num_layers=cfg.geat_num_layers, aggr_num_layers=cfg.aggr_num_layers)
-    aggrmodel = GNNAggr(embed_dim=cfg.embed_dim, aggr=cfg.aggr, layers=1)
+    neck = GeATNet(embed_dim=cfg.embed_dim, dropout=0, geat_num_layers=cfg.geat_num_layers, aggr_num_layers=cfg.aggr_num_layers)
     
     if cfg.no_pretrain == False:
         ckpt = torch.load(cfg.pretrained_path, weights_only=False, map_location=device)
@@ -264,7 +263,7 @@ def main(ft_dataset = None):
         neck.load_state_dict(ckpt['neck_state_dict'])
     
     head = MLP(input_dim=cfg.embed_dim, hidden_dim=384, output_dim=len(y_cols),
-               num_layers=2, dropout=0.5, batch_norm=True, output_activation=None)
+               num_layers=2, dropout=cfg.head_dropout, batch_norm=True, output_activation=None)
     head.init_params(gain=2.0)
     
     print(f"Backbone Parameters: {sum(p.numel() for p in backbone.parameters() if p.requires_grad)}")

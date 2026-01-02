@@ -7,7 +7,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from atomprop.utils.mlp import MLP
 
-default_attention_type = 'mlp'
+default_attention_type = 'bilinear'
  
 class EdgeAttention(nn.Module):  
     """  

@@ -6,7 +6,7 @@ import torch
 
 # Training
 from_scratch = True
-from_model_path = "trained_models/pretrain_pubchem_geat/model_epoch7.pth" # if from_scratch
+from_model_path = "trained_models/pretrain_pubchem_geat/model_epoch7.pth" # if not from_scratch
 
 # Dataset and I/O
 data_path = "data/zinc15/dataset/zinc_standard_agent/processed/smiles.csv"
@@ -14,6 +14,18 @@ data_path = "data/zinc15/dataset/zinc_standard_agent/processed/smiles.csv"
 pretrain_file_type = 'txt'
 
 logdir = "pretrain_zinc_geat_moe"
+
+# Model settings
+geat_num_layers = 4
+aggr_num_layers = 2
+num_heads = 8
+global_num_heads = 8
+output_negative_slope = 0.2
+geat_dropout = 0.1
+FFN_num_layers = 2
+FFN_hidden_dim = 2048
+FFN_num_experts = 8
+FFN_top_k = 2
 
 # Data settings
 dataset_size = -1

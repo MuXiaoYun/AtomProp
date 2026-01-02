@@ -175,31 +175,6 @@ class UncertaintyWeighting(nn.Module):
             precision = torch.exp(-log_var_clamped)
             total_loss += 0.5 * precision * loss + 0.5 * log_var_clamped
         return total_loss    
-
-class AdaptiveUncertaintyWeighting(nn.Module):
-    """
-    Adaptive uncertainty weight stratergy.
-    Reference: https://arxiv.org/abs/1705.07115
-    """
-    def __init__(self, num_tasks, loss_types):
-        super().__init__()
-        self.log_vars = nn.Parameter(torch.zeros(num_tasks))
-        self.loss_types = loss_types
-    
-    def forward(self, losses):
-        """
-        losses: list of task losses [L1, L2, ..., Ln]
-        loss_types: list of loss types [T1, T2, ..., Tn], type in ["classification", "regression", "other"]
-        """
-        total_loss = 0
-        for i, loss in enumerate(losses):
-            log_var_clamped = torch.clamp(self.log_vars[i], log_var_lower_bound, log_var_upper_bound)
-            precision = torch.exp(-log_var_clamped)
-            if self.loss_types[i] == "regression":
-                total_loss += 0.5 * precision * loss + 0.5 * log_var_clamped
-            else:
-                total_loss += precision * loss
-        return total_loss 
     
 class FixedUncertaintyWeighting(nn.Module):
     """

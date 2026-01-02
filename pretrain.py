@@ -52,7 +52,17 @@ if fg_list is None:
     fg_list = FunctionalGroups.BuildFuncGroupHierarchy()
 
 backbone = Embedder(num_atom_types=120, embed_dim=embed_dim)
-neck = GeATNet(embed_dim=embed_dim, dropout=0.1)
+neck = GeATNet(embed_dim=embed_dim,
+               num_heads=cfg.num_heads,
+               global_num_heads=cfg.global_num_heads,
+               output_negative_slope=cfg.output_negative_slope,
+               dropout=cfg.geat_dropout,
+               geat_num_layers=cfg.geat_num_layers,
+               aggr_num_layers=cfg.aggr_num_layers,
+               FFN_hidden_dim=cfg.FFN_hidden_dim,
+               FFN_num_experts=cfg.FFN_num_experts,
+               FFN_num_layers=cfg.FFN_num_layers,
+               FFN_top_k=cfg.FFN_top_k)
 head0 = MLP(input_dim=embed_dim, hidden_dim=128, output_dim=157, num_layers=2, dropout=0.5) # used for atom attribute prediction
 head1 = MLP(input_dim=embed_dim, hidden_dim=128, output_dim=120, num_layers=2, dropout=0.5) # used for masked node prediction
 head4 = MLP(input_dim=embed_dim, hidden_dim=128, output_dim=len(fg_list), num_layers=2, dropout=0.5) # used for functional group prediction
