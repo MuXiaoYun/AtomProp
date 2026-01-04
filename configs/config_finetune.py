@@ -7,8 +7,21 @@ import sys
 device_str = "cuda:5"
 
 # Model settings
-geat_num_layers = 5
-aggr_num_layers = 3
+geat_num_layers = 4
+aggr_num_layers = 2
+num_heads = 8
+global_num_heads = 8
+output_negative_slope = 0.2
+geat_dropout = 0.1
+FFN_type = "MLP"
+FFN_num_layers = 2
+FFN_hidden_dim = 1024
+FFN_num_experts = 4
+FFN_top_k = 2
+
+# Regularization settings
+norm_type = ""
+norm_lambda = 0.05
 
 # Data settings
 data_path = "./data/moleculenet/tox21/tox21.csv"
@@ -16,34 +29,35 @@ x_col = "smiles"
 exclude_list = ["mol_id", "name", "num"]
 
 # Training settings
-no_pretrain = False
+no_pretrain = True
 pretrained_path = 'trained_models/pretrain_zinc_geat_moe/model_epoch3.pth'
-logdir = "finetune_geat_moe_dp"
+logdir = "finetune_MLP"
 
-batch_size = 32
-test_batch_size = 32
+batch_size = 128
+test_batch_size = 128
 num_epochs = 250
 random_state = 42
 head_dropout = 0.1
 
 # Cross-validation
-k_folds = 3
+k_folds = 5
 frac_test = 0.1
 
 # Model architecture
 embed_dim = 512
 aggr = 'mean'  # options: 'mean', 'sum', 'max', 'attention'
+head_hidden_dim = 512
 
 # Optimizer settings
-lr_backbone_neck = 1e-6
-lr_head = 1e-4
+lr_backbone_neck = 1e-4
+lr_head = 2e-4
 lr_aggr = 2e-4
 
 # Scheduler settings
 T_max = num_epochs
-eta_min_backbone_neck = 5e-8
-eta_min_head = 1e-6
-eta_min_aggr = 2e-6
+eta_min_backbone_neck = 1e-6
+eta_min_head = 1e-5
+eta_min_aggr = 1e-5
 
 def print_all_params():
     """Print all configuration parameters defined in this module."""

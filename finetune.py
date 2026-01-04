@@ -134,7 +134,7 @@ def train_fold(fold_idx, train_dataloader, val_dataloader, test_dataloader, mode
             graph_emb = aggrmodel(emb, batch.batch)
             preds = head(graph_emb)
             
-            loss = criterion(preds.reshape(-1, len(y_cols)), batch.y.reshape(-1, len(y_cols)))
+            loss = criterion(preds.reshape(-1, len(y_cols)), batch.y.reshape(-1, len(y_cols))) - cfg.norm_lambda * torch.mean(torch.abs(preds.reshape(-1, len(y_cols))-0.5))
             loss.backward()
             for optimizer in optimizers:
                 optimizer.step()
@@ -253,16 +253,31 @@ def main(ft_dataset = None):
     df[y_cols] = df[y_cols].fillna(-1).astype(float)
     labels = df[y_cols].values.tolist()
     
+    cfg.print_all_params()
+    
     # 2. Initialize base model components (for weight loading if needed)
+    # REALLY IMPORTANT: IF YOU WANT TO MODIFY THIS PART OF CODE, REMEMBER TO MODIFY FOR EACH FOLD AS WELL!!!
     backbone = Embedder(num_atom_types=120, embed_dim=cfg.embed_dim)
-    neck = GeATNet(embed_dim=cfg.embed_dim, dropout=0, geat_num_layers=cfg.geat_num_layers, aggr_num_layers=cfg.aggr_num_layers)
+    neck = GeATNet(embed_dim=cfg.embed_dim,
+                   num_heads=cfg.num_heads,
+                   global_num_heads=cfg.global_num_heads,
+                   output_negative_slope=cfg.output_negative_slope,
+                   dropout=cfg.geat_dropout,
+                   geat_num_layers=cfg.geat_num_layers,
+                   aggr_num_layers=cfg.aggr_num_layers,
+                   FFN_type=cfg.FFN_type,
+                   FFN_hidden_dim=cfg.FFN_hidden_dim,
+                   FFN_num_experts=cfg.FFN_num_experts,
+                   FFN_num_layers=cfg.FFN_num_layers,
+                   FFN_top_k=cfg.FFN_top_k)
+    neck.print_params()
     
     if cfg.no_pretrain == False:
         ckpt = torch.load(cfg.pretrained_path, weights_only=False, map_location=device)
         backbone.load_state_dict(ckpt['backbone_state_dict'])
         neck.load_state_dict(ckpt['neck_state_dict'])
     
-    head = MLP(input_dim=cfg.embed_dim, hidden_dim=384, output_dim=len(y_cols),
+    head = MLP(input_dim=cfg.embed_dim, hidden_dim=cfg.head_hidden_dim, output_dim=len(y_cols),
                num_layers=2, dropout=cfg.head_dropout, batch_norm=True, output_activation=None)
     head.init_params(gain=2.0)
     
@@ -311,10 +326,21 @@ def main(ft_dataset = None):
         
         # Clone models per fold
         backbone_fold = Embedder(num_atom_types=120, embed_dim=cfg.embed_dim)
-        neck_fold = GeATNet(embed_dim=cfg.embed_dim, dropout=0.5)
+        neck_fold = GeATNet(embed_dim=cfg.embed_dim,
+                            num_heads=cfg.num_heads,
+                            global_num_heads=cfg.global_num_heads,
+                            output_negative_slope=cfg.output_negative_slope,
+                            dropout=cfg.geat_dropout,
+                            geat_num_layers=cfg.geat_num_layers,
+                            aggr_num_layers=cfg.aggr_num_layers,
+                            FFN_type=cfg.FFN_type,
+                            FFN_hidden_dim=cfg.FFN_hidden_dim,
+                            FFN_num_experts=cfg.FFN_num_experts,
+                            FFN_num_layers=cfg.FFN_num_layers,
+                            FFN_top_k=cfg.FFN_top_k)
         aggrmodel_fold = GNNAggr(embed_dim=cfg.embed_dim, aggr=cfg.aggr, layers=1)
-        head_fold = MLP(input_dim=cfg.embed_dim, hidden_dim=384, output_dim=len(y_cols),
-                        num_layers=2, dropout=0.5, batch_norm=True, output_activation=None)
+        head_fold = MLP(input_dim=cfg.embed_dim, hidden_dim=cfg.head_hidden_dim, output_dim=len(y_cols),
+                        num_layers=2, dropout=cfg.head_dropout, batch_norm=True, output_activation=None)
         head_fold.init_params(gain=2.0)
         
         if not cfg.no_pretrain:

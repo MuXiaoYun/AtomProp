@@ -12,7 +12,15 @@ class MLP(nn.Module):
     A :class:`MLP` is a module that implements a multi-layer perceptron.
     """
 
-    def __init__(self, input_dim: int, hidden_dim: int, output_dim: int, num_layers: int, dropout: float = 0.0, batch_norm = False, hidden_activation = F.relu, output_activation = None):
+    def __init__(self, input_dim: int,
+                 hidden_dim: int,
+                 output_dim: int,
+                 num_layers: int,
+                 dropout: float = 0.1,
+                 batch_norm = False,
+                 hidden_activation = F.relu,
+                 output_activation = None,
+                 zero_init: bool = False):
         super(MLP, self).__init__()
         self.input_dim = input_dim
         self.hidden_dim = hidden_dim
@@ -21,6 +29,7 @@ class MLP(nn.Module):
         self.hidden_activation = hidden_activation
         self.output_activation = output_activation
         self.dropout = dropout
+        self.zero_init = zero_init
 
         layers = []
         if num_layers == 1:
@@ -43,23 +52,23 @@ class MLP(nn.Module):
     def init_params(self, gain: float = 1.0):
         """
         Initialize the parameters of the MLP.
-
         Args:
             gain (float): Gain value for Xavier initialization.
         """
-        for layer in self.layers:
+        for i, layer in enumerate(self.layers):
             if isinstance(layer, nn.Linear):
-                nn.init.xavier_uniform_(layer.weight, gain=gain)
+                if self.zero_init and i == len(self.layers)-1:
+                    nn.init.zeros_(layer.weight)
+                else:
+                    nn.init.xavier_uniform_(layer.weight, gain=gain)
                 if layer.bias is not None:
                     nn.init.zeros_(layer.bias)
 
     def forward(self, x: torch.Tensor):
         """
         Forward pass of the MLP.
-
         Args:
             x (torch.Tensor): Input tensor of shape (batch_size, input_dim).
-
         Returns:
             torch.Tensor: Output tensor of shape (batch_size, output_dim).
         """
@@ -78,7 +87,6 @@ class MLP(nn.Module):
 class MoE(nn.Module):
     """
     Mixture of Experts (MoE) layer.
-    
     Replaces a standard FFN with N experts. Each input token is routed to top-k experts.
     """
     def __init__(
@@ -119,6 +127,7 @@ class MoE(nn.Module):
                 batch_norm=batch_norm,
                 hidden_activation=hidden_activation,
                 output_activation=output_activation,
+                zero_init=True
             )
             for _ in range(num_experts)
         ])
@@ -132,10 +141,8 @@ class MoE(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
         Forward pass with sparse top-k routing.
-
         Args:
             x: (batch_size, seq_len, input_dim) or (N, input_dim)
-
         Returns:
             out: same shape as x (with output_dim in last dim)
         """
@@ -179,4 +186,5 @@ class MoE(nn.Module):
         # Reshape back
         if len(original_shape) == 3:
             out = out.view(batch_size, seq_len, self.output_dim)
+        
         return out

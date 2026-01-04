@@ -150,10 +150,12 @@ class GeATNet(nn.Module):
                  dropout: int = 0.2,
                  geat_num_layers: int = 4,
                  aggr_num_layers: int = 2,
+                 FFN_type: str = "MLP",
                  FFN_num_layers: int = 2,
                  FFN_hidden_dim: int = 2048,
                  FFN_num_experts: int = 8,
                  FFN_top_k: int = 2,
+                 gating_dropout: float = 0.2,
                  ):  
         super(GeATNet, self).__init__()
         if num_bond_types is None:
@@ -168,8 +170,15 @@ class GeATNet(nn.Module):
                                    global_num_heads=global_num_heads,
                                    dropout=dropout,
                                    attn_num_layers=aggr_num_layers)
-        # self.ffn = MLP(input_dim=embed_dim, hidden_dim=FFN_hidden_dim, output_dim=embed_dim, num_layers=FFN_num_layers, dropout=dropout, activation='relu')
-        self.ffn = MoE(input_dim=embed_dim,
+        if FFN_type == "MLP":
+            self.ffn = MLP(input_dim=embed_dim,
+                           hidden_dim=FFN_hidden_dim,
+                           output_dim=embed_dim,
+                           num_layers=FFN_num_layers,
+                           dropout=dropout,
+                           zero_init=True)
+        elif FFN_type == "MOE":
+            self.ffn = MoE(input_dim=embed_dim,
                        hidden_dim=FFN_hidden_dim,
                        output_dim=embed_dim,
                        num_experts=FFN_num_experts,
@@ -177,9 +186,14 @@ class GeATNet(nn.Module):
                        expert_hidden_layers=FFN_num_layers,
                        dropout=dropout,
                        hidden_activation=nn.ReLU(),
-                       output_activation=None)
+                       output_activation=None,
+                       gating_dropout=gating_dropout)
+        else:
+            raise ValueError("Unknown FFN type for GeAT.")
         self.edge_type_embedding = nn.Embedding(len(BondTypes.get_bond_types())+1, embed_dim)
         self.edge_direction_embedding = nn.Embedding(len(BondDirections.get_bond_directions())+1, embed_dim)
+        
+        self.FFN_norm = nn.LayerNorm(embed_dim)
         
         self.reset_parameters()
         
@@ -203,7 +217,7 @@ class GeATNet(nn.Module):
         edge_embeddings = self.edge_type_embedding(edge_attr[:,0]) + self.edge_direction_embedding(edge_attr[:,1])
         geat_embeddings = self.backbone(x, edge_embeddings, edge_index, edge_attr)  
         aggr_embeddings = self.neck(geat_embeddings, edge_embeddings, batch)  
-        output = self.ffn(aggr_embeddings)
+        output = self.FFN_norm(aggr_embeddings + self.ffn(aggr_embeddings))
         return output
 
     def print_params(self):
@@ -230,7 +244,7 @@ class GeATNet(nn.Module):
 
         # FFN (MoE)
         ffn_params = count_params(self.ffn)
-        print(f"{'FFN (MoE)':<40}: {ffn_params:>12,}")
+        print(f"{'FFN':<40}: {ffn_params:>12,}")
         total_params += ffn_params
 
         # Edge type embedding

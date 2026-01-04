@@ -13,7 +13,7 @@ data_path = "data/zinc15/dataset/zinc_standard_agent/processed/smiles.csv"
 # data_path = "data/pubchem/pubchem-10m.txt"
 pretrain_file_type = 'txt'
 
-logdir = "pretrain_zinc_geat_moe"
+logdir = "pretrain_zinc_geat_moe_fn"
 
 # Model settings
 geat_num_layers = 4
@@ -55,14 +55,18 @@ fg_list = None  # if None, use default RDKit functional groups
 device_str = "cuda:6"  # fallback to cpu if not available
 
 # Optimizer & Scheduler base settings
-backbone_lr = 5e-4
-neck_lr = 5e-4
-head_lr = 5e-4
+backbone_lr = 5e-4  # embedding layer
+neck_lr = 5e-4  # geat
+head_lr = 5e-4  # classification head
 weight_strategy_lr = 1e-3
 
-backbone_wd = 5e-5
-neck_wd = 5e-5
-head_wd = 1e-5
+# Layer-wise learning rate decay
+use_layer_decay = True  # Set to False to disable
+layer_decay_rate = 0.9  # Each layer has this rate of LR of previous layer
+
+backbone_wd = 5e-5  # embedding layer
+neck_wd = 5e-5  # geat
+head_wd = 1e-5  # classification head
 weight_strategy_wd = 0.0
 
 neck_scheduler_max_lr = 1e-3  # special for neck

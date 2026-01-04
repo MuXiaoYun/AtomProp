@@ -6,7 +6,7 @@ from atomprop.utils.mlp import MLP
 from atomprop.utils.mask import MolGraphMask
 from atomprop.utils.groups import TripletGroup, QuadrupletGroup
 from atomprop.utils.features import FunctionalGroupUtils
-from atomprop.utils.weights import WeightStratergy, EqualWeightStratergy, HardSwitch, SoftSwitch, GradNorm, ParetoOpt, UncertaintyWeighting, AdaptiveUncertaintyWeighting, FixedUncertaintyWeighting
+from atomprop.utils.weights import WeightStratergy, EqualWeightStratergy, HardSwitch, SoftSwitch, GradNorm, ParetoOpt, UncertaintyWeighting, FixedUncertaintyWeighting
 from atomprop.utils.scaffold import ScaffoldSimilarityMatrix
 from atomprop.embeddings.AtomEmbedding import BondTypes
 import matplotlib.pyplot as plt
@@ -104,6 +104,137 @@ def create_data_splits(total_size):
     test_indices = indices[train_size + val_size:]
     return train_indices, val_indices, test_indices
 
+def get_geat_layer_parameters(model, layer_decay=0.9):
+    """
+    Extract parameters from GeATNet with layer-wise decay.
+    
+    Args:
+        model: GeATNet instance
+        layer_decay: decay factor for each layer (e.g., 0.9 means each layer has 90% LR of previous layer)
+    
+    Returns:
+        List of parameter groups with different learning rates
+    """
+    param_groups = []
+    
+    # Extract GeAT layers from the backbone of GeATNet
+    geat_conv = model.backbone
+    num_layers = len(geat_conv.geat_layers)
+    
+    # Layer-wise parameters for GeAT layers
+    for i, layer in enumerate(geat_conv.geat_layers):
+        layer_lr_scale = layer_decay ** (num_layers - 1 - i)  # Deeper layers get smaller LR
+        params = []
+        
+        # Get all parameters from this layer
+        for name, param in layer.named_parameters():
+            if param.requires_grad:
+                params.append(param)
+        
+        if params:  # Only add if there are trainable parameters
+            param_groups.append({
+                'params': params,
+                'lr_scale': layer_lr_scale,
+                'layer_idx': i,
+                'name': f'geat_layer_{i}'
+            })
+    
+    # Parameters from norm layers in GeATConv
+    for i, norm_layer in enumerate(geat_conv.norm_layers):
+        layer_lr_scale = layer_decay ** (num_layers - 1 - i)
+        params = []
+        
+        for name, param in norm_layer.named_parameters():
+            if param.requires_grad:
+                params.append(param)
+        
+        if params:
+            param_groups.append({
+                'params': params,
+                'lr_scale': layer_lr_scale,
+                'layer_idx': i,
+                'name': f'geat_norm_{i}'
+            })
+    
+    # Parameters from neck (GlobalAttnConv) - treat as additional layers
+    neck_layers = model.neck.global_attns
+    neck_norm_layers = model.neck.norm_layers
+    
+    for i in range(len(neck_layers)):
+        # Global attention layers
+        layer_lr_scale = layer_decay ** (num_layers + i)
+        params = []
+        
+        for name, param in neck_layers[i].named_parameters():
+            if param.requires_grad:
+                params.append(param)
+        
+        if params:
+            param_groups.append({
+                'params': params,
+                'lr_scale': layer_lr_scale,
+                'layer_idx': num_layers + i,
+                'name': f'global_attn_{i}'
+            })
+        
+        # Norm layers for global attention
+        params = []
+        for name, param in neck_norm_layers[i].named_parameters():
+            if param.requires_grad:
+                params.append(param)
+        
+        if params:
+            param_groups.append({
+                'params': params,
+                'lr_scale': layer_lr_scale,
+                'layer_idx': num_layers + i,
+                'name': f'global_norm_{i}'
+            })
+    
+    # Parameters from FFN (MoE) - treat as the final layers
+    ffn_layer_idx = num_layers + len(neck_layers)
+    params = []
+    for name, param in model.ffn.named_parameters():
+        if param.requires_grad:
+            params.append(param)
+    
+    if params:
+        param_groups.append({
+            'params': params,
+            'lr_scale': layer_decay ** ffn_layer_idx,
+            'layer_idx': ffn_layer_idx,
+            'name': 'ffn'
+        })
+    
+    # Edge embeddings - treat as input layer (no decay)
+    params = []
+    for name, param in model.edge_type_embedding.named_parameters():
+        if param.requires_grad:
+            params.append(param)
+    
+    if params:
+        param_groups.append({
+            'params': params,
+            'lr_scale': 1.0,  # No decay for embeddings
+            'layer_idx': 0,
+            'name': 'edge_type_embedding'
+        })
+    
+    params = []
+    for name, param in model.edge_direction_embedding.named_parameters():
+        if param.requires_grad:
+            params.append(param)
+    
+    if params:
+        param_groups.append({
+            'params': params,
+            'lr_scale': 1.0,  # No decay for embeddings
+            'layer_idx': 0,
+            'name': 'edge_direction_embedding'
+        })
+    
+    return param_groups
+
 if __name__ == "__main__":
     with nullcontext():
         writer = SummaryWriter(log_dir=f"runs/{logdir}")
@@ -126,6 +257,7 @@ if __name__ == "__main__":
         head1.to(device)
         head4.to(device)
         weight_stratergy.to(device)
+        neck.print_params()
 
         print(backbone.__class__.__name__, f"Parameters: {sum(p.numel() for p in backbone.parameters() if p.requires_grad)}")
         print(neck.__class__.__name__, f"Parameters: {sum(p.numel() for p in neck.parameters() if p.requires_grad)}")
@@ -191,6 +323,33 @@ if __name__ == "__main__":
                 "kwargs": {"lr": cfg.weight_strategy_lr, "weight_decay": cfg.weight_strategy_wd}
             }
         }
+
+        # Get layer-wise parameter groups for GeATNet if layer decay is enabled
+        if cfg.use_layer_decay and cfg.layer_decay_rate > 0:
+            print(f"Using layer-wise learning rate decay with rate: {cfg.layer_decay_rate}")
+            neck_param_groups = get_geat_layer_parameters(neck, layer_decay=cfg.layer_decay_rate)
+            
+            # Create parameter groups with scaled learning rates
+            neck_params = []
+            for group in neck_param_groups:
+                base_lr = cfg.neck_lr
+                scaled_lr = base_lr * group['lr_scale']
+                neck_params.append({
+                    'params': group['params'],
+                    'lr': scaled_lr,
+                    'weight_decay': cfg.neck_wd,
+                    'name': group['name']
+                })
+                print(f"  Layer {group['layer_idx']} ({group['name']}): LR scale = {group['lr_scale']:.4f}, Effective LR = {scaled_lr:.6f}")
+            
+            # Update neck optimizer configuration
+            optimizer_configs["neck"]["kwargs"] = {
+                "params": neck_params,
+                "lr": cfg.neck_lr,  # Base LR, but individual params have scaled LRs
+                "weight_decay": cfg.neck_wd
+            }
+        else:
+            print("Using uniform learning rate for all GeAT layers")
 
         scheduler_configs = {
             "backbone": {
@@ -293,7 +452,14 @@ if __name__ == "__main__":
 
             opt_cls = opt_conf.get("cls")
             opt_kwargs = opt_conf.get("kwargs", {})
-            optimizers[name] = opt_cls(module.parameters(), **opt_kwargs)
+            
+            # Special handling for neck when using layer decay
+            if name == "neck" and cfg.use_layer_decay and cfg.layer_decay_rate > 0:
+                # neck_params already contains parameter groups with individual LRs
+                optimizers[name] = opt_cls(**opt_kwargs)
+            else:
+                # Standard initialization
+                optimizers[name] = opt_cls(module.parameters(), **opt_kwargs)
 
             sched_conf = scheduler_configs.get(name)
             if sched_conf is not None:
@@ -391,6 +557,12 @@ if __name__ == "__main__":
                         
                     for name, scheduler in schedulers.items():
                         scheduler.step()
+                    
+                    # Log layer-wise learning rates for neck if using layer decay
+                    if cfg.use_layer_decay and cfg.layer_decay_rate > 0 and (batch_idx == 0 or (batch_idx + 1) % record_freq == 0):
+                        for param_group in optimizers["neck"].param_groups:
+                            if 'name' in param_group:
+                                writer.add_scalar(f'LR/neck_{param_group["name"]}', param_group['lr'], epoch * train_loader.total_batches + batch_idx)
                     
                     if batch_idx == 0 or (batch_idx + 1) % record_freq == 0:
                         writer.add_scalar('Train/Loss_total', loss.item(), epoch * train_loader.total_batches + batch_idx)
