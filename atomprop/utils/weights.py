@@ -8,145 +8,72 @@ import torch.nn as nn
 log_var_lower_bound = -10
 log_var_upper_bound = 10
 
-class WeightStratergy:
-    """
-    Base class for weight stratergy.
-    """
-    @staticmethod
-    def weight_norm(weights, eps=1e-3):
+class GradNorm(nn.Module):
+    def __init__(self, num_tasks, init_weights=None, alpha=0.16):
         """
-        Normalize the weights to sum to 1.
+        Args:
+            num_tasks (int): number of tasks T
+            init_weights (list or Tensor, optional): init weights or from Uncertainty Weighting
+            alpha (float): loss ratio sensitivity 
         """
-        return weights / torch.sum(weights)
-    
-    def __init__(self, task_num, device):
-        self.task_num = task_num
-        self.device = device
-    
-    def outputs(self):
-        """
-        Get the weights for each task.
-        Return a pytorch tensor of shape (task_num,).
-        """
-        raise NotImplementedError("This method should be overridden by subclasses.")
-    
-    def outputs_to_list(self, **kwargs):
-        """
-        Get the weights for each task as a list.
-        Return a list of length task_num.
-        """
-        weights = self.outputs(**kwargs)
-        return torch.unbind(weights, dim=0)
-    
-class EqualWeightStratergy(WeightStratergy):
-    """
-    Equal weight stratergy.
-    """
-    def __init__(self, task_num, device):
-        super().__init__(task_num, device)
-    
-    def outputs(self, divide=False):
-        if not divide:
-            return torch.ones(self.task_num).to(self.device)
-        return torch.ones(self.task_num)/self.task_num.to(self.device)
-    
-class HardSwitch(WeightStratergy):
-    """
-    Hard switch weight stratergy.
-    """
-    def __init__(self, task_num, device, switch_timings = None):
-        super().__init__(task_num, device)
-        assert switch_timings is not None, "switch_timings must be provided for HardSwitchWeightStratergy."
-        assert switch_timings.shape[0] == task_num, "switch_timings length must be task_num."
-        self.switch_timings = switch_timings.to(device)
-    
-    def outputs(self, timing):
-        current_task = -1
-        for i in range(self.task_num):
-            if timing >= self.switch_timings[i]:
-                current_task = i
-                break
-        if current_task == -1:
-            return torch.ones(self.task_num)
+        super().__init__()
+        if init_weights is None:
+            init_weights = torch.ones(num_tasks)
         else:
-            weights = torch.zeros(self.task_num, device=self.device)
-            weights[current_task] = torch.tensor(1.0, dtype=torch.float32)
-            return weights
-        
-class SoftSwitch(WeightStratergy):
-    def __init__(self, task_num, device, switch_timings=None, transition_width=10, 
-                 min_weight=0.0, max_weight=1.0):
-        super().__init__(task_num, device)
-        assert switch_timings is not None, "switch_timings must be provided for SoftSwitchWeightStratergy."
-        assert switch_timings.shape[0] == task_num, "switch_timings length must be task_num."
-        self.switch_timings = switch_timings.to(device)
-        self.transition_width = transition_width
-        self.min_weight = min_weight
-        self.max_weight = max_weight
-        assert max_weight > min_weight, "max_weight must be greater than min_weight"
-    
-    def outputs(self, timing):
-        weights = torch.full((self.task_num,), self.min_weight, device=self.device)
-        weight_range = self.max_weight - self.min_weight
-        
-        # Determine which task is currently active or transitioning
-        if timing < self.switch_timings[0]:
-            # First task is active
-            weights[0] = self.max_weight
-        else:
-            for i in range(1, self.task_num):
-                if timing < self.switch_timings[i]:
-                    # Task i is transitioning to active
-                    prev_timing = self.switch_timings[i-1]
-                    if timing < prev_timing + self.transition_width:
-                        # Transition period: task i-1 -> task i
-                        progress = (timing - prev_timing) / self.transition_width
-                        cos_value = torch.cos(torch.pi * progress)
-                        weights[i-1] = self.min_weight + 0.5 * weight_range * (1 + cos_value)
-                        weights[i] = self.min_weight + 0.5 * weight_range * (1 - cos_value)
-                    else:
-                        # Task i is fully active
-                        weights[i] = self.max_weight
-                    break
-            else:
-                # Last task is active
-                if timing < self.switch_timings[-1] + self.transition_width:
-                    # Transition to last task
-                    progress = (timing - self.switch_timings[-1]) / self.transition_width
-                    cos_value = torch.cos(torch.pi * progress)
-                    weights[-2] = self.min_weight + 0.5 * weight_range * (1 + cos_value)
-                    weights[-1] = self.min_weight + 0.5 * weight_range * (1 - cos_value)
-                else:
-                    # Last task fully active
-                    weights[-1] = self.max_weight
-        
-        return weights
+            init_weights = init_weights
+        self.task_weights = nn.Parameter(init_weights)
+        self.alpha = alpha
+        self.num_tasks = num_tasks
 
-class GradNorm(WeightStratergy):
-    """
-    GradNorm weight stratergy.
-    Reference: https://arxiv.org/abs/1711.02257
-    """
-    def __init__(self, task_num, device):
-        super().__init__(task_num, device)
-        
-    def outputs(self, grads: list):
-        grads_norm = []
-        for grad in grads:
-            if grad is None:
-                grads_norm.append(torch.tensor(0.0, device=self.device))
-            else:
-                grads_norm.append(grad.norm())
-        norms = torch.stack(grads_norm).clamp(min=1e-4, max=1e4)
-        self.inv = 1.0 / (norms.detach())
-        return self.inv
+    def forward(self, task_losses, shared_params):
+        """
+        Calculate GradNorm loss. 
+        Args:
+            task_losses (List[Tensor]): losses for each task, length T
+            shared_params (Iterable[nn.Parameter]): parameters of shared layers
+        Returns:
+            total_loss (Tensor): total loss
+            gradnorm_loss (Tensor): GradNorm loss
+            normalized_weights (Tensor): normed weights
+        """
+        T = self.num_tasks
+        weights = self.task_weights
+        normalized_weights = weights / weights.mean()  # mean=1 => sum=T
+
+        weighted_losses = [normalized_weights[i] * task_losses[i] for i in range(T)]
+        total_loss = sum(weighted_losses)
+
+        G = []
+        for i in range(T):
+            grad = torch.autograd.grad(
+                outputs=normalized_weights[i] * task_losses[i],
+                inputs=shared_params,
+                retain_graph=True,  
+                allow_unused=True, 
+                create_graph=False   
+            )
+            grad_flat = torch.cat([g.flatten() for g in grad if g is not None])
+            G_i = torch.norm(grad_flat, p=2)
+            G.append(G_i)
+        G = torch.stack(G)  # shape: [T]
+
+        G_avg = G.mean()
+        with torch.no_grad():
+            L = torch.stack(task_losses)
+            L_avg = L.mean()
+            r_target = (L / L_avg) ** self.alpha
+
+        gradnorm_loss = torch.abs(G - G_avg * r_target).sum() 
+
+        return total_loss, gradnorm_loss, normalized_weights.detach()
     
-class ParetoOpt(WeightStratergy):
+class ParetoOpt:
     """
     Given a group of grads g1, g2, ..., gn, this method calculates w1, w2, ..., wn so that g_opt = Σwi*gi satisfies g_opt = argmin max ∠(g_opt, gi).
     """
     def __init__(self, task_num, device):
-        super().__init__(task_num, device) 
+        self.task_num = task_num
+        self.device = device
     
     def outputs(self, grads: list):
         grads_mean = []

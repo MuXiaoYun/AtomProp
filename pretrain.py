@@ -6,7 +6,7 @@ from atomprop.utils.mlp import MLP
 from atomprop.utils.mask import MolGraphMask
 from atomprop.utils.groups import TripletGroup, QuadrupletGroup
 from atomprop.utils.features import FunctionalGroupUtils
-from atomprop.utils.weights import WeightStratergy, EqualWeightStratergy, HardSwitch, SoftSwitch, GradNorm, ParetoOpt, UncertaintyWeighting, FixedUncertaintyWeighting
+from atomprop.utils.weights import GradNorm, ParetoOpt, UncertaintyWeighting, FixedUncertaintyWeighting
 from atomprop.utils.scaffold import ScaffoldSimilarityMatrix
 from atomprop.embeddings.AtomEmbedding import BondTypes
 import matplotlib.pyplot as plt
@@ -41,6 +41,7 @@ fg_list = cfg.fg_list  # if none, use default rdkit fgs
 
 chunk_size = cfg.chunk_size
 max_atom_num = cfg.max_atom_num
+weight_type = cfg.weight_type
 
 less_rate = cfg.less_rate
 more_rate = cfg.more_rate
@@ -85,10 +86,13 @@ tasks = [task0, task1, task2, task3, task6, task7]
 task_types = ["classification", "regression", "other", "other", "classification", "other"]
 
 weight_stratergy = None
-if cfg.fix_uncertainty == True:
-    weight_stratergy = FixedUncertaintyWeighting(num_tasks=len(tasks))
-else:
-    weight_stratergy = UncertaintyWeighting(num_tasks=len(tasks))
+if weight_type == "UW":
+    if cfg.fix_uncertainty == True:
+        weight_stratergy = FixedUncertaintyWeighting(num_tasks=len(tasks))
+    else:
+        weight_stratergy = UncertaintyWeighting(num_tasks=len(tasks))
+elif weight_type == "GRADNORM":
+    weight_stratergy = GradNorm(num_tasks=len(tasks), init_weights=torch.exp(-cfg.fixed_log_vars))
 
 def get_dataset_info(data_path):
     total_rows = sum(1 for _ in open(data_path)) - 1
@@ -247,8 +251,6 @@ if __name__ == "__main__":
 
         train_indices, val_indices, test_indices = create_data_splits(total_rows)
         print(f"Train set size: {len(train_indices)}, Val set size: {len(val_indices)}, Test set size: {len(test_indices)}")
-        
-        BondTypes.set_bond_types(["SINGLE", "DOUBLE", "TRIPLE", 'AROMATIC'])
 
         print(f"Using computing device: {device}")
         backbone.to(device)

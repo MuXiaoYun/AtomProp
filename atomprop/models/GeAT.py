@@ -22,18 +22,21 @@ class GeATLayer(nn.Module):
         num_heads: int = 8,
         dropout: float = 0.2,
         output_negative_slope: float = 0.2,
+        use_edge_embedding: bool = False
     ):
         super(GeATLayer, self).__init__()
         self.num_heads = num_heads
         self.embed_dim = embed_dim
         self.num_bond_types = num_bond_types
+        self.use_edge_embedding = use_edge_embedding
 
         # Linear projections for Q, K, V (shared across heads in input)
         self.Q_w = nn.Linear(embed_dim, embed_dim * num_heads)
         self.K_w = nn.Linear(embed_dim, embed_dim * num_heads)
         self.V_w = nn.Linear(embed_dim, embed_dim * num_heads)
         
-        self.edge_w = nn.Linear(embed_dim, embed_dim * num_heads)
+        if use_edge_embedding:
+            self.edge_w = nn.Linear(embed_dim, embed_dim * num_heads)
 
         # Use the powerful edge-aware multi-head attention
         self.edge_attention = MultiHeadEdgeAttention(
@@ -41,6 +44,7 @@ class GeATLayer(nn.Module):
             num_bond_types=num_bond_types,
             num_heads=num_heads,
             output_negative_slope=output_negative_slope,
+            use_edge_embedding=use_edge_embedding
         )
 
         self.dropout_layer = nn.Dropout(dropout)
@@ -62,7 +66,10 @@ class GeATLayer(nn.Module):
         Q = self.Q_w(atom_embeddings)  # [B_N, embed_dim * num_heads]
         K = self.K_w(atom_embeddings)  # [B_N, embed_dim * num_heads]
         V = self.V_w(atom_embeddings)  # [B_N, embed_dim * num_heads]
-        E = self.edge_w(edge_embeddings)
+        if self.use_edge_embedding:
+            E = self.edge_w(edge_embeddings)
+        else:
+            E = None
 
         # Compute multi-head edge-aware attention scores: [E, num_heads]
         attn_scores = self.edge_attention(
@@ -102,9 +109,21 @@ class GeATConv(nn.Module):
     A :class:`GeATConv` is a module for molecular representation learning using GeAT. 
     It uses residual connections and outputs atom embeddings.  
     """  
-    def __init__(self, embed_dim: int, num_bond_types: int, num_heads: int = 8, output_negative_slope: float = 0.2, dropout: float = 0.2, geat_num_layers: int = 5):  
+    def __init__(self,
+                 embed_dim: int,
+                 num_bond_types: int,
+                 num_heads: int = 8,
+                 output_negative_slope: float = 0.2,
+                 dropout: float = 0.2,
+                 geat_num_layers: int = 5,
+                 use_edge_embedding: bool = False):  
         super(GeATConv, self).__init__()  
-        self.geat_layers = nn.ModuleList([GeATLayer(embed_dim=embed_dim, num_bond_types=num_bond_types, num_heads=num_heads, output_negative_slope=output_negative_slope, dropout=dropout) for _ in range(geat_num_layers)])  
+        self.geat_layers = nn.ModuleList([GeATLayer(embed_dim=embed_dim,
+                                                    num_bond_types=num_bond_types,
+                                                    num_heads=num_heads,
+                                                    output_negative_slope=output_negative_slope,
+                                                    dropout=dropout,
+                                                    use_edge_embedding=use_edge_embedding) for _ in range(geat_num_layers)])  
         self.norm_layers = nn.ModuleList([nn.LayerNorm(embed_dim) for _ in range(geat_num_layers)])  
   
     def forward(self, atom_embeddings, edge_embeddings, edge_index=None, edge_attr=None):
@@ -156,6 +175,7 @@ class GeATNet(nn.Module):
                  FFN_num_experts: int = 8,
                  FFN_top_k: int = 2,
                  gating_dropout: float = 0.2,
+                 use_edge_embedding: bool = False
                  ):  
         super(GeATNet, self).__init__()
         if num_bond_types is None:
@@ -170,6 +190,7 @@ class GeATNet(nn.Module):
                                    global_num_heads=global_num_heads,
                                    dropout=dropout,
                                    attn_num_layers=aggr_num_layers)
+        self.FFN_type = FFN_type
         if FFN_type == "MLP":
             self.ffn = MLP(input_dim=embed_dim,
                            hidden_dim=FFN_hidden_dim,
@@ -188,12 +209,15 @@ class GeATNet(nn.Module):
                        hidden_activation=nn.ReLU(),
                        output_activation=None,
                        gating_dropout=gating_dropout)
+        elif FFN_type == "NONE":
+            pass
         else:
             raise ValueError("Unknown FFN type for GeAT.")
         self.edge_type_embedding = nn.Embedding(len(BondTypes.get_bond_types())+1, embed_dim)
         self.edge_direction_embedding = nn.Embedding(len(BondDirections.get_bond_directions())+1, embed_dim)
         
-        self.FFN_norm = nn.LayerNorm(embed_dim)
+        if FFN_type != "NONE":
+            self.FFN_norm = nn.LayerNorm(embed_dim)
         
         self.reset_parameters()
         
@@ -216,7 +240,9 @@ class GeATNet(nn.Module):
         edge_attr = data.edge_attr
         edge_embeddings = self.edge_type_embedding(edge_attr[:,0]) + self.edge_direction_embedding(edge_attr[:,1])
         geat_embeddings = self.backbone(x, edge_embeddings, edge_index, edge_attr)  
-        aggr_embeddings = self.neck(geat_embeddings, edge_embeddings, batch)  
+        aggr_embeddings = self.neck(geat_embeddings, edge_embeddings, batch)
+        if self.FFN_type == 'NONE':
+            return aggr_embeddings  
         output = self.FFN_norm(aggr_embeddings + self.ffn(aggr_embeddings))
         return output
 
@@ -242,10 +268,16 @@ class GeATNet(nn.Module):
         print(f"{'Neck (GlobalAttnConv)':<40}: {neck_params:>12,}")
         total_params += neck_params
 
-        # FFN (MoE)
-        ffn_params = count_params(self.ffn)
-        print(f"{'FFN':<40}: {ffn_params:>12,}")
-        total_params += ffn_params
+        if self.FFN_type != 'NONE':
+            # FFN
+            ffn_params = count_params(self.ffn)
+            print(f"{'FFN':<40}: {ffn_params:>12,}")
+            total_params += ffn_params
+            
+            # FFN_norm
+            ffn_norm_params = count_params(self.FFN_norm)
+            print(f"{'FFN norm':<40}: {ffn_norm_params:>12,}")
+            total_params += ffn_norm_params
 
         # Edge type embedding
         edge_type_params = count_params(self.edge_type_embedding)

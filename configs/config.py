@@ -4,6 +4,9 @@ import torch
 
 # configs/config.py
 
+# Device (will be overridden in main script based on availability)
+device_str = "cuda:7"  # fallback to cpu if not available
+
 # Training
 from_scratch = True
 from_model_path = "trained_models/pretrain_pubchem_geat/model_epoch7.pth" # if not from_scratch
@@ -13,7 +16,7 @@ data_path = "data/zinc15/dataset/zinc_standard_agent/processed/smiles.csv"
 # data_path = "data/pubchem/pubchem-10m.txt"
 pretrain_file_type = 'txt'
 
-logdir = "pretrain_zinc_geat_moe_fn"
+logdir = "pretrain_zinc_geat_moe"
 
 # Model settings
 geat_num_layers = 4
@@ -23,7 +26,7 @@ global_num_heads = 8
 output_negative_slope = 0.2
 geat_dropout = 0.1
 FFN_num_layers = 2
-FFN_hidden_dim = 2048
+FFN_hidden_dim = 1024
 FFN_num_experts = 8
 FFN_top_k = 2
 
@@ -39,6 +42,7 @@ fixed_log_vars = torch.tensor([-3.0956, -10.0055, -0.0008, 0.875, -1.7909, 2.703
 
 # Training settings
 num_epochs = 8
+weight_type = "UW"
 record_freq = 100
 
 # Masking rates
@@ -50,9 +54,6 @@ embed_dim = 512
 
 # Functional groups
 fg_list = None  # if None, use default RDKit functional groups
-
-# Device (will be overridden in main script based on availability)
-device_str = "cuda:6"  # fallback to cpu if not available
 
 # Optimizer & Scheduler base settings
 backbone_lr = 5e-4  # embedding layer

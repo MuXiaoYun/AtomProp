@@ -16,14 +16,20 @@ class EdgeAttention(nn.Module):
     - 'bilinear': Uses bilinear transformation to compute attention scores (default)  
     - 'mlp': Uses a small MLP on concatenated inputs to compute attention scores  
     """  
-    def __init__(self, atom_embedding_dim: int, num_bond_types: int, 
-                 output_negative_slope: float = 0.2, attention_type: str = default_attention_type,
-                 mlp_hidden_dim: int = 1024, mlp_num_layers: int = 2):  
+    def __init__(self,
+                 atom_embedding_dim: int,
+                 num_bond_types: int, 
+                 output_negative_slope: float = 0.2,
+                 attention_type: str = default_attention_type,
+                 mlp_hidden_dim: int = 1024,
+                 mlp_num_layers: int = 2,
+                 use_edge_embedding: bool = False):  
         super(EdgeAttention, self).__init__()  
         self.atom_d = atom_embedding_dim  
         self.num_bond_types = num_bond_types  
         self.attention_type = attention_type  
         self.output_negative_slope = output_negative_slope  
+        self.use_edge_embedding = use_edge_embedding
         
         if attention_type not in ['bilinear', 'mlp']:
             raise ValueError(f"attention_type must be 'bilinear' or 'mlp', got {attention_type}")
@@ -59,8 +65,11 @@ class EdgeAttention(nn.Module):
         """  
         # Get source and target node features for each edge  
         row, col = edge_index  # row=source, col=target  
-        src_features = src_embeddings[row]  # [E, d]  
-        dst_features = dst_embeddings[col]+edge_embeddings  # [E, d]  
+        src_features = src_embeddings[row]  # [E, d]
+        if self.use_edge_embedding:  
+            dst_features = dst_embeddings[col]+edge_embeddings  # [E, d]  
+        else:
+            dst_features = dst_embeddings[col]
           
         # Get bond types from edge_attr  
         bond_types = edge_attr[:, 0]  # [E]  
@@ -158,12 +167,14 @@ class MultiHeadEdgeAttention_ParallelBetweenBondtypes(nn.Module):
         attention_type: str = default_attention_type,
         mlp_hidden_dim: int = 1024,
         mlp_num_layers: int = 2,
+        use_edge_embedding: bool = False
     ):
         super().__init__()
         self.atom_embedding_dim = atom_embedding_dim
         self.num_bond_types = num_bond_types
         self.num_heads = num_heads
         self.attention_type = attention_type
+        self.use_edge_embedding = use_edge_embedding
         
         if attention_type not in ['bilinear', 'mlp']:
             raise ValueError(f"attention_type must be 'bilinear' or 'mlp', got {attention_type}")
@@ -232,7 +243,10 @@ class MultiHeadEdgeAttention_ParallelBetweenBondtypes(nn.Module):
  
             N_E = dst_idx.shape[0]
             src_t = src[src_idx]  # [E_t, H, D]
-            dst_t = dst[dst_idx] + edge_embeddings[mask_t].view(N_E, self.num_heads, -1)  # [E_t, H, D]
+            if self.use_edge_embedding:
+                dst_t = dst[dst_idx] + edge_embeddings[mask_t].view(N_E, self.num_heads, -1)  # [E_t, H, D]
+            else:
+                dst_t = dst[dst_idx] 
  
             if self.attention_type == 'bilinear':
                 A_t = self.a[t]  # [H, D, D]
@@ -263,15 +277,22 @@ class MultiHeadEdgeAttention_SerialBetweenBondtypes(nn.Module):
     Rewritten to handle edge lists.  
     """  
   
-    def __init__(self, atom_embedding_dim: int, num_bond_types: int, num_heads: int = 8, 
-                 output_negative_slope: float = 0.2, attention_type: str = default_attention_type,
-                 mlp_hidden_dim: int = 1024, mlp_num_layers: int = 2):  
+    def __init__(self,
+                 atom_embedding_dim: int,
+                 num_bond_types: int,
+                 num_heads: int = 8, 
+                 output_negative_slope: float = 0.2,
+                 attention_type: str = default_attention_type,
+                 mlp_hidden_dim: int = 1024,
+                 mlp_num_layers: int = 2,
+                 use_edge_embedding: bool = False):  
         super(MultiHeadEdgeAttention_SerialBetweenBondtypes, self).__init__()  
         self.num_heads = num_heads  
         self.atom_d = atom_embedding_dim  
         self.num_bond_types = num_bond_types  
         self.attention_type = attention_type
         self.output_negative_slope = output_negative_slope
+        self.use_edge_embedding = use_edge_embedding
         
         if attention_type not in ['bilinear', 'mlp']:
             raise ValueError(f"attention_type must be 'bilinear' or 'mlp', got {attention_type}")
@@ -312,8 +333,11 @@ class MultiHeadEdgeAttention_SerialBetweenBondtypes(nn.Module):
           
         # Get source and target node features for each edge  
         row, col = edge_index  # row=source, col=target  
-        src_features = src_embeddings[row]  # [E, d*num_heads]  
-        dst_features = dst_embeddings[col]+edge_embeddings  # [E, d*num_heads]  
+        src_features = src_embeddings[row]  # [E, d*num_heads] 
+        if self.use_edge_embedding: 
+            dst_features = dst_embeddings[col]+edge_embeddings  # [E, d*num_heads]  
+        else:
+            dst_features = dst_embeddings[col]
           
         # Reshape for multi-head processing  
         src_features = src_features.view(-1, self.num_heads, d)  # [E, num_heads, d]  

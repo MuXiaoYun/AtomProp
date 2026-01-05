@@ -269,7 +269,8 @@ def main(ft_dataset = None):
                    FFN_hidden_dim=cfg.FFN_hidden_dim,
                    FFN_num_experts=cfg.FFN_num_experts,
                    FFN_num_layers=cfg.FFN_num_layers,
-                   FFN_top_k=cfg.FFN_top_k)
+                   FFN_top_k=cfg.FFN_top_k,
+                   use_edge_embedding=cfg.use_edge_embedding)
     neck.print_params()
     
     if cfg.no_pretrain == False:
