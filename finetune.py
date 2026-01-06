@@ -45,10 +45,10 @@ def create_dataset_from_smiles_labels(smiles_list, labels_list):
 
 def evaluate_model(model_components, dataloader, criterion, y_cols, device, aggr='attention'):
     """Evaluate model performance"""
-    backbone, neck, head, aggrmodel = model_components
+    embedding_layer, backbone, head, aggrmodel = model_components
     
+    embedding_layer.eval()
     backbone.eval()
-    neck.eval()
     head.eval()
     if aggr == 'attention':
         aggrmodel.eval()
@@ -60,8 +60,8 @@ def evaluate_model(model_components, dataloader, criterion, y_cols, device, aggr
     with torch.no_grad():
         for batch in dataloader:
             batch = batch.to(device)
-            emb = backbone(batch.x.squeeze())
-            emb = neck(Data(x=emb, edge_index=batch.edge_index, edge_attr=batch.edge_attr), batch=batch.batch)
+            emb = embedding_layer(batch.x.squeeze())
+            emb = backbone(Data(x=emb, edge_index=batch.edge_index, edge_attr=batch.edge_attr), batch=batch.batch)
             graph_emb = aggrmodel(emb, batch.batch)
             preds = head(graph_emb)
             
@@ -107,7 +107,7 @@ def evaluate_model(model_components, dataloader, criterion, y_cols, device, aggr
 
 def train_fold(fold_idx, train_dataloader, val_dataloader, test_dataloader, model_components, optimizers, schedulers, device, num_epochs, y_cols, logdir, no_pretrain, aggr='attention'):
     """Train a single fold"""
-    backbone, neck, head, aggrmodel = model_components
+    embedding_layer, backbone, head, aggrmodel = model_components
     writer = SummaryWriter(log_dir=f'runs/finetune_kfold_fold{fold_idx}_{logdir}')
     
     best_val_auc = 0.0
@@ -115,8 +115,8 @@ def train_fold(fold_idx, train_dataloader, val_dataloader, test_dataloader, mode
     fold_global_step = 0
     
     for epoch in range(num_epochs):
+        embedding_layer.train()
         backbone.train()
-        neck.train()
         head.train()
         if cfg.aggr == 'attention':
             aggrmodel.train()
@@ -129,8 +129,8 @@ def train_fold(fold_idx, train_dataloader, val_dataloader, test_dataloader, mode
             for optimizer in optimizers:
                 optimizer.zero_grad()
             
-            emb = backbone(batch.x.squeeze())
-            emb = neck(Data(x=emb, edge_index=batch.edge_index, edge_attr=batch.edge_attr), batch=batch.batch)
+            emb = embedding_layer(batch.x.squeeze())
+            emb = backbone(Data(x=emb, edge_index=batch.edge_index, edge_attr=batch.edge_attr), batch=batch.batch)
             graph_emb = aggrmodel(emb, batch.batch)
             preds = head(graph_emb)
             
@@ -166,13 +166,13 @@ def train_fold(fold_idx, train_dataloader, val_dataloader, test_dataloader, mode
             torch.save({
                 'epoch': epoch + 1,
                 'fold': fold_idx,
+                'embedding_layer_state_dict': embedding_layer.state_dict(),
                 'backbone_state_dict': backbone.state_dict(),
-                'neck_state_dict': neck.state_dict(),
                 'head_state_dict': head.state_dict(),
                 'aggr_state_dict': aggrmodel.state_dict() if cfg.aggr == 'attention' else None,
                 'val_auc': val_auc,
                 'val_loss': val_loss,
-                'optimizer_backbone_neck_state_dict': optimizers[0].state_dict(),
+                'optimizer_embedding_layer_backbone_state_dict': optimizers[0].state_dict(),
                 'optimizer_head_state_dict': optimizers[1].state_dict(),
                 'optimizer_aggr_state_dict': optimizers[2].state_dict() if len(optimizers) > 2 else None,
             }, save_path)
@@ -187,8 +187,8 @@ def train_fold(fold_idx, train_dataloader, val_dataloader, test_dataloader, mode
     load_path = f"trained_models/{logdir}/fold{fold_idx}_best_model_{model_suffix}.pth"
     checkpoint = torch.load(load_path, weights_only=False, map_location=device)
     
+    embedding_layer.load_state_dict(checkpoint['embedding_layer_state_dict'])
     backbone.load_state_dict(checkpoint['backbone_state_dict'])
-    neck.load_state_dict(checkpoint['neck_state_dict'])
     head.load_state_dict(checkpoint['head_state_dict'])
     if cfg.aggr == 'attention' and checkpoint['aggr_state_dict']:
         aggrmodel.load_state_dict(checkpoint['aggr_state_dict'])
@@ -257,8 +257,8 @@ def main(ft_dataset = None):
     
     # 2. Initialize base model components (for weight loading if needed)
     # REALLY IMPORTANT: IF YOU WANT TO MODIFY THIS PART OF CODE, REMEMBER TO MODIFY FOR EACH FOLD AS WELL!!!
-    backbone = Embedder(num_atom_types=120, embed_dim=cfg.embed_dim)
-    neck = GeATNet(embed_dim=cfg.embed_dim,
+    embedding_layer = Embedder(num_atom_types=120, embed_dim=cfg.embed_dim)
+    backbone = GeATNet(embed_dim=cfg.embed_dim,
                    num_heads=cfg.num_heads,
                    global_num_heads=cfg.global_num_heads,
                    output_negative_slope=cfg.output_negative_slope,
@@ -271,19 +271,19 @@ def main(ft_dataset = None):
                    FFN_num_layers=cfg.FFN_num_layers,
                    FFN_top_k=cfg.FFN_top_k,
                    use_edge_embedding=cfg.use_edge_embedding)
-    neck.print_params()
+    backbone.print_params()
     
     if cfg.no_pretrain == False:
         ckpt = torch.load(cfg.pretrained_path, weights_only=False, map_location=device)
+        embedding_layer.load_state_dict(ckpt['embedding_layer_state_dict'])
         backbone.load_state_dict(ckpt['backbone_state_dict'])
-        neck.load_state_dict(ckpt['neck_state_dict'])
     
     head = MLP(input_dim=cfg.embed_dim, hidden_dim=cfg.head_hidden_dim, output_dim=len(y_cols),
                num_layers=2, dropout=cfg.head_dropout, batch_norm=True, output_activation=None)
     head.init_params(gain=2.0)
     
-    print(f"Backbone Parameters: {sum(p.numel() for p in backbone.parameters() if p.requires_grad)}")
-    print(f"Neck Parameters: {sum(p.numel() for p in neck.parameters() if p.requires_grad)}")
+    print(f"embedding_layer Parameters: {sum(p.numel() for p in embedding_layer.parameters() if p.requires_grad)}")
+    print(f"backbone Parameters: {sum(p.numel() for p in backbone.parameters() if p.requires_grad)}")
     print(f"Head Parameters: {sum(p.numel() for p in head.parameters() if p.requires_grad)}")
     
     # 3. Prepare dataset and splitter
@@ -326,8 +326,8 @@ def main(ft_dataset = None):
         test_dataloader = DataLoader(test_dataset, batch_size=cfg.test_batch_size, shuffle=False, collate_fn=Batch.from_data_list)
         
         # Clone models per fold
-        backbone_fold = Embedder(num_atom_types=120, embed_dim=cfg.embed_dim)
-        neck_fold = GeATNet(embed_dim=cfg.embed_dim,
+        embedding_layer_fold = Embedder(num_atom_types=120, embed_dim=cfg.embed_dim)
+        backbone_fold = GeATNet(embed_dim=cfg.embed_dim,
                             num_heads=cfg.num_heads,
                             global_num_heads=cfg.global_num_heads,
                             output_negative_slope=cfg.output_negative_slope,
@@ -345,35 +345,35 @@ def main(ft_dataset = None):
         head_fold.init_params(gain=2.0)
         
         if not cfg.no_pretrain:
+            embedding_layer_fold.load_state_dict(embedding_layer.state_dict())
             backbone_fold.load_state_dict(backbone.state_dict())
-            neck_fold.load_state_dict(neck.state_dict())
         
+        embedding_layer_fold = embedding_layer_fold.to(device)
         backbone_fold = backbone_fold.to(device)
-        neck_fold = neck_fold.to(device)
         head_fold = head_fold.to(device)
         if cfg.aggr == 'attention':
             aggrmodel_fold = aggrmodel_fold.to(device)
         
         # Optimizers
-        optimizer_backbone_neck = torch.optim.Adam([
-            {'params': backbone_fold.parameters(), 'lr': cfg.lr_backbone_neck},
-            {'params': neck_fold.parameters(), 'lr': cfg.lr_backbone_neck}
+        optimizer_embedding_layer_backbone = torch.optim.Adam([
+            {'params': embedding_layer_fold.parameters(), 'lr': cfg.lr_embedding_layer_backbone},
+            {'params': backbone_fold.parameters(), 'lr': cfg.lr_embedding_layer_backbone}
         ])
         optimizer_head = torch.optim.Adam(head_fold.parameters(), lr=cfg.lr_head)
-        optimizers = [optimizer_backbone_neck, optimizer_head]
+        optimizers = [optimizer_embedding_layer_backbone, optimizer_head]
         
         if cfg.aggr == 'attention':
             optimizer_aggr = torch.optim.Adam(aggrmodel_fold.parameters(), lr=cfg.lr_aggr)
             optimizers.append(optimizer_aggr)
         
         # Schedulers
-        scheduler_backbone_neck = torch.optim.lr_scheduler.CosineAnnealingLR(
-            optimizer_backbone_neck, T_max=cfg.T_max, eta_min=cfg.eta_min_backbone_neck
+        scheduler_embedding_layer_backbone = torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimizer_embedding_layer_backbone, T_max=cfg.T_max, eta_min=cfg.eta_min_embedding_layer_backbone
         )
         scheduler_head = torch.optim.lr_scheduler.CosineAnnealingLR(
             optimizer_head, T_max=cfg.T_max, eta_min=cfg.eta_min_head
         )
-        schedulers = [scheduler_backbone_neck, scheduler_head]
+        schedulers = [scheduler_embedding_layer_backbone, scheduler_head]
         
         if cfg.aggr == 'attention':
             scheduler_aggr = torch.optim.lr_scheduler.CosineAnnealingLR(
@@ -381,7 +381,7 @@ def main(ft_dataset = None):
             )
             schedulers.append(scheduler_aggr)
         
-        model_components = (backbone_fold, neck_fold, head_fold, aggrmodel_fold)
+        model_components = (embedding_layer_fold, backbone_fold, head_fold, aggrmodel_fold)
         
         try:
             fold_result = train_fold(

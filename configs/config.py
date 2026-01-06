@@ -9,14 +9,14 @@ device_str = "cuda:7"  # fallback to cpu if not available
 
 # Training
 from_scratch = True
-from_model_path = "trained_models/pretrain_pubchem_geat/model_epoch7.pth" # if not from_scratch
+from_model_path = "trained_models/pretrain_zinc_geat_moe/model_epoch7.pth" # if not from_scratch
 
 # Dataset and I/O
 data_path = "data/zinc15/dataset/zinc_standard_agent/processed/smiles.csv"
 # data_path = "data/pubchem/pubchem-10m.txt"
 pretrain_file_type = 'txt'
 
-logdir = "pretrain_zinc_geat_moe"
+logdir = "pretrain_zinc_geat_moe_continue"
 
 # Model settings
 geat_num_layers = 4
@@ -25,10 +25,12 @@ num_heads = 8
 global_num_heads = 8
 output_negative_slope = 0.2
 geat_dropout = 0.1
+head_dropout = 0.3
 FFN_num_layers = 2
 FFN_hidden_dim = 1024
 FFN_num_experts = 8
 FFN_top_k = 2
+use_edge_embedding = False
 
 # Data settings
 dataset_size = -1
@@ -38,7 +40,7 @@ batch_size = 160
 
 # Weight settings
 fix_uncertainty = False
-fixed_log_vars = torch.tensor([-3.0956, -10.0055, -0.0008, 0.875, -1.7909, 2.7035], dtype=torch.float32)
+fixed_log_vars = torch.tensor([-3.1857, 0.5437, -0.4763, -1.8525, -1.8813, 2.7907], dtype=torch.float32)
 
 # Training settings
 num_epochs = 8
@@ -56,8 +58,8 @@ embed_dim = 512
 fg_list = None  # if None, use default RDKit functional groups
 
 # Optimizer & Scheduler base settings
-backbone_lr = 5e-4  # embedding layer
-neck_lr = 5e-4  # geat
+embedding_layer_lr = 5e-4  # embedding layer
+backbone_lr = 5e-4  # geat
 head_lr = 5e-4  # classification head
 weight_strategy_lr = 1e-3
 
@@ -65,18 +67,18 @@ weight_strategy_lr = 1e-3
 use_layer_decay = True  # Set to False to disable
 layer_decay_rate = 0.9  # Each layer has this rate of LR of previous layer
 
-backbone_wd = 5e-5  # embedding layer
-neck_wd = 5e-5  # geat
+embedding_layer_wd = 5e-5  # embedding layer
+backbone_wd = 5e-5  # geat
 head_wd = 1e-5  # classification head
 weight_strategy_wd = 0.0
 
-neck_scheduler_max_lr = 1e-3  # special for neck
+backbone_scheduler_max_lr = 1e-3  # special for backbone
 
-# OneCycleLR settings
-pct_start = 0.1
-anneal_strategy = "cos"
-div_factor = 25.0
-final_div_factor = 1e4
+# Scheduler settings
+embedding_layer_eta_min = 1e-6
+backbone_eta_min = 1e-6
+head_eta_min = 1e-6
+weight_strategy_eta_min = 1e-6
 
 weight_strategy_pct_start = 0.05
 weight_strategy_div_factor = 10.0

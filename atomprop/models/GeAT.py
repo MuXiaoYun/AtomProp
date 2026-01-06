@@ -185,7 +185,8 @@ class GeATNet(nn.Module):
                                  num_heads=num_heads,
                                  output_negative_slope=output_negative_slope,
                                  dropout=dropout,
-                                 geat_num_layers=geat_num_layers)  
+                                 geat_num_layers=geat_num_layers,
+                                 use_edge_embedding=use_edge_embedding)  
         self.neck = GlobalAttnConv(embed_dim=embed_dim,
                                    global_num_heads=global_num_heads,
                                    dropout=dropout,

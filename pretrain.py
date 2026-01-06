@@ -52,8 +52,8 @@ device = torch.device(cfg.device_str) if torch.cuda.is_available() else torch.de
 if fg_list is None:
     fg_list = FunctionalGroups.BuildFuncGroupHierarchy()
 
-backbone = Embedder(num_atom_types=120, embed_dim=embed_dim)
-neck = GeATNet(embed_dim=embed_dim,
+embedding_layer = Embedder(num_atom_types=120, embed_dim=embed_dim)
+backbone = GeATNet(embed_dim=embed_dim,
                num_heads=cfg.num_heads,
                global_num_heads=cfg.global_num_heads,
                output_negative_slope=cfg.output_negative_slope,
@@ -63,17 +63,18 @@ neck = GeATNet(embed_dim=embed_dim,
                FFN_hidden_dim=cfg.FFN_hidden_dim,
                FFN_num_experts=cfg.FFN_num_experts,
                FFN_num_layers=cfg.FFN_num_layers,
-               FFN_top_k=cfg.FFN_top_k)
-head0 = MLP(input_dim=embed_dim, hidden_dim=128, output_dim=157, num_layers=2, dropout=0.5) # used for atom attribute prediction
-head1 = MLP(input_dim=embed_dim, hidden_dim=128, output_dim=120, num_layers=2, dropout=0.5) # used for masked node prediction
-head4 = MLP(input_dim=embed_dim, hidden_dim=128, output_dim=len(fg_list), num_layers=2, dropout=0.5) # used for functional group prediction
+               FFN_top_k=cfg.FFN_top_k,
+               use_edge_embedding=cfg.use_edge_embedding)
+head0 = MLP(input_dim=embed_dim, hidden_dim=128, output_dim=157, num_layers=2, dropout=cfg.head_dropout) # used for atom attribute prediction
+head1 = MLP(input_dim=embed_dim, hidden_dim=128, output_dim=120, num_layers=2, dropout=cfg.head_dropout) # used for masked node prediction
+head4 = MLP(input_dim=embed_dim, hidden_dim=128, output_dim=len(fg_list), num_layers=2, dropout=cfg.head_dropout) # used for functional group prediction
 aggrmodel = GNNAggr(embed_dim=embed_dim, aggr='mean')
 
 if cfg.from_scratch == False:
     # load weights
     ckpt = torch.load(cfg.from_model_path, weights_only=False)
+    embedding_layer.load_state_dict(ckpt['embedding_layer_state_dict'])
     backbone.load_state_dict(ckpt['backbone_state_dict'])
-    neck.load_state_dict(ckpt['neck_state_dict'])
 
 task0 = NodeAttrPrediction()
 task1 = MaskedNodePrediction()
@@ -121,7 +122,6 @@ def get_geat_layer_parameters(model, layer_decay=0.9):
     """
     param_groups = []
     
-    # Extract GeAT layers from the backbone of GeATNet
     geat_conv = model.backbone
     num_layers = len(geat_conv.geat_layers)
     
@@ -160,7 +160,7 @@ def get_geat_layer_parameters(model, layer_decay=0.9):
                 'name': f'geat_norm_{i}'
             })
     
-    # Parameters from neck (GlobalAttnConv) - treat as additional layers
+    # Parameters from backbone (GlobalAttnConv) - treat as additional layers
     neck_layers = model.neck.global_attns
     neck_norm_layers = model.neck.norm_layers
     
@@ -253,16 +253,16 @@ if __name__ == "__main__":
         print(f"Train set size: {len(train_indices)}, Val set size: {len(val_indices)}, Test set size: {len(test_indices)}")
 
         print(f"Using computing device: {device}")
+        embedding_layer.to(device)
         backbone.to(device)
-        neck.to(device)
         head0.to(device)
         head1.to(device)
         head4.to(device)
         weight_stratergy.to(device)
-        neck.print_params()
+        backbone.print_params()
 
+        print(embedding_layer.__class__.__name__, f"Parameters: {sum(p.numel() for p in embedding_layer.parameters() if p.requires_grad)}")
         print(backbone.__class__.__name__, f"Parameters: {sum(p.numel() for p in backbone.parameters() if p.requires_grad)}")
-        print(neck.__class__.__name__, f"Parameters: {sum(p.numel() for p in neck.parameters() if p.requires_grad)}")
         print(head0.__class__.__name__, f"Parameters: {sum(p.numel() for p in head0.parameters() if p.requires_grad)}")
         print(head1.__class__.__name__, f"Parameters: {sum(p.numel() for p in head1.parameters() if p.requires_grad)}")
         print(head4.__class__.__name__, f"Parameters: {sum(p.numel() for p in head4.parameters() if p.requires_grad)}")
@@ -283,8 +283,8 @@ if __name__ == "__main__":
         )
         
         components = {
+            "embedding_layer": embedding_layer,
             "backbone": backbone,
-            "neck": neck,
             "head0": head0,
             "head1": head1,
             "head4": head4,
@@ -292,13 +292,13 @@ if __name__ == "__main__":
         }
         
         optimizer_configs = {
-            "backbone": {
+            "embedding_layer": {
                 "cls": torch.optim.Adam,
-                "kwargs": {"lr": cfg.backbone_lr, "weight_decay": cfg.backbone_wd}
+                "kwargs": {"lr": cfg.embedding_layer_lr, "weight_decay": cfg.embedding_layer_wd}
             },
-            "neck": {
+            "backbone": {
                 "cls": torch.optim.AdamW,
-                "kwargs": {"lr": cfg.neck_lr, "weight_decay": cfg.neck_wd}
+                "kwargs": {"lr": cfg.backbone_lr, "weight_decay": cfg.backbone_wd}
             },
             "head0": {
                 "cls": torch.optim.Adam,
@@ -329,117 +329,85 @@ if __name__ == "__main__":
         # Get layer-wise parameter groups for GeATNet if layer decay is enabled
         if cfg.use_layer_decay and cfg.layer_decay_rate > 0:
             print(f"Using layer-wise learning rate decay with rate: {cfg.layer_decay_rate}")
-            neck_param_groups = get_geat_layer_parameters(neck, layer_decay=cfg.layer_decay_rate)
+            backbone_param_groups = get_geat_layer_parameters(backbone, layer_decay=cfg.layer_decay_rate)
             
             # Create parameter groups with scaled learning rates
-            neck_params = []
-            for group in neck_param_groups:
-                base_lr = cfg.neck_lr
+            backbone_params = []
+            for group in backbone_param_groups:
+                base_lr = cfg.backbone_lr
                 scaled_lr = base_lr * group['lr_scale']
-                neck_params.append({
+                backbone_params.append({
                     'params': group['params'],
                     'lr': scaled_lr,
-                    'weight_decay': cfg.neck_wd,
+                    'weight_decay': cfg.backbone_wd,
                     'name': group['name']
                 })
                 print(f"  Layer {group['layer_idx']} ({group['name']}): LR scale = {group['lr_scale']:.4f}, Effective LR = {scaled_lr:.6f}")
             
-            # Update neck optimizer configuration
-            optimizer_configs["neck"]["kwargs"] = {
-                "params": neck_params,
-                "lr": cfg.neck_lr,  # Base LR, but individual params have scaled LRs
-                "weight_decay": cfg.neck_wd
+            # Update backbone optimizer configuration
+            optimizer_configs["backbone"]["kwargs"] = {
+                "params": backbone_params,
+                "lr": cfg.backbone_lr,  # Base LR, but individual params have scaled LRs
+                "weight_decay": cfg.backbone_wd
             }
         else:
             print("Using uniform learning rate for all GeAT layers")
 
         scheduler_configs = {
-            "backbone": {
-                "cls": torch.optim.lr_scheduler.OneCycleLR,
+            "embedding_layer": {
+                "cls": torch.optim.lr_scheduler.CosineAnnealingLR,
                 "kwargs": {
-                    "max_lr": cfg.backbone_lr,
-                    "total_steps": train_loader.total_batches * num_epochs, 
-                    "pct_start": cfg.pct_start,
-                    "anneal_strategy": cfg.anneal_strategy, 
-                    "div_factor": cfg.div_factor, 
-                    "final_div_factor": cfg.final_div_factor, 
+                    "T_max": train_loader.total_batches * num_epochs,
+                    "eta_min": cfg.embedding_layer_eta_min
                 }
             },
-            "neck": {
-                "cls": torch.optim.lr_scheduler.OneCycleLR,
+            "backbone": {
+                "cls": torch.optim.lr_scheduler.CosineAnnealingLR,
                 "kwargs": {
-                    "max_lr": cfg.neck_scheduler_max_lr,
-                    "total_steps": train_loader.total_batches * num_epochs,
-                    "pct_start": cfg.pct_start,
-                    "anneal_strategy": cfg.anneal_strategy,
-                    "div_factor": cfg.div_factor,
-                    "final_div_factor": cfg.final_div_factor,
+                    "T_max": train_loader.total_batches * num_epochs,
+                    "eta_min": cfg.backbone_eta_min
                 }
             },
             "head0": {
-                "cls": torch.optim.lr_scheduler.OneCycleLR,
+                "cls": torch.optim.lr_scheduler.CosineAnnealingLR,
                 "kwargs": {
-                    "max_lr": cfg.head_lr,
-                    "total_steps": train_loader.total_batches * num_epochs,
-                    "pct_start": cfg.pct_start,
-                    "anneal_strategy": cfg.anneal_strategy,
-                    "div_factor": cfg.div_factor,
-                    "final_div_factor": cfg.final_div_factor,
+                    "T_max": train_loader.total_batches * num_epochs,
+                    "eta_min": cfg.head_eta_min
                 }
             },
             "head1": {
-                "cls": torch.optim.lr_scheduler.OneCycleLR,
+                "cls": torch.optim.lr_scheduler.CosineAnnealingLR,
                 "kwargs": {
-                    "max_lr": cfg.head_lr,
-                    "total_steps": train_loader.total_batches * num_epochs,
-                    "pct_start": cfg.pct_start,
-                    "anneal_strategy": cfg.anneal_strategy,
-                    "div_factor": cfg.div_factor,
-                    "final_div_factor": cfg.final_div_factor,
+                    "T_max": train_loader.total_batches * num_epochs,
+                    "eta_min": cfg.head_eta_min
                 }
             },
             "head2": {
-                "cls": torch.optim.lr_scheduler.OneCycleLR,
+                "cls": torch.optim.lr_scheduler.CosineAnnealingLR,
                 "kwargs": {
-                    "max_lr": cfg.head_lr,
-                    "total_steps": train_loader.total_batches * num_epochs,
-                    "pct_start": cfg.pct_start,
-                    "anneal_strategy": cfg.anneal_strategy,
-                    "div_factor": cfg.div_factor,
-                    "final_div_factor": cfg.final_div_factor,
+                    "T_max": train_loader.total_batches * num_epochs,
+                    "eta_min": cfg.head_eta_min
                 }
             },
             "head3": {
-                "cls": torch.optim.lr_scheduler.OneCycleLR,
+                "cls": torch.optim.lr_scheduler.CosineAnnealingLR,
                 "kwargs": {
-                    "max_lr": cfg.head_lr,
-                    "total_steps": train_loader.total_batches * num_epochs,
-                    "pct_start": cfg.pct_start,
-                    "anneal_strategy": cfg.anneal_strategy,
-                    "div_factor": cfg.div_factor,
-                    "final_div_factor": cfg.final_div_factor,
+                    "T_max": train_loader.total_batches * num_epochs,
+                    "eta_min": cfg.head_eta_min
                 }
             },
             "head4": {
-                "cls": torch.optim.lr_scheduler.OneCycleLR,
+                "cls": torch.optim.lr_scheduler.CosineAnnealingLR,
                 "kwargs": {
-                    "max_lr": cfg.head_lr,
-                    "total_steps": train_loader.total_batches * num_epochs,
-                    "pct_start": cfg.pct_start,
-                    "anneal_strategy": cfg.anneal_strategy,
-                    "div_factor": cfg.div_factor,
-                    "final_div_factor": cfg.final_div_factor,
+                    "T_max": train_loader.total_batches * num_epochs,
+                    "eta_min": cfg.head_eta_min
                 }
             },
             "weight_stratergy": {
-                "cls": torch.optim.lr_scheduler.OneCycleLR,
+                "cls": torch.optim.lr_scheduler.CosineAnnealingLR,
                 "kwargs": {
-                    "max_lr": cfg.weight_strategy_lr,
-                    "total_steps": train_loader.total_batches * num_epochs,
-                    "pct_start": cfg.weight_strategy_pct_start,
-                    "anneal_strategy": cfg.anneal_strategy,
-                    "div_factor": cfg.weight_strategy_div_factor,
-                    "final_div_factor": cfg.final_div_factor,
+                    "T_max": train_loader.total_batches * num_epochs,
+                    "eta_min": cfg.weight_strategy_eta_min
                 }
             },
         }
@@ -455,9 +423,9 @@ if __name__ == "__main__":
             opt_cls = opt_conf.get("cls")
             opt_kwargs = opt_conf.get("kwargs", {})
             
-            # Special handling for neck when using layer decay
-            if name == "neck" and cfg.use_layer_decay and cfg.layer_decay_rate > 0:
-                # neck_params already contains parameter groups with individual LRs
+            # Special handling for backbone when using layer decay
+            if name == "backbone" and cfg.use_layer_decay and cfg.layer_decay_rate > 0:
+                # backbone_params already contains parameter groups with individual LRs
                 optimizers[name] = opt_cls(**opt_kwargs)
             else:
                 # Standard initialization
@@ -476,8 +444,8 @@ if __name__ == "__main__":
         
         for epoch in range(num_epochs):
             try:
+                embedding_layer.train()
                 backbone.train()
-                neck.train()
                 head0.train()
                 head1.train()
                 total_train_loss = 0.0
@@ -493,9 +461,9 @@ if __name__ == "__main__":
                     for opt in optimizers.values():
                         opt.zero_grad()
 
-                    atom_emb = backbone(batch_data.x).squeeze()
+                    atom_emb = embedding_layer(batch_data.x).squeeze()
                     embedded_data = Data(x=atom_emb, edge_index=batch_data.edge_index, edge_attr=batch_data.edge_attr)
-                    graph_emb = neck(embedded_data, batch=batch_data.batch)
+                    graph_emb = backbone(embedded_data, batch=batch_data.batch)
                     graph_emb = graph_emb.view(-1, graph_emb.size(-1))
 
                     outputs = head0(graph_emb)
@@ -507,7 +475,7 @@ if __name__ == "__main__":
                     mask_indices = MolGraphMask.select_mask_indices(batch_data.x)
                     masked_atom_emb = MolGraphMask.mask_atoms(atom_emb, mask_indices, torch.zeros(embed_dim))
                     masked_embedded_data = Data(x=masked_atom_emb, edge_index=batch_data.edge_index, edge_attr=batch_data.edge_attr)
-                    graph_emb1 = neck(masked_embedded_data, batch=batch_data.batch)
+                    graph_emb1 = backbone(masked_embedded_data, batch=batch_data.batch)
                     graph_emb1_masked = graph_emb1.view(-1, graph_emb1.size(-1))[mask_indices]
                     outputs1 = head1(graph_emb1_masked)
                     outputs1 = outputs1.view(-1, outputs1.size(-1))
@@ -519,14 +487,14 @@ if __name__ == "__main__":
                     less_mask_indices = MolGraphMask.select_mask_indices(batch_data.x, mask_ratio=less_rate)
                     less_masked_atom_emb = MolGraphMask.mask_atoms(atom_emb, less_mask_indices, torch.zeros(embed_dim))
                     less_masked_embedded_data = Data(x=less_masked_atom_emb, edge_index=batch_data.edge_index, edge_attr=batch_data.edge_attr)
-                    less_graph_emb = neck(less_masked_embedded_data, batch=batch_data.batch)
+                    less_graph_emb = backbone(less_masked_embedded_data, batch=batch_data.batch)
                     less_graph_emb = less_graph_emb.view(-1, less_graph_emb.size(-1))
                     less_outputs = aggrmodel(less_graph_emb, batch_data.batch)
 
                     more_mask_indices = MolGraphMask.select_mask_indices(batch_data.x, mask_ratio=more_rate)
                     more_masked_atom_emb = MolGraphMask.mask_atoms(atom_emb, more_mask_indices, torch.zeros(embed_dim))
                     more_masked_embedded_data = Data(x=more_masked_atom_emb, edge_index=batch_data.edge_index, edge_attr=batch_data.edge_attr)
-                    more_graph_emb = neck(more_masked_embedded_data, batch=batch_data.batch)
+                    more_graph_emb = backbone(more_masked_embedded_data, batch=batch_data.batch)
                     more_graph_emb = more_graph_emb.view(-1, more_graph_emb.size(-1))
                     more_outputs = aggrmodel(more_graph_emb, batch_data.batch)
 
@@ -560,11 +528,11 @@ if __name__ == "__main__":
                     for name, scheduler in schedulers.items():
                         scheduler.step()
                     
-                    # Log layer-wise learning rates for neck if using layer decay
+                    # Log layer-wise learning rates for backbone if using layer decay
                     if cfg.use_layer_decay and cfg.layer_decay_rate > 0 and (batch_idx == 0 or (batch_idx + 1) % record_freq == 0):
-                        for param_group in optimizers["neck"].param_groups:
+                        for param_group in optimizers["backbone"].param_groups:
                             if 'name' in param_group:
-                                writer.add_scalar(f'LR/neck_{param_group["name"]}', param_group['lr'], epoch * train_loader.total_batches + batch_idx)
+                                writer.add_scalar(f'LR/backbone_{param_group["name"]}', param_group['lr'], epoch * train_loader.total_batches + batch_idx)
                     
                     if batch_idx == 0 or (batch_idx + 1) % record_freq == 0:
                         writer.add_scalar('Train/Loss_total', loss.item(), epoch * train_loader.total_batches + batch_idx)
@@ -595,8 +563,8 @@ if __name__ == "__main__":
                 avg_train_loss = total_train_loss / train_sample_count
                 train_losses.append(avg_train_loss)
 
+                embedding_layer.eval()
                 backbone.eval()
-                neck.eval()
                 head0.eval()
                 head1.eval()
                 head4.eval()
@@ -621,9 +589,9 @@ if __name__ == "__main__":
                     for batch_idx, (data_list, mols) in val_pbar:
                         batch_data = Batch.from_data_list(data_list).to(device)
                         
-                        atom_emb = backbone(batch_data.x).squeeze()
+                        atom_emb = embedding_layer(batch_data.x).squeeze()
                         embedded_data = Data(x=atom_emb, edge_index=batch_data.edge_index, edge_attr=batch_data.edge_attr)
-                        graph_emb = neck(embedded_data, batch=batch_data.batch)
+                        graph_emb = backbone(embedded_data, batch=batch_data.batch)
                         graph_emb = graph_emb.view(-1, graph_emb.size(-1))
 
                         outputs = head0(graph_emb)
@@ -635,7 +603,7 @@ if __name__ == "__main__":
                         mask_indices = MolGraphMask.select_mask_indices(batch_data.x)
                         masked_atom_emb = MolGraphMask.mask_atoms(atom_emb, mask_indices, torch.zeros(embed_dim))
                         masked_embedded_data = Data(x=masked_atom_emb, edge_index=batch_data.edge_index, edge_attr=batch_data.edge_attr)
-                        graph_emb1 = neck(masked_embedded_data, batch=batch_data.batch)
+                        graph_emb1 = backbone(masked_embedded_data, batch=batch_data.batch)
                         graph_emb1_masked = graph_emb1.view(-1, graph_emb1.size(-1))[mask_indices]
                         outputs1 = head1(graph_emb1_masked)
                         outputs1 = outputs1.view(-1, outputs1.size(-1))
@@ -647,14 +615,14 @@ if __name__ == "__main__":
                         less_mask_indices = MolGraphMask.select_mask_indices(batch_data.x, mask_ratio=less_rate)
                         less_masked_atom_emb = MolGraphMask.mask_atoms(atom_emb, less_mask_indices, torch.zeros(embed_dim))
                         less_masked_embedded_data = Data(x=less_masked_atom_emb, edge_index=batch_data.edge_index, edge_attr=batch_data.edge_attr)
-                        less_graph_emb = neck(less_masked_embedded_data, batch=batch_data.batch)
+                        less_graph_emb = backbone(less_masked_embedded_data, batch=batch_data.batch)
                         less_graph_emb = less_graph_emb.view(-1, less_graph_emb.size(-1))
                         less_outputs = aggrmodel(less_graph_emb, batch_data.batch)
 
                         more_mask_indices = MolGraphMask.select_mask_indices(batch_data.x, mask_ratio=more_rate)
                         more_masked_atom_emb = MolGraphMask.mask_atoms(atom_emb, more_mask_indices, torch.zeros(embed_dim))
                         more_masked_embedded_data = Data(x=more_masked_atom_emb, edge_index=batch_data.edge_index, edge_attr=batch_data.edge_attr)
-                        more_graph_emb = neck(more_masked_embedded_data, batch=batch_data.batch)
+                        more_graph_emb = backbone(more_masked_embedded_data, batch=batch_data.batch)
                         more_graph_emb = more_graph_emb.view(-1, more_graph_emb.size(-1))
                         more_outputs = aggrmodel(more_graph_emb, batch_data.batch)
 
@@ -716,8 +684,8 @@ if __name__ == "__main__":
                 if avg_val_loss < best_val_loss:
                     best_val_loss = avg_val_loss
                     torch.save({
+                        'embedding_layer_state_dict': embedding_layer.state_dict(),
                         'backbone_state_dict': backbone.state_dict(),
-                        'neck_state_dict': neck.state_dict(),
                         'optimizer_state_dict': {name: opt.state_dict() for name, opt in optimizers.items()},
                         'scheduler_state_dict': {name: sch.state_dict() for name, sch in schedulers.items()},
                         'epoch': epoch,
@@ -726,8 +694,8 @@ if __name__ == "__main__":
                     print(f"Best model saved at epoch {epoch+1} with Val Loss = {best_val_loss:.6f}")
                 # save model at each epoch
                 torch.save({
+                    'embedding_layer_state_dict': embedding_layer.state_dict(),
                     'backbone_state_dict': backbone.state_dict(),
-                    'neck_state_dict': neck.state_dict(),
                     'optimizer_state_dict': {name: opt.state_dict() for name, opt in optimizers.items()},
                     'scheduler_state_dict': {name: sch.state_dict() for name, sch in schedulers.items()},
                     'epoch': epoch,
@@ -737,8 +705,8 @@ if __name__ == "__main__":
 
             except KeyboardInterrupt:
                 torch.save({
+                    'embedding_layer_state_dict': embedding_layer.state_dict(),
                     'backbone_state_dict': backbone.state_dict(),
-                    'neck_state_dict': neck.state_dict(),
                     'optimizer_state_dict': {name: opt.state_dict() for name, opt in optimizers.items()},
                     'scheduler_state_dict': {name: sch.state_dict() for name, sch in schedulers.items()},
                     'epoch': epoch,
