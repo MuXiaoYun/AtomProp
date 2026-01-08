@@ -14,13 +14,15 @@ import pandas as pd
 import torch
 import torch.nn as nn
 import numpy as np
-from tqdm import tqdm
 from torch_geometric.data import Data, Batch
 from torch.utils.tensorboard import SummaryWriter
 from rdkit.Chem import FunctionalGroups
 from contextlib import nullcontext
 import os
 import configs.config as cfg
+import torch.distributed as dist
+from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.utils.data.distributed import DistributedSampler
 
 cfg.print_all_params()
 
@@ -97,13 +99,34 @@ if weight_type == "UW":
         weight_strategy = UncertaintyWeighting(num_tasks=len(tasks))
 elif weight_type == "GRADNORM":
     weight_strategy = GradNorm(num_tasks=len(tasks), init_weights=torch.exp(-cfg.fixed_log_vars))
+    
+def setup_distributed():
+    """Initialize distributed training"""
+    if 'RANK' in os.environ and 'WORLD_SIZE' in os.environ:
+        rank = int(os.environ['RANK'])
+        world_size = int(os.environ['WORLD_SIZE'])
+        local_rank = int(os.environ['LOCAL_RANK'])
+    else:
+        print('Not using distributed mode')
+        return None, 1, 0
+    
+    dist.init_process_group(backend='nccl')
+    torch.cuda.set_device(local_rank)
+    return rank, world_size, local_rank
+ 
+def cleanup_distributed():
+    """Clean up distributed training"""
+    if dist.is_initialized():
+        dist.destroy_process_group()
 
 def get_dataset_info(data_path):
+    """Get dataset information"""
     total_rows = sum(1 for _ in open(data_path)) - 1
     sample_chunk = pd.read_csv(data_path, nrows=10)
     return total_rows, sample_chunk.columns.tolist()
 
 def create_data_splits(total_size):
+    """Split data into train/val/test sets"""
     indices = np.arange(total_size)
     train_size = int(0.85 * total_size)
     val_size = int(0.10 * total_size)
@@ -115,17 +138,20 @@ def create_data_splits(total_size):
 def get_geat_layer_parameters(model, layer_decay=0.9):
     """
     Extract parameters from GeATNet with layer-wise decay.
-    
     Args:
         model: GeATNet instance
         layer_decay: decay factor for each layer (e.g., 0.9 means each layer has 90% LR of previous layer)
-    
     Returns:
         List of parameter groups with different learning rates
     """
+    if hasattr(model, 'module'):
+        geat_model = model.module
+    else:
+        geat_model = model
+    
     param_groups = []
     
-    geat_conv = model.backbone
+    geat_conv = geat_model.backbone
     num_layers = len(geat_conv.geat_layers)
     
     # Layer-wise parameters for GeAT layers
@@ -164,8 +190,8 @@ def get_geat_layer_parameters(model, layer_decay=0.9):
             })
     
     # Parameters from backbone (GlobalAttnConv) - treat as additional layers
-    neck_layers = model.neck.global_attns
-    neck_norm_layers = model.neck.norm_layers
+    neck_layers = geat_model.neck.global_attns
+    neck_norm_layers = geat_model.neck.norm_layers
     
     for i in range(len(neck_layers)):
         # Global attention layers
@@ -201,7 +227,7 @@ def get_geat_layer_parameters(model, layer_decay=0.9):
     # Parameters from FFN (MoE) - treat as the final layers
     ffn_layer_idx = num_layers + len(neck_layers)
     params = []
-    for name, param in model.ffn.named_parameters():
+    for name, param in geat_model.ffn.named_parameters():
         if param.requires_grad:
             params.append(param)
     
@@ -215,7 +241,7 @@ def get_geat_layer_parameters(model, layer_decay=0.9):
     
     # Edge embeddings - treat as input layer (no decay)
     params = []
-    for name, param in model.edge_type_embedding.named_parameters():
+    for name, param in geat_model.edge_type_embedding.named_parameters():
         if param.requires_grad:
             params.append(param)
     
@@ -228,7 +254,7 @@ def get_geat_layer_parameters(model, layer_decay=0.9):
         })
     
     params = []
-    for name, param in model.edge_direction_embedding.named_parameters():
+    for name, param in geat_model.edge_direction_embedding.named_parameters():
         if param.requires_grad:
             params.append(param)
     
@@ -242,20 +268,65 @@ def get_geat_layer_parameters(model, layer_decay=0.9):
     
     return param_groups
 
+def print_batch_progress(rank, epoch, current_batch, total_batches, loss, stage="Training"):
+    """Print batch progress information (only on rank 0)"""
+    if rank is None or rank == 0:
+        progress = (current_batch + 1) / total_batches * 100
+        print(f"[{stage}] Epoch {epoch+1}: Batch {current_batch+1}/{total_batches} ({progress:.1f}%) - Loss: {loss:.4f}")
+
+def print_epoch_start(rank, epoch, total_epochs, stage="Training"):
+    """Print epoch start information (only on rank 0)"""
+    if rank is None or rank == 0:
+        print(f"\n{'='*70}")
+        print(f"{stage} - Epoch {epoch+1}/{total_epochs}")
+        print(f"{'='*70}")
+
+def print_epoch_end(rank, epoch, avg_loss, stage="Training"):
+    """Print epoch end information (only on rank 0)"""
+    if rank is None or rank == 0:
+        print(f"{'='*70}")
+        print(f"{stage} Epoch {epoch+1} Completed - Average Loss: {avg_loss:.6f}")
+        print(f"{'='*70}\n")
+
 if __name__ == "__main__":
-    with nullcontext():
+    # Initialize distributed training
+    rank, world_size, local_rank = setup_distributed()
+    
+    # Only create tensorboard writer for rank 0
+    if rank is None or rank == 0:
         writer = SummaryWriter(log_dir=f"runs/{logdir}")
-        scaffold_calculator = ScaffoldSimilarityMatrix()
+    else:
+        writer = None
+        
+    scaffold_calculator = ScaffoldSimilarityMatrix()
+    
+    # Get dataset info (only on rank 0)
+    if rank is None or rank == 0:
         total_rows, columns = get_dataset_info(data_path)
         print(f"Total rows in dataset: {total_rows}")
-
-        if dataset_size > 0:
-            total_rows = min(total_rows, dataset_size)
-
-        train_indices, val_indices, test_indices = create_data_splits(total_rows)
+    else:
+        total_rows = 0
+    
+    # Broadcast dataset size to all processes
+    if rank is not None and world_size > 1:
+        total_rows_tensor = torch.tensor([total_rows], device='cuda')
+        dist.broadcast(total_rows_tensor, src=0)
+        total_rows = int(total_rows_tensor.item())
+    
+    if dataset_size > 0:
+        total_rows = min(total_rows, dataset_size)
+    
+    train_indices, val_indices, test_indices = create_data_splits(total_rows)
+    
+    if rank is None or rank == 0:
         print(f"Train set size: {len(train_indices)}, Val set size: {len(val_indices)}, Test set size: {len(test_indices)}")
+        print(f"Using computing device: cuda:{local_rank if rank is not None else 0}")
+    
+    device = torch.device(f"cuda:{local_rank}" if rank is not None else "cuda" if torch.cuda.is_available() else "cpu")    
 
-        print(f"Using computing device: {device}")
+    with nullcontext():
+        scaffold_calculator = ScaffoldSimilarityMatrix()
+
         embedding_layer.to(device)
         backbone.to(device)
         head0.to(device)
@@ -263,28 +334,42 @@ if __name__ == "__main__":
         head4.to(device)
         weight_strategy.to(device)
         backbone.print_params()
+        
+        if rank is not None and world_size > 1:
+            embedding_layer = DDP(embedding_layer, device_ids=[local_rank], output_device=local_rank, find_unused_parameters=True)
+            backbone = DDP(backbone, device_ids=[local_rank], output_device=local_rank, find_unused_parameters=True)
+            head0 = DDP(head0, device_ids=[local_rank], output_device=local_rank, find_unused_parameters=True)
+            head1 = DDP(head1, device_ids=[local_rank], output_device=local_rank, find_unused_parameters=True)
+            head4 = DDP(head4, device_ids=[local_rank], output_device=local_rank, find_unused_parameters=True)
+            weight_strategy = DDP(weight_strategy, device_ids=[local_rank], output_device=local_rank, find_unused_parameters=True)
 
-        print(embedding_layer.__class__.__name__, f"Parameters: {sum(p.numel() for p in embedding_layer.parameters() if p.requires_grad)}")
-        print(backbone.__class__.__name__, f"Parameters: {sum(p.numel() for p in backbone.parameters() if p.requires_grad)}")
-        print(head0.__class__.__name__, f"Parameters: {sum(p.numel() for p in head0.parameters() if p.requires_grad)}")
-        print(head1.__class__.__name__, f"Parameters: {sum(p.numel() for p in head1.parameters() if p.requires_grad)}")
-        print(head4.__class__.__name__, f"Parameters: {sum(p.numel() for p in head4.parameters() if p.requires_grad)}")
+        if rank is None or rank == 0:
+            print(f"{embedding_layer.__class__.__name__} Parameters: {sum(p.numel() for p in embedding_layer.module.parameters() if p.requires_grad)}")
+            print(f"{backbone.__class__.__name__} Parameters: {sum(p.numel() for p in backbone.module.parameters() if p.requires_grad)}")
+            print(f"{head0.__class__.__name__} Parameters: {sum(p.numel() for p in head0.module.parameters() if p.requires_grad)}")
+            print(f"{head1.__class__.__name__} Parameters: {sum(p.numel() for p in head1.module.parameters() if p.requires_grad)}")
+            print(f"{head4.__class__.__name__} Parameters: {sum(p.numel() for p in head4.module.parameters() if p.requires_grad)}")
+        
+        train_sampler = DistributedSampler(train_indices, num_replicas=world_size, rank=rank, shuffle=True) if rank is not None else None
+        val_sampler = DistributedSampler(val_indices, num_replicas=world_size, rank=rank, shuffle=False) if rank is not None else None
         
         train_loader = PyGChunkDataListLoader(
             data_path=data_path,
             split_indices=train_indices,
             chunk_size=chunk_size,
             batch_size=batch_size,
-            file_type=pretrain_file_type
+            file_type=pretrain_file_type,
+            sampler=train_sampler
         )
         val_loader = PyGChunkDataListLoader(
             data_path=data_path,
             split_indices=val_indices,
             chunk_size=chunk_size,
             batch_size=batch_size,
-            file_type=pretrain_file_type
+            file_type=pretrain_file_type,
+            sampler=val_sampler
         )
-        
+            
         components = {
             "embedding_layer": embedding_layer,
             "backbone": backbone,
@@ -331,7 +416,8 @@ if __name__ == "__main__":
 
         # Get layer-wise parameter groups for GeATNet if layer decay is enabled
         if cfg.use_layer_decay and cfg.layer_decay_rate > 0:
-            print(f"Using layer-wise learning rate decay with rate: {cfg.layer_decay_rate}")
+            if rank is None or rank == 0:
+                print(f"Using layer-wise learning rate decay with rate: {cfg.layer_decay_rate}")
             backbone_param_groups = get_geat_layer_parameters(backbone, layer_decay=cfg.layer_decay_rate)
             
             # Create parameter groups with scaled learning rates
@@ -345,7 +431,8 @@ if __name__ == "__main__":
                     'weight_decay': cfg.backbone_wd,
                     'name': group['name']
                 })
-                print(f"  Layer {group['layer_idx']} ({group['name']}): LR scale = {group['lr_scale']:.4f}, Effective LR = {scaled_lr:.6f}")
+                if rank is None or rank == 0:
+                    print(f"  Layer {group['layer_idx']} ({group['name']}): LR scale = {group['lr_scale']:.4f}, Effective LR = {scaled_lr:.6f}")
             
             # Update backbone optimizer configuration
             optimizer_configs["backbone"]["kwargs"] = {
@@ -354,7 +441,8 @@ if __name__ == "__main__":
                 "weight_decay": cfg.backbone_wd
             }
         else:
-            print("Using uniform learning rate for all GeAT layers")
+            if rank is None or rank == 0:
+                print("Using uniform learning rate for all GeAT layers")
 
         scheduler_configs = {
             "embedding_layer": {
@@ -446,7 +534,14 @@ if __name__ == "__main__":
         eps = 1e-8
         
         for epoch in range(num_epochs):
+            # Training loop
+            if train_sampler is not None:
+                train_sampler.set_epoch(epoch)
+            
             try:
+                # Print epoch start information
+                print_epoch_start(rank, epoch, num_epochs, "Training")
+                
                 embedding_layer.train()
                 backbone.train()
                 head0.train()
@@ -454,11 +549,8 @@ if __name__ == "__main__":
                 total_train_loss = 0.0
                 train_sample_count = 0
                 
-                train_pbar = tqdm(enumerate(train_loader), 
-                                total=train_loader.total_batches, 
-                                desc=f"Epoch {epoch+1}/{num_epochs} - Training")
-                
-                for batch_idx, (data_list, mols) in train_pbar:
+                # Training loop without tqdm
+                for batch_idx, (data_list, mols) in enumerate(train_loader):
                     batch_data = Batch.from_data_list(data_list).to(device)
                     
                     for opt in optimizers.values():
@@ -521,10 +613,16 @@ if __name__ == "__main__":
                     loss_scaffold_contrast = task7.compute_loss()
 
                     losses = [loss_atom_attr_pred, loss_masked_atom_type_pred, loss_triplet_contrast, loss_batch_contrast, loss_functional_group_pred, loss_scaffold_contrast]
-                    loss = weight_strategy(losses)
-
+                    loss = weight_strategy(losses) if weight_type != "GRADNORM" else weight_strategy(losses, list(embedding_layer.module.parameters()))
+                    
                     # backward and step
-                    loss.backward()
+                    if weight_type == "GRADNORM":
+                        loss, gn_loss, _ = loss
+                        loss.backward(retain_graph=True)
+                        gn_loss.backward()
+                    else:
+                        loss.backward()
+                              
                     for opt in optimizers.values():
                         opt.step()
                         
@@ -535,37 +633,47 @@ if __name__ == "__main__":
                     if cfg.use_layer_decay and cfg.layer_decay_rate > 0 and (batch_idx == 0 or (batch_idx + 1) % record_freq == 0):
                         for param_group in optimizers["backbone"].param_groups:
                             if 'name' in param_group:
-                                writer.add_scalar(f'LR/backbone_{param_group["name"]}', param_group['lr'], epoch * train_loader.total_batches + batch_idx)
+                                if rank is None or rank == 0:
+                                    writer.add_scalar(f'LR/backbone_{param_group["name"]}', param_group['lr'], epoch * train_loader.total_batches + batch_idx)
                     
                     if batch_idx == 0 or (batch_idx + 1) % record_freq == 0:
-                        writer.add_scalar('Train/Loss_total', loss.item(), epoch * train_loader.total_batches + batch_idx)
-                        writer.add_scalar('Train/Loss_atom_attr', loss_atom_attr_pred.item(), epoch * train_loader.total_batches + batch_idx)
-                        writer.add_scalar('Train/Loss_masked_atom', loss_masked_atom_type_pred.item(), epoch * train_loader.total_batches + batch_idx)
-                        writer.add_scalar('Train/Loss_triplet', loss_triplet_contrast.item(), epoch * train_loader.total_batches + batch_idx)
-                        writer.add_scalar('Train/Loss_batch_contrast', loss_batch_contrast.item(), epoch * train_loader.total_batches + batch_idx)
-                        writer.add_scalar('Train/Loss_functional_group', loss_functional_group_pred.item(), epoch * train_loader.total_batches + batch_idx)
-                        writer.add_scalar('Train/Loss_scaffold_contrast', loss_scaffold_contrast.item(), epoch * train_loader.total_batches + batch_idx)
-                        # log weights
-                        try:
-                            for i in range(len(tasks)):
-                                writer.add_scalar(f'Weight/Uncertainty{i}', weight_strategy.log_vars[i].item(), epoch * train_loader.total_batches + batch_idx)
-                        except Exception:
-                            # logging should not interrupt training
-                            print("LOGGING ERROR: PLEASE CHECK")
+                        if rank is None or rank == 0:
+                            writer.add_scalar('Train/Loss_total', loss.item(), epoch * train_loader.total_batches + batch_idx)
+                            writer.add_scalar('Train/Loss_atom_attr', loss_atom_attr_pred.item(), epoch * train_loader.total_batches + batch_idx)
+                            writer.add_scalar('Train/Loss_masked_atom', loss_masked_atom_type_pred.item(), epoch * train_loader.total_batches + batch_idx)
+                            writer.add_scalar('Train/Loss_triplet', loss_triplet_contrast.item(), epoch * train_loader.total_batches + batch_idx)
+                            writer.add_scalar('Train/Loss_batch_contrast', loss_batch_contrast.item(), epoch * train_loader.total_batches + batch_idx)
+                            writer.add_scalar('Train/Loss_functional_group', loss_functional_group_pred.item(), epoch * train_loader.total_batches + batch_idx)
+                            writer.add_scalar('Train/Loss_scaffold_contrast', loss_scaffold_contrast.item(), epoch * train_loader.total_batches + batch_idx)
+                            # Log weights
+                            try:
+                                for i in range(len(tasks)):
+                                    writer.add_scalar(f'Weight/Uncertainty{i}', weight_strategy.module.log_vars[i].item(), epoch * train_loader.total_batches + batch_idx)
+                            except Exception as e:
+                                print("TRAINING ERROR!")
+                                print(e)      
                     
-                    if batch_idx == train_loader.total_batches - 1:
-                        metrics = {f"metrics_{i}": tasks[i].get_metrics() for i in range(len(tasks))}
-                        print(f"Batch {batch_idx+1}/{train_loader.total_batches} Metrics: {metrics}")
+                    if batch_idx == len(train_loader) - 1:
+                        if rank is None or rank == 0:
+                            metrics = {f"metrics_{i}": tasks[i].get_metrics() for i in range(len(tasks))}
+                            print(f"Batch {batch_idx+1}/{len(train_loader)} Metrics: {metrics}")
                     
                     batch_size_current = len(mols)
                     total_train_loss += loss.item() * batch_size_current
                     train_sample_count += batch_size_current
                     
-                    train_pbar.set_postfix({"Batch Loss": f"{loss.item():.6f}"})
+                    # Print batch progress (only on rank 0)
+                    print_batch_progress(rank, epoch, batch_idx, len(train_loader), loss.item(), "Training")
                 
                 avg_train_loss = total_train_loss / train_sample_count
                 train_losses.append(avg_train_loss)
+                
+                # Print epoch end information
+                print_epoch_end(rank, epoch, avg_train_loss, "Training")
 
+                # Validation loop
+                print_epoch_start(rank, epoch, num_epochs, "Validation")
+                
                 embedding_layer.eval()
                 backbone.eval()
                 head0.eval()
@@ -584,12 +692,9 @@ if __name__ == "__main__":
                 total_val_loss_scaffold_contrast = 0.0
                 val_sample_count = 0
                 
-                val_pbar = tqdm(enumerate(val_loader),
-                                    total=val_loader.total_batches, 
-                                    desc=f"Epoch {epoch+1}/{num_epochs} - Validation")
-                
+                # Validation loop without tqdm
                 with torch.no_grad():
-                    for batch_idx, (data_list, mols) in val_pbar:
+                    for batch_idx, (data_list, mols) in enumerate(val_loader):
                         batch_data = Batch.from_data_list(data_list).to(device)
                         
                         atom_emb = embedding_layer(batch_data.x).squeeze()
@@ -650,11 +755,12 @@ if __name__ == "__main__":
                         
                         losses = [loss_atom_attr_pred, loss_masked_atom_type_pred, loss_triplet_contrast, loss_batch_contrast, loss_functional_group_pred, loss_scaffold_contrast]
 
-                        loss = weight_strategy(losses)
-                   
-                        if batch_idx == val_loader.total_batches - 1:
+                        loss = weight_strategy(losses) if weight_type != "GRADNORM" else weight_strategy(losses, list(embedding_layer.module.parameters()))[0]
+                        
+                        if batch_idx == len(val_loader) - 1:
                             metrics = {f"metrics_{i}": tasks[i].get_metrics() for i in range(len(tasks))}
-                            print(f"Batch {batch_idx+1}/{val_loader.total_batches} Metrics: {metrics}")
+                            if rank is None or rank == 0:
+                                print(f"Batch {batch_idx+1}/{len(val_loader)} Metrics: {metrics}")
                         
                         batch_size_current = len(mols)
                         total_val_loss += loss.item() * batch_size_current
@@ -666,25 +772,31 @@ if __name__ == "__main__":
                         total_val_loss_scaffold_contrast += loss_scaffold_contrast.item() * batch_size_current
                         val_sample_count += batch_size_current
                         
-                        val_pbar.set_postfix({"Batch Loss": f"{loss.item():.6f}"})
+                        # Print batch progress (only on rank 0)
+                        print_batch_progress(rank, epoch, batch_idx, len(val_loader), loss.item(), "Validation")
                 
                 avg_val_loss = total_val_loss / val_sample_count
                 val_losses.append(avg_val_loss)
                 
-                writer.add_scalar('Epoch/Train_loss', avg_train_loss, epoch)
-                writer.add_scalar('Epoch/Val_loss', avg_val_loss, epoch)
-                writer.add_scalar('Epoch/Val_loss_atom_attr', total_val_loss_atom_attr / val_sample_count, epoch)
-                writer.add_scalar('Epoch/Val_loss_masked_atom', total_val_loss_masked_atom / val_sample_count, epoch)
-                writer.add_scalar('Epoch/Val_loss_triplet', total_val_loss_triplet / val_sample_count, epoch)
-                writer.add_scalar('Epoch/Val_loss_batch_contrast', total_val_loss_batch_contrast / val_sample_count, epoch)
-                writer.add_scalar('Epoch/Val_loss_bond_angle', total_val_loss_bond_angle / val_sample_count, epoch)
-                writer.add_scalar('Epoch/Val_loss_dihedral_angle', total_val_loss_dihedral_angle / val_sample_count, epoch)
-                writer.add_scalar('Epoch/Val_loss_functional_group', total_val_loss_functional_group / val_sample_count, epoch)
-                writer.add_scalar('Epoch/Val_loss_scaffold_contrast', total_val_loss_scaffold_contrast / val_sample_count, epoch)
+                # Print epoch end information for validation
+                print_epoch_end(rank, epoch, avg_val_loss, "Validation")
                 
-                print(f"Epoch {epoch+1}/{num_epochs} Summary: Train Loss = {avg_train_loss:.6f}, Val Loss = {avg_val_loss:.6f}")
+                if rank is None or rank == 0:
+                    writer.add_scalar('Epoch/Train_loss', avg_train_loss, epoch)
+                    writer.add_scalar('Epoch/Val_loss', avg_val_loss, epoch)
+                    writer.add_scalar('Epoch/Val_loss_atom_attr', total_val_loss_atom_attr / val_sample_count, epoch)
+                    writer.add_scalar('Epoch/Val_loss_masked_atom', total_val_loss_masked_atom / val_sample_count, epoch)
+                    writer.add_scalar('Epoch/Val_loss_triplet', total_val_loss_triplet / val_sample_count, epoch)
+                    writer.add_scalar('Epoch/Val_loss_batch_contrast', total_val_loss_batch_contrast / val_sample_count, epoch)
+                    writer.add_scalar('Epoch/Val_loss_bond_angle', total_val_loss_bond_angle / val_sample_count, epoch)
+                    writer.add_scalar('Epoch/Val_loss_dihedral_angle', total_val_loss_dihedral_angle / val_sample_count, epoch)
+                    writer.add_scalar('Epoch/Val_loss_functional_group', total_val_loss_functional_group / val_sample_count, epoch)
+                    writer.add_scalar('Epoch/Val_loss_scaffold_contrast', total_val_loss_scaffold_contrast / val_sample_count, epoch)
                 
-                if avg_val_loss < best_val_loss:
+                if rank is None or rank == 0:
+                    print(f"Epoch {epoch+1}/{num_epochs} Summary: Train Loss = {avg_train_loss:.6f}, Val Loss = {avg_val_loss:.6f}")
+                
+                if rank is None or rank == 0 and avg_val_loss < best_val_loss:
                     best_val_loss = avg_val_loss
                     torch.save({
                         'embedding_layer_state_dict': embedding_layer.state_dict(),
@@ -698,32 +810,40 @@ if __name__ == "__main__":
                         'best_val_loss': best_val_loss
                     }, f'trained_models/{logdir}/best_model.pth')
                     print(f"Best model saved at epoch {epoch+1} with Val Loss = {best_val_loss:.6f}")
-                # save model at each epoch
-                torch.save({
-                    'embedding_layer_state_dict': embedding_layer.state_dict(),
-                    'backbone_state_dict': backbone.state_dict(),
-                    'optimizer_state_dict': {name: opt.state_dict() for name, opt in optimizers.items()},
-                    'scheduler_state_dict': {name: sch.state_dict() for name, sch in schedulers.items()},
-                    "head0_state_dict": head0.state_dict(),
-                    "head1_state_dict": head1.state_dict(),
-                    "head4_state_dict": head4.state_dict(),
-                    'epoch': epoch,
-                    'val_loss': avg_val_loss
-                }, f'trained_models/{logdir}/model_epoch{epoch}.pth')
-                print(f"Model at epoch {epoch+1} saved with Val Loss = {avg_val_loss:.6f}")
+                
+                # Save model at each epoch
+                if rank is None or rank == 0:
+                    torch.save({
+                        'embedding_layer_state_dict': embedding_layer.state_dict(),
+                        'backbone_state_dict': backbone.state_dict(),
+                        'optimizer_state_dict': {name: opt.state_dict() for name, opt in optimizers.items()},
+                        'scheduler_state_dict': {name: sch.state_dict() for name, sch in schedulers.items()},
+                        "head0_state_dict": head0.state_dict(),
+                        "head1_state_dict": head1.state_dict(),
+                        "head4_state_dict": head4.state_dict(),
+                        'epoch': epoch,
+                        'val_loss': avg_val_loss
+                    }, f'trained_models/{logdir}/model_epoch{epoch}.pth')
+                    print(f"Model at epoch {epoch+1} saved with Val Loss = {avg_val_loss:.6f}")
 
             except KeyboardInterrupt:
-                torch.save({
-                    'embedding_layer_state_dict': embedding_layer.state_dict(),
-                    'backbone_state_dict': backbone.state_dict(),
-                    'optimizer_state_dict': {name: opt.state_dict() for name, opt in optimizers.items()},
-                    'scheduler_state_dict': {name: sch.state_dict() for name, sch in schedulers.items()},
-                    "head0_state_dict": head0.state_dict(),
-                    "head1_state_dict": head1.state_dict(),
-                    "head4_state_dict": head4.state_dict(),
-                    'epoch': epoch,
-                    'best_val_loss': best_val_loss
-                }, f'trained_models/{logdir}/interrupted_model.pth')
-                print("Training interrupted. Model state saved to 'interrupted_model.pth'.")
+                if rank is None or rank == 0:
+                    torch.save({
+                        'embedding_layer_state_dict': embedding_layer.state_dict(),
+                        'backbone_state_dict': backbone.state_dict(),
+                        'optimizer_state_dict': {name: opt.state_dict() for name, opt in optimizers.items()},
+                        'scheduler_state_dict': {name: sch.state_dict() for name, sch in schedulers.items()},
+                        "head0_state_dict": head0.state_dict(),
+                        "head1_state_dict": head1.state_dict(),
+                        "head4_state_dict": head4.state_dict(),
+                        'epoch': epoch,
+                        'best_val_loss': best_val_loss
+                    }, f'trained_models/{logdir}/interrupted_model.pth')
+                    print("Training interrupted. Model state saved to 'interrupted_model.pth'.")
+                break
             
-        writer.close()
+        # Close tensorboard writer if exists
+        if writer is not None:
+            writer.close()
+        
+        cleanup_distributed()

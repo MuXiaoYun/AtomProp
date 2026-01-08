@@ -200,81 +200,85 @@ class BatchContrast:
         return {
             'relative_accuracy': relative_accuracy.item()
         }
-        
+
 class ScaffoldContrast:
     """
-    Scaffold-level contrastive learning task.
-    By making contrast on graphs in the same batch, calculate InfoNCE loss.
+    Scaffold-level contrastive learning using Supervised Contrastive Loss (SupCon).
+    Each graph is an anchor; all graphs in the same scaffold group are positives.
+    Implements the multi-positive extension of InfoNCE.
     """
-    
+
     def __init__(self, temperature=0.1):
         self.temperature = temperature
         self.embeddings = None
         self.group_labels = None
 
     def set_embeddings(self, embeddings):
-        """
-        Set embeddings for anchor, positive, and negative samples.
-        """
         self.embeddings = embeddings
         
     def set_group_label(self, group_labels: list[list[int]]):
-        """
-        Set scaffold groups as label.
-        """
         self.group_labels = group_labels
 
     @nan_to_zero("ScaffoldContrast")
     def compute_loss(self):
-        """
-        Compute the contrastive loss.
-        """
-        emb_norm = F.normalize(self.embeddings, dim=1)
+        if self.embeddings is None or self.group_labels is None:
+            raise ValueError("Embeddings or group labels not set.")
+        
+        emb = self.embeddings
+        device = emb.device
+        batch_size = emb.size(0)
+        
+        if batch_size <= 1:
+            return emb.sum() * 0.0
+
+        labels = torch.full((batch_size,), -1, dtype=torch.long, device=device)
+        for scaffold_id, group in enumerate(self.group_labels):
+            for idx in group:
+                if 0 <= idx < batch_size:
+                    labels[idx] = scaffold_id
+
+        unique_labels = labels[labels != -1]
+        if len(unique_labels) == 0 or len(torch.unique(unique_labels)) == len(unique_labels):
+            # No positive pairs → return zero loss with gradient
+            return emb.sum() * 0.0
+
+        # Normalize embeddings
+        emb_norm = F.normalize(emb, dim=1)
+        # Similarity matrix: [batch_size, batch_size]
         sim_matrix = torch.matmul(emb_norm, emb_norm.t()) / self.temperature
-        
-        batch_size = self.embeddings.size(0)
-        device = self.embeddings.device
-        
-        pos_pairs = []
-        all_indices = torch.arange(batch_size, device=device)
-        
-        for group in self.group_labels:
-            if len(group) < 2:
-                continue
-            for i in range(len(group)):
-                for j in range(i+1, len(group)):  
-                    pos_pairs.append((group[i], group[j]))
-        
-        if not pos_pairs:
-            return torch.tensor(0.0, device=device)
-        
-        total_loss = 0.0
-        
-        for anchor_idx, pos_idx in pos_pairs:
-            pos_sim = sim_matrix[anchor_idx, pos_idx]
-            
-            neg_mask = (all_indices != pos_idx)
-            neg_sims = sim_matrix[anchor_idx, neg_mask]
-            
-            pos_sim = sim_matrix[anchor_idx, pos_idx]  
-            neg_mask = (all_indices != pos_idx)  
-            neg_sims = sim_matrix[anchor_idx, neg_mask]  
-            
-            # Use log-sum-exp trick for numerical stability  
-            max_sim = torch.max(torch.cat([pos_sim.unsqueeze(0), neg_sims]))  
-            pos_sim_shifted = pos_sim - max_sim  
-            neg_sims_shifted = neg_sims - max_sim  
-            
-            numerator = torch.exp(pos_sim_shifted)  
-            denominator = numerator + torch.exp(neg_sims_shifted).sum()  
-            loss = -torch.log(numerator / denominator) + max_sim  # Add back the max
-            
-            total_loss += loss
-        return total_loss / len(pos_pairs)
-    
+
+        # Mask for positive pairs (including self)
+        mask = (labels.unsqueeze(0) == labels.unsqueeze(1)) & (labels != -1).unsqueeze(0)  # [N, N]
+        mask.fill_diagonal_(False)  # exclude self as positive (optional; you can keep it)
+
+        # For numerical stability, subtract max per row
+        logits_max, _ = torch.max(sim_matrix, dim=1, keepdim=True)
+        logits = sim_matrix - logits_max.detach()
+
+        # Compute exp logits
+        exp_logits = torch.exp(logits)
+
+        # Denominator: sum over all negatives + positives (but not self if excluded)
+        # Standard SupCon denominator includes ALL except self
+        neg_mask = ~torch.eye(batch_size, dtype=torch.bool, device=device)
+        denominator = torch.sum(exp_logits * neg_mask, dim=1)  # [N]
+
+        # Numerator: sum over positives for each anchor
+        numerator = torch.sum(exp_logits * mask, dim=1)  # [N]
+
+        # Avoid log(0)
+        valid = numerator > 0
+        if not valid.any():
+            return emb.sum() * 0.0
+
+        # SupCon loss per anchor: -log( numerator / denominator )
+        loss_per_anchor = -torch.log(numerator[valid] / (denominator[valid] + 1e-8))
+        loss = loss_per_anchor.mean()
+
+        return loss
+
     def get_metrics(self):
         return {}
-
 
 class BondAnglePrediction:
     """

@@ -9,14 +9,14 @@ device_str = "cuda:7"  # fallback to cpu if not available
 
 # Training
 from_scratch = True
-from_model_path = "trained_models/pretrain_zinc_geat_moe/model_epoch7.pth" # if not from_scratch
+from_model_path = "trained_models/pretrain_zinc_geat_moe_continue/model_epoch7.pth" # if not from_scratch
 
 # Dataset and I/O
 data_path = "data/zinc15/dataset/zinc_standard_agent/processed/smiles.csv"
 # data_path = "data/pubchem/pubchem-10m.txt"
 pretrain_file_type = 'txt'
 
-logdir = "pretrain_zinc_geat_moe_continue"
+logdir = "pretrain_final"
 
 # Model settings
 geat_num_layers = 4
@@ -33,18 +33,18 @@ FFN_top_k = 2
 use_edge_embedding = False
 
 # Data settings
-dataset_size = -1
+dataset_size = 1000
 chunk_size = 65536
 max_atom_num = 128
 batch_size = 160
 
 # Weight settings
 fix_uncertainty = False
-fixed_log_vars = torch.tensor([-3.1857, 0.5437, -0.4763, -1.8525, -1.8813, 2.7907], dtype=torch.float32)
+fixed_log_vars = torch.tensor([-3.2157, 0.5324, -0.4459, -0.6287, -1.8934, 2.7381], dtype=torch.float32)
 
 # Training settings
 num_epochs = 8
-weight_type = "UW"
+weight_type = "GRADNORM"
 record_freq = 100
 
 # Masking rates

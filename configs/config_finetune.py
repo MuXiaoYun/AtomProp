@@ -13,7 +13,7 @@ num_heads = 8
 global_num_heads = 8
 output_negative_slope = 0.2
 geat_dropout = 0.1
-FFN_type = "NONE"
+FFN_type = "MOE"
 FFN_num_layers = 2
 FFN_hidden_dim = 1024
 FFN_num_experts = 8
@@ -31,7 +31,7 @@ exclude_list = ["mol_id", "name", "num"]
 # Training settings
 no_pretrain = True
 pretrained_path = 'trained_models/pretrain_zinc_geat_moe/model_epoch3.pth'
-logdir = "finetune_origin"
+logdir = "finetune_MOE82"
 
 batch_size = 128
 test_batch_size = 128
@@ -40,7 +40,7 @@ random_state = 42
 head_dropout = 0.1
 
 # Cross-validation
-k_folds = 3
+k_folds = 5
 frac_test = 0.1
 
 # Model architecture
@@ -49,15 +49,15 @@ aggr = 'attention'  # options: 'mean', 'sum', 'max', 'attention'
 head_hidden_dim = 512
 
 # Optimizer settings
-lr_embedding_layer_backbone = 1e-5
-lr_head = 5e-4
-lr_aggr = 5e-4
+lr_embedding_layer_backbone = 2e-5
+lr_head = 1e-3
+lr_aggr = 1e-3
 
 # Scheduler settings
 T_max = num_epochs
 eta_min_embedding_layer_backbone = 5e-7
-eta_min_head = 5e-6
-eta_min_aggr = 5e-6
+eta_min_head = 1e-5
+eta_min_aggr = 1e-5
 
 def print_all_params():
     """Print all configuration parameters defined in this module."""
