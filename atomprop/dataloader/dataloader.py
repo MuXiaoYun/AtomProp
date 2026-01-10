@@ -72,70 +72,67 @@ def smiles_to_pyg_data(smiles):
     return Data(x=x, edge_index=edge_index, edge_attr=edge_attr, smiles=smiles, mol=mol)
 
 class PyGChunkDataListLoader:
-    def __init__(self, data_path, split_indices, chunk_size=65536, batch_size=32, device=None, file_type='csv', sampler=None):
+    def __init__(self, data_path, split_indices, chunk_size=65536, batch_size=32,
+                 device=None, file_type='csv', sampler=None):
         self.data_path = data_path
-        self.split_indices = split_indices
+        self.split_indices = split_indices  # full list of global indices to consider
         self.chunk_size = chunk_size
         self.batch_size = batch_size
-        self.current_chunk_idx = 0
-        self.current_chunk_data = None
-        self.current_chunk_start = 0
         self.device = device
         self.file_type = file_type
         self.sampler = sampler
-        
+
         if self.file_type == 'csv':
             self.headers = pd.read_csv(data_path, nrows=0).columns.tolist()
         else:
             self.headers = ['SMILES']
 
-        if self.sampler is None:
-            self.sorted_indices = np.sort(split_indices)
-        else:
-            self.sorted_indices = split_indices
-        
-        self.total_batches = len(self.sorted_indices) // self.batch_size
-        if len(self.sorted_indices) % self.batch_size != 0:
-            self.total_batches += 1
-            
-    def __len__(self):
-        """
-        Return real batch nums, considering there may be DistributedSampler.
-        """
-        if self.sampler is not None:
-            total_samples = len(self.sampler)
-            return (total_samples + self.batch_size - 1) // self.batch_size
-        else:
-            return self.total_batches
-    
-    def set_epoch(self, epoch):
-        if self.sampler is not None:
-            self.sampler.set_epoch(epoch)
- 
-    def __iter__(self):
-        self.current_chunk_idx = 0
+        self._base_indices = list(range(len(self.split_indices)))
+
+        self._index_iter = None
         self.current_chunk_data = None
+        self.current_chunk_start = -1
+        
+    def _get_effective_num_samples(self):
+        if self.sampler is not None:
+            return len(self.sampler)
+        else:
+            return len(self.split_indices)
+        
+    @property
+    def total_batches(self):
+        num_samples = self._get_effective_num_samples()
+        return (num_samples + self.batch_size - 1) // self.batch_size
+
+    def __iter__(self):
+        self.current_chunk_data = None
+        self.current_chunk_start = -1
+
+        if self.sampler is not None:
+            self._index_iter = iter(self.sampler)
+        else:
+            self._index_iter = iter(self._base_indices)
+
         return self
- 
+
     def __next__(self):
         data_list = []
         mols_list = []
-        
-        indices_iterator = iter(self.sampler) if self.sampler is not None else iter(range(len(self.sorted_indices)))
-        
+
         while len(data_list) < self.batch_size:
             try:
-                sampler_idx = next(indices_iterator)
-                target_idx = self.sorted_indices[sampler_idx]
+                pos_in_split = next(self._index_iter)  # position in split_indices
             except StopIteration:
                 if len(data_list) > 0:
                     return data_list, mols_list
                 else:
-                    raise StopIteration
- 
+                    raise
+
+            target_idx = self.split_indices[pos_in_split]
+
             chunk_num = target_idx // self.chunk_size
             chunk_start = chunk_num * self.chunk_size
- 
+
             if self.current_chunk_data is None or chunk_start != self.current_chunk_start:
                 if self.file_type == 'csv':
                     self.current_chunk_data = pd.read_csv(
@@ -155,22 +152,21 @@ class PyGChunkDataListLoader:
                         names=self.headers
                     )
                 self.current_chunk_start = chunk_start
- 
+
             local_idx = target_idx % self.chunk_size
             smiles = self.current_chunk_data.iloc[local_idx]['SMILES']
- 
+
             data = smiles_to_pyg_data(smiles)
- 
+
             if data is None:
-                print(f"Invalid SMILES at index {target_idx}: {smiles}")
-                continue
- 
+                raise ValueError(f"Invalid SMILES at global index {target_idx}: {smiles}")
+
             if self.device is not None:
                 data = data.to(self.device)
- 
+
             data_list.append(data)
             mols_list.append(data.mol)
- 
+
         return data_list, mols_list
     
 class xyzBatchLoader:

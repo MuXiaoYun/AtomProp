@@ -23,6 +23,7 @@ import os
 import configs.config as cfg
 
 cfg.print_all_params()
+np.random.seed(cfg.random_state)
 
 # torch.autograd.set_detect_anomaly(True)
 
@@ -105,6 +106,8 @@ def get_dataset_info(data_path):
 
 def create_data_splits(total_size):
     indices = np.arange(total_size)
+    if cfg.shuffle:
+        indices = np.random.permutation(indices)
     train_size = int(0.85 * total_size)
     val_size = int(0.10 * total_size)
     train_indices = indices[:train_size]

@@ -15,8 +15,10 @@ from_model_path = "trained_models/pretrain_zinc_geat_moe_continue/model_epoch7.p
 data_path = "data/zinc15/dataset/zinc_standard_agent/processed/smiles.csv"
 # data_path = "data/pubchem/pubchem-10m.txt"
 pretrain_file_type = 'txt'
+shuffle = True
+random_state = 42
 
-logdir = "pretrain_final"
+logdir = "pretrain_parallel"
 
 # Model settings
 geat_num_layers = 4
@@ -33,10 +35,10 @@ FFN_top_k = 2
 use_edge_embedding = False
 
 # Data settings
-dataset_size = 1000
+dataset_size = -1
 chunk_size = 65536
 max_atom_num = 128
-batch_size = 160
+batch_size = 256
 
 # Weight settings
 fix_uncertainty = False
@@ -44,7 +46,7 @@ fixed_log_vars = torch.tensor([-3.2157, 0.5324, -0.4459, -0.6287, -1.8934, 2.738
 
 # Training settings
 num_epochs = 8
-weight_type = "GRADNORM"
+weight_type = "UW"
 record_freq = 100
 
 # Masking rates

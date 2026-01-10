@@ -24,8 +24,6 @@ import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data.distributed import DistributedSampler
 
-cfg.print_all_params()
-
 # torch.autograd.set_detect_anomaly(True)
 
 record_freq = cfg.record_freq
@@ -101,7 +99,6 @@ elif weight_type == "GRADNORM":
     weight_strategy = GradNorm(num_tasks=len(tasks), init_weights=torch.exp(-cfg.fixed_log_vars))
     
 def setup_distributed():
-    """Initialize distributed training"""
     if 'RANK' in os.environ and 'WORLD_SIZE' in os.environ:
         rank = int(os.environ['RANK'])
         world_size = int(os.environ['WORLD_SIZE'])
@@ -115,19 +112,18 @@ def setup_distributed():
     return rank, world_size, local_rank
  
 def cleanup_distributed():
-    """Clean up distributed training"""
     if dist.is_initialized():
         dist.destroy_process_group()
 
 def get_dataset_info(data_path):
-    """Get dataset information"""
     total_rows = sum(1 for _ in open(data_path)) - 1
     sample_chunk = pd.read_csv(data_path, nrows=10)
     return total_rows, sample_chunk.columns.tolist()
 
 def create_data_splits(total_size):
-    """Split data into train/val/test sets"""
     indices = np.arange(total_size)
+    if cfg.shuffle:
+        indices = np.random.permutation(indices)
     train_size = int(0.85 * total_size)
     val_size = int(0.10 * total_size)
     train_indices = indices[:train_size]
@@ -344,11 +340,12 @@ if __name__ == "__main__":
             weight_strategy = DDP(weight_strategy, device_ids=[local_rank], output_device=local_rank, find_unused_parameters=True)
 
         if rank is None or rank == 0:
-            print(f"{embedding_layer.__class__.__name__} Parameters: {sum(p.numel() for p in embedding_layer.module.parameters() if p.requires_grad)}")
-            print(f"{backbone.__class__.__name__} Parameters: {sum(p.numel() for p in backbone.module.parameters() if p.requires_grad)}")
-            print(f"{head0.__class__.__name__} Parameters: {sum(p.numel() for p in head0.module.parameters() if p.requires_grad)}")
-            print(f"{head1.__class__.__name__} Parameters: {sum(p.numel() for p in head1.module.parameters() if p.requires_grad)}")
-            print(f"{head4.__class__.__name__} Parameters: {sum(p.numel() for p in head4.module.parameters() if p.requires_grad)}")
+            cfg.print_all_params()
+            print(f"{embedding_layer.__class__.__name__} Parameters: {sum(p.numel() for p in embedding_layer.parameters() if p.requires_grad)}")
+            print(f"{backbone.__class__.__name__} Parameters: {sum(p.numel() for p in backbone.parameters() if p.requires_grad)}")
+            print(f"{head0.__class__.__name__} Parameters: {sum(p.numel() for p in head0.parameters() if p.requires_grad)}")
+            print(f"{head1.__class__.__name__} Parameters: {sum(p.numel() for p in head1.parameters() if p.requires_grad)}")
+            print(f"{head4.__class__.__name__} Parameters: {sum(p.numel() for p in head4.parameters() if p.requires_grad)}")
         
         train_sampler = DistributedSampler(train_indices, num_replicas=world_size, rank=rank, shuffle=True) if rank is not None else None
         val_sampler = DistributedSampler(val_indices, num_replicas=world_size, rank=rank, shuffle=False) if rank is not None else None
@@ -548,8 +545,7 @@ if __name__ == "__main__":
                 head1.train()
                 total_train_loss = 0.0
                 train_sample_count = 0
-                
-                # Training loop without tqdm
+
                 for batch_idx, (data_list, mols) in enumerate(train_loader):
                     batch_data = Batch.from_data_list(data_list).to(device)
                     
@@ -651,19 +647,19 @@ if __name__ == "__main__":
                                     writer.add_scalar(f'Weight/Uncertainty{i}', weight_strategy.module.log_vars[i].item(), epoch * train_loader.total_batches + batch_idx)
                             except Exception as e:
                                 print("TRAINING ERROR!")
-                                print(e)      
+                                raise ValueError(e)      
                     
-                    if batch_idx == len(train_loader) - 1:
+                    if batch_idx == train_loader.total_batches - 1:
                         if rank is None or rank == 0:
                             metrics = {f"metrics_{i}": tasks[i].get_metrics() for i in range(len(tasks))}
-                            print(f"Batch {batch_idx+1}/{len(train_loader)} Metrics: {metrics}")
+                            print(f"Batch {batch_idx+1}/{train_loader.total_batches} Metrics: {metrics}")
                     
                     batch_size_current = len(mols)
                     total_train_loss += loss.item() * batch_size_current
                     train_sample_count += batch_size_current
                     
                     # Print batch progress (only on rank 0)
-                    print_batch_progress(rank, epoch, batch_idx, len(train_loader), loss.item(), "Training")
+                    print_batch_progress(rank, epoch, batch_idx, train_loader.total_batches, loss.item(), "Training")
                 
                 avg_train_loss = total_train_loss / train_sample_count
                 train_losses.append(avg_train_loss)
@@ -691,8 +687,7 @@ if __name__ == "__main__":
                 total_val_loss_functional_group = 0.0
                 total_val_loss_scaffold_contrast = 0.0
                 val_sample_count = 0
-                
-                # Validation loop without tqdm
+
                 with torch.no_grad():
                     for batch_idx, (data_list, mols) in enumerate(val_loader):
                         batch_data = Batch.from_data_list(data_list).to(device)
@@ -757,10 +752,10 @@ if __name__ == "__main__":
 
                         loss = weight_strategy(losses) if weight_type != "GRADNORM" else weight_strategy(losses, list(embedding_layer.module.parameters()))[0]
                         
-                        if batch_idx == len(val_loader) - 1:
+                        if batch_idx == val_loader.total_batches - 1:
                             metrics = {f"metrics_{i}": tasks[i].get_metrics() for i in range(len(tasks))}
                             if rank is None or rank == 0:
-                                print(f"Batch {batch_idx+1}/{len(val_loader)} Metrics: {metrics}")
+                                print(f"Batch {batch_idx+1}/{val_loader.total_batches} Metrics: {metrics}")
                         
                         batch_size_current = len(mols)
                         total_val_loss += loss.item() * batch_size_current
@@ -773,7 +768,7 @@ if __name__ == "__main__":
                         val_sample_count += batch_size_current
                         
                         # Print batch progress (only on rank 0)
-                        print_batch_progress(rank, epoch, batch_idx, len(val_loader), loss.item(), "Validation")
+                        print_batch_progress(rank, epoch, batch_idx, val_loader.total_batches, loss.item(), "Validation")
                 
                 avg_val_loss = total_val_loss / val_sample_count
                 val_losses.append(avg_val_loss)
