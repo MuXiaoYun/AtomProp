@@ -9,6 +9,7 @@ from atomprop.utils.features import FunctionalGroupUtils
 from atomprop.utils.weights import GradNorm, ParetoOpt, UncertaintyWeighting, FixedUncertaintyWeighting
 from atomprop.utils.scaffold import ScaffoldSimilarityMatrix
 from atomprop.embeddings.AtomEmbedding import BondTypes
+from atomprop.utils.timer import TrainingTimer
 import matplotlib.pyplot as plt
 import pandas as pd
 import torch
@@ -264,24 +265,24 @@ def get_geat_layer_parameters(model, layer_decay=0.9):
     
     return param_groups
 
-def print_batch_progress(rank, epoch, current_batch, total_batches, loss, stage="Training"):
+def print_batch_progress(rank, epoch, current_batch, total_batches, loss, timer, stage="Training"):
     """Print batch progress information (only on rank 0)"""
     if rank is None or rank == 0:
         progress = (current_batch + 1) / total_batches * 100
-        print(f"[{stage}] Epoch {epoch+1}: Batch {current_batch+1}/{total_batches} ({progress:.1f}%) - Loss: {loss:.4f}")
+        timer.print(f"[{stage}] Epoch {epoch+1}: Batch {current_batch+1}/{total_batches} ({progress:.1f}%) - Loss: {loss:.4f}")
 
-def print_epoch_start(rank, epoch, total_epochs, stage="Training"):
+def print_epoch_start(rank, epoch, total_epochs, timer, stage="Training"):
     """Print epoch start information (only on rank 0)"""
     if rank is None or rank == 0:
         print(f"\n{'='*70}")
-        print(f"{stage} - Epoch {epoch+1}/{total_epochs}")
+        timer.print(f"{stage} - Epoch {epoch+1}/{total_epochs}")
         print(f"{'='*70}")
 
-def print_epoch_end(rank, epoch, avg_loss, stage="Training"):
+def print_epoch_end(rank, epoch, avg_loss, timer, stage="Training"):
     """Print epoch end information (only on rank 0)"""
     if rank is None or rank == 0:
         print(f"{'='*70}")
-        print(f"{stage} Epoch {epoch+1} Completed - Average Loss: {avg_loss:.6f}")
+        timer.print(f"{stage} Epoch {epoch+1} Completed - Average Loss: {avg_loss:.6f}")
         print(f"{'='*70}\n")
 
 if __name__ == "__main__":
@@ -347,7 +348,7 @@ if __name__ == "__main__":
             print(f"{head1.__class__.__name__} Parameters: {sum(p.numel() for p in head1.parameters() if p.requires_grad)}")
             print(f"{head4.__class__.__name__} Parameters: {sum(p.numel() for p in head4.parameters() if p.requires_grad)}")
         
-        train_sampler = DistributedSampler(train_indices, num_replicas=world_size, rank=rank, shuffle=True) if rank is not None else None
+        train_sampler = DistributedSampler(train_indices, num_replicas=world_size, rank=rank, shuffle=False) if rank is not None else None
         val_sampler = DistributedSampler(val_indices, num_replicas=world_size, rank=rank, shuffle=False) if rank is not None else None
         
         train_loader = PyGChunkDataListLoader(
@@ -530,6 +531,12 @@ if __name__ == "__main__":
         val_losses = []
         eps = 1e-8
         
+        # Only create timer for rank 0
+        if rank is None or rank == 0:
+            timer = TrainingTimer()
+        else:
+            timer = None
+        
         for epoch in range(num_epochs):
             # Training loop
             if train_sampler is not None:
@@ -537,7 +544,7 @@ if __name__ == "__main__":
             
             try:
                 # Print epoch start information
-                print_epoch_start(rank, epoch, num_epochs, "Training")
+                print_epoch_start(rank, epoch, num_epochs, timer, "Training")
                 
                 embedding_layer.train()
                 backbone.train()
@@ -659,16 +666,16 @@ if __name__ == "__main__":
                     train_sample_count += batch_size_current
                     
                     # Print batch progress (only on rank 0)
-                    print_batch_progress(rank, epoch, batch_idx, train_loader.total_batches, loss.item(), "Training")
+                    print_batch_progress(rank, epoch, batch_idx, train_loader.total_batches, loss.item(), timer, "Training")
                 
                 avg_train_loss = total_train_loss / train_sample_count
                 train_losses.append(avg_train_loss)
                 
                 # Print epoch end information
-                print_epoch_end(rank, epoch, avg_train_loss, "Training")
+                print_epoch_end(rank, epoch, avg_train_loss, timer, "Training")
 
                 # Validation loop
-                print_epoch_start(rank, epoch, num_epochs, "Validation")
+                print_epoch_start(rank, epoch, num_epochs, timer, "Validation")
                 
                 embedding_layer.eval()
                 backbone.eval()
@@ -768,13 +775,13 @@ if __name__ == "__main__":
                         val_sample_count += batch_size_current
                         
                         # Print batch progress (only on rank 0)
-                        print_batch_progress(rank, epoch, batch_idx, val_loader.total_batches, loss.item(), "Validation")
+                        print_batch_progress(rank, epoch, batch_idx, val_loader.total_batches, loss.item(), timer, "Validation")
                 
                 avg_val_loss = total_val_loss / val_sample_count
                 val_losses.append(avg_val_loss)
                 
                 # Print epoch end information for validation
-                print_epoch_end(rank, epoch, avg_val_loss, "Validation")
+                print_epoch_end(rank, epoch, avg_val_loss, timer, "Validation")
                 
                 if rank is None or rank == 0:
                     writer.add_scalar('Epoch/Train_loss', avg_train_loss, epoch)

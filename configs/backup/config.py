@@ -28,8 +28,6 @@ global_num_heads = 8
 output_negative_slope = 0.2
 geat_dropout = 0.1
 head_dropout = 0.3
-
-FFN_type = "MOE"
 FFN_num_layers = 2
 FFN_hidden_dim = 1024
 FFN_num_experts = 8

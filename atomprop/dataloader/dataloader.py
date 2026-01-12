@@ -103,6 +103,9 @@ class PyGChunkDataListLoader:
     def total_batches(self):
         num_samples = self._get_effective_num_samples()
         return (num_samples + self.batch_size - 1) // self.batch_size
+    
+    def __len__(self):
+        return self.total_batches
 
     def __iter__(self):
         self.current_chunk_data = None

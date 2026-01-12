@@ -20,6 +20,8 @@ import json
 from datetime import datetime
 from atomprop.models.GeAT import GeATNet
 import configs.config_finetune as cfg
+from atomprop.utils.head import DownstreamHead
+from atomprop.utils.utils import remove_module_prefix
 
 criterion = MaskedBCELoss()
 
@@ -275,12 +277,19 @@ def main(ft_dataset = None):
     
     if cfg.no_pretrain == False:
         ckpt = torch.load(cfg.pretrained_path, weights_only=False, map_location=device)
-        embedding_layer.load_state_dict(ckpt['embedding_layer_state_dict'])
-        backbone.load_state_dict(ckpt['backbone_state_dict'])
+        embedding_layer.load_state_dict(remove_module_prefix(ckpt['embedding_layer_state_dict']))
+        backbone.load_state_dict(remove_module_prefix(ckpt['backbone_state_dict']))
     
-    head = MLP(input_dim=cfg.embed_dim, hidden_dim=cfg.head_hidden_dim, output_dim=len(y_cols),
-               num_layers=2, dropout=cfg.head_dropout, batch_norm=True, output_activation=None)
-    head.init_params(gain=2.0)
+    head = DownstreamHead(
+        input_dim=cfg.embed_dim,
+        hidden_dim=cfg.head_hidden_dim,
+        output_dim=len(y_cols),
+        mlp_num_layers=2,
+        attn_num_layers=cfg.downstream_head_attn_num_layers,
+        dropout=cfg.head_dropout,
+        batch_norm=True,
+        output_activation=None
+    )
     
     print(f"embedding_layer Parameters: {sum(p.numel() for p in embedding_layer.parameters() if p.requires_grad)}")
     print(f"backbone Parameters: {sum(p.numel() for p in backbone.parameters() if p.requires_grad)}")

@@ -12,7 +12,8 @@ class MLP(nn.Module):
     A :class:`MLP` is a module that implements a multi-layer perceptron.
     """
 
-    def __init__(self, input_dim: int,
+    def __init__(self,
+                 input_dim: int,
                  hidden_dim: int,
                  output_dim: int,
                  num_layers: int,
