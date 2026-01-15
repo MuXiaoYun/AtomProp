@@ -4,12 +4,9 @@ import torch
 
 # configs/config.py
 
-# Device (will be overridden in main script based on availability)
-device_str = "cuda:7"  # fallback to cpu if not available
-
 # Training
 from_scratch = True
-from_model_path = "trained_models/pretrain_zinc_geat_moe_continue/model_epoch7.pth" # if not from_scratch
+from_model_path = "trained_models/pretrain_final/model_epoch7.pth" # if not from_scratch
 
 # Dataset and I/O
 data_path = "data/zinc15/dataset/zinc_standard_agent/processed/smiles.csv"
@@ -47,7 +44,7 @@ fix_uncertainty = False
 fixed_log_vars = torch.tensor([-3.2157, 0.5324, -0.4459, -0.6287, -1.8934, 2.7381], dtype=torch.float32)
 
 # Training settings
-num_epochs = 8
+num_epochs = 16
 weight_type = "UW"
 record_freq = 100
 

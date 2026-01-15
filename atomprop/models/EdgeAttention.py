@@ -46,12 +46,10 @@ class EdgeAttention(nn.Module):
                 MLP(input_dim=atom_embedding_dim * 2, 
                     hidden_dim=mlp_hidden_dim, 
                     output_dim=1, 
-                    num_layers=mlp_num_layers)
+                    num_layers=mlp_num_layers,
+                    output_activation=F.relu)
                 for _ in range(num_bond_types)
             ])
-            # Initialize MLP parameters
-            for mlp in self.mlps:
-                mlp.init_params(gain=1.414)
   
     def forward(self, src_embeddings, dst_embeddings, edge_embeddings, edge_index=None, edge_attr=None):  
         """  

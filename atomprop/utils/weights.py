@@ -46,38 +46,42 @@ class GradNorm(nn.Module):
         # Compute total loss for main model optimization
         total_loss = sum(normalized_weights[i] * task_losses[i] for i in range(T))
 
-        # Compute gradient norms G_i = ||∇_θ (L_i)|| (note: not weighted by w_i here)
-        # We use L_i directly (not w_i * L_i) to avoid coupling w_i into gradient computation
-        G = []
-        for i in range(T):
-            assert task_losses[i].grad_fn is not None, f"Loss {i} has no grad_fn! Check if it's detached."
-            # Use raw task loss (no weight) to compute gradient norm
-            # This avoids needing create_graph=True and keeps G independent of weights
-            grad = torch.autograd.grad(
-                outputs=task_losses[i],
-                inputs=shared_params,
-                retain_graph=True,
-                allow_unused=True,
-                create_graph=False
-            )
-            grad_flat = torch.cat([g.flatten() for g in grad if g is not None])
-            G_i = torch.norm(grad_flat, p=2)
-            G.append(G_i)
-        G = torch.stack(G)  # shape: [T]
+        if self.training:
+            # Compute gradient norms G_i = ||∇_θ (L_i)|| (note: not weighted by w_i here)
+            # We use L_i directly (not w_i * L_i) to avoid coupling w_i into gradient computation
+            G = []
+            for i in range(T):
+                assert task_losses[i].grad_fn is not None, f"Loss {i} has no grad_fn! Check if it's detached."
+                # Use raw task loss (no weight) to compute gradient norm
+                # This avoids needing create_graph=True and keeps G independent of weights
+                grad = torch.autograd.grad(
+                    outputs=task_losses[i],
+                    inputs=shared_params,
+                    retain_graph=True,
+                    allow_unused=True,
+                    create_graph=False
+                )
+                grad_flat = torch.cat([g.flatten() for g in grad if g is not None])
+                G_i = torch.norm(grad_flat, p=2)
+                G.append(G_i)
+            G = torch.stack(G)  # shape: [T]
 
-        # Compute target relative weights based on loss ratios and gradient norms
-        with torch.no_grad():
-            L = torch.stack(task_losses)
-            L_avg = L.mean()
-            # Relative inverse training rates
-            r_target = (L / L_avg) ** self.alpha
-            # Desired property: w_i ∝ r_target_i / G_i  => balance w_i * G_i across tasks
-            target_weights_raw = r_target / (G + 1e-8)  # add epsilon for numerical stability
-            target_weights = target_weights_raw / target_weights_raw.mean()  # normalize to mean=1
+            # Compute target relative weights based on loss ratios and gradient norms
+            with torch.no_grad():
+                L = torch.stack(task_losses)
+                L_avg = L.mean()
+                # Relative inverse training rates
+                r_target = (L / L_avg) ** self.alpha
+                # Desired property: w_i ∝ r_target_i / G_i  => balance w_i * G_i across tasks
+                target_weights_raw = r_target / (G + 1e-8)  # add epsilon for numerical stability
+                target_weights = target_weights_raw / target_weights_raw.mean()  # normalize to mean=1
 
-        # Proxy GradNorm loss: encourage current weights to match target weights
-        # NOTE: normalized_weights requires grad; target_weights is constant
-        gradnorm_loss = torch.abs(normalized_weights - target_weights).sum()
+            # Proxy GradNorm loss: encourage current weights to match target weights
+            # NOTE: normalized_weights requires grad; target_weights is constant
+            gradnorm_loss = torch.abs(normalized_weights - target_weights).sum()
+            
+        else:
+            gradnorm_loss = None
 
         return total_loss, gradnorm_loss, normalized_weights.detach()
     
@@ -108,7 +112,6 @@ class UncertaintyWeighting(nn.Module):
     def forward(self, losses):
         """
         losses: list of task losses [L1, L2, ..., Ln]
-        loss_types: list of loss types [T1, T2, ..., Tn], type in ["classification", "regression"]
         """
         total_loss = 0
         for i, loss in enumerate(losses):
@@ -116,6 +119,31 @@ class UncertaintyWeighting(nn.Module):
             precision = torch.exp(-log_var_clamped)
             total_loss += 0.5 * precision * loss + 0.5 * log_var_clamped
         return total_loss    
+    
+class AdaptiveUncertaintyWeighting(nn.Module):
+    """
+    Adaptive uncertainty weight strategy. 
+    Use different loss for different task types.
+    Reference: https://arxiv.org/abs/1705.07115
+    """
+    def __init__(self, num_tasks, task_types):
+        super().__init__()
+        self.task_types = task_types
+        self.log_vars = nn.Parameter(torch.zeros(num_tasks))
+    
+    def forward(self, losses):
+        """
+        losses: list of task losses [L1, L2, ..., Ln]
+        """
+        total_loss = 0
+        for i, loss in enumerate(losses):
+            log_var_clamped = torch.clamp(self.log_vars[i], log_var_lower_bound, log_var_upper_bound)
+            precision = torch.exp(-log_var_clamped)
+            if self.task_types[i] == "regression":
+                total_loss += 0.5 * precision * loss + 0.5 * log_var_clamped
+            elif self.task_types[i] == "classification":
+                total_loss += precision * loss + 0.5 * log_var_clamped
+        return total_loss   
     
 class FixedUncertaintyWeighting(nn.Module):
     """

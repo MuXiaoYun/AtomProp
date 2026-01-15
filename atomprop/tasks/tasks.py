@@ -136,7 +136,7 @@ class GraphMaskContrast:
         """
         Compute the contrastive loss.
         """
-        return nn.TripletMarginLoss(margin=self.margin, p=self.p)(self.anchor, self.positive, self.negative)
+        return nn.TripletMarginLoss(margin=self.margin, p=self.p)(self.anchor, self.positive, self.negative)**2
 
     def get_metrics(self):
         """
