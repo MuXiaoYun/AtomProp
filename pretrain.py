@@ -50,8 +50,6 @@ less_rate = cfg.less_rate
 more_rate = cfg.more_rate
 embed_dim = cfg.embed_dim
 
-device = torch.device(cfg.device_str) if torch.cuda.is_available() else torch.device("cpu")
-
 if fg_list is None:
     fg_list = FunctionalGroups.BuildFuncGroupHierarchy()
 

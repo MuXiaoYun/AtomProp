@@ -9,16 +9,16 @@ from_scratch = True
 from_model_path = "trained_models/pretrain_final/model_epoch7.pth" # if not from_scratch
 
 # Dataset and I/O
-data_path = "data/zinc15/dataset/zinc_standard_agent/processed/smiles.csv"
-# data_path = "data/pubchem/pubchem-10m.txt"
+# data_path = "data/zinc15/dataset/zinc_standard_agent/processed/smiles.csv"
+data_path = "data/pubchem/pubchem-10m.txt.clean"
 pretrain_file_type = 'txt'
 shuffle = False
 random_state = 42
 
-logdir = "pretrain_final"
+logdir = "pretrain_pubchem"
 
 # Model settings
-geat_num_layers = 4
+geat_num_layers = 5
 aggr_num_layers = 2
 num_heads = 8
 global_num_heads = 8
@@ -26,9 +26,9 @@ output_negative_slope = 0.2
 geat_dropout = 0.1
 head_dropout = 0.3
 
-FFN_type = "MOE"
+FFN_type = "MLP"
 FFN_num_layers = 2
-FFN_hidden_dim = 1024
+FFN_hidden_dim = 2048
 FFN_num_experts = 8
 FFN_top_k = 2
 use_edge_embedding = False
@@ -44,7 +44,7 @@ fix_uncertainty = False
 fixed_log_vars = torch.tensor([-3.2157, 0.5324, -0.4459, -0.6287, -1.8934, 2.7381], dtype=torch.float32)
 
 # Training settings
-num_epochs = 16
+num_epochs = 8
 weight_type = "UW"
 record_freq = 100
 
