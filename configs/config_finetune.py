@@ -10,7 +10,7 @@ num_heads = 8
 global_num_heads = 8
 output_negative_slope = 0.2
 geat_dropout = 0
-head_dropout = 0.5
+head_dropout = 0.3
 
 downstream_head_attn_num_layers = 2
 
@@ -30,9 +30,9 @@ x_col = "smiles"
 exclude_list = ["mol_id", "name", "num"]
 
 # Training settings
-no_pretrain = False
+no_pretrain = True
 pretrained_path = 'trained_models/pretrain_final/model_epoch15.pth'
-logdir = "finetune_pre768_bd"
+logdir = "finetune_focal_1024"
 
 batch_size = 128
 test_batch_size = 128
@@ -40,16 +40,15 @@ num_epochs = 200
 random_state = 42
 
 # Cross-validation
-k_folds = 3
-frac_test = 0.1
+gamma = 1.5
 
 # Model architecture
 embed_dim = 512
 aggr = 'mean'  # options: 'mean', 'sum', 'max', 'attention'
-head_hidden_dim = 768
+head_hidden_dim = 2048
 
 # Optimizer settings
-lr_embedding_layer_backbone = 5e-6
+lr_embedding_layer_backbone = 5e-5
 lr_head = 1e-3
 
 # Scheduler settings

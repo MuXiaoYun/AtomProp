@@ -27,36 +27,66 @@ class MaskedBCELoss(nn.Module):
         return loss
 
 class MaskedFocalLoss(nn.Module):
-    def __init__(self, alpha=0.25, gamma=2.0, reduction='mean'):
+    def __init__(self, alpha=None, gamma=2.0, reduction='mean'):
+        """
+        Args:
+            alpha: Can be:
+                - None: no alpha balancing
+                - float: scalar alpha (e.g., 0.25)
+                - torch.Tensor: tensor of shape broadcastable to (N, *), 
+                  where each element is the alpha for positive class at that position.
+                  Must be in [0, 1].
+            gamma: float, focusing parameter
+            reduction: 'none', 'mean', or 'sum'
+        """
         super(MaskedFocalLoss, self).__init__()
-        self.alpha = alpha
         self.gamma = gamma
         self.reduction = reduction
         
+        if alpha is not None and not isinstance(alpha, (float, int)) and not isinstance(alpha, torch.Tensor):
+            raise TypeError("alpha must be None, float, int, or torch.Tensor")
+        
+        self.alpha = alpha  # could be scalar or tensor
+
     def forward(self, pred, label):
         """
         pred: logits tensor of shape (N, *)
         label: label tensor of shape (N, *), values in {0, 1, -1}
-        -1 indicates missing labels
+               -1 indicates missing/ignored labels
         """
         mask = (label != -1)
         if mask.sum() == 0:
-            return torch.tensor(0.0, device=pred.device)
-            
+            return torch.zeros((), device=pred.device, dtype=pred.dtype)
+
         valid_labels = label[mask].float()
         valid_preds = pred[mask]
-        
-        # Convert logits to probabilities
+
+        # Compute p = sigmoid(pred) for valid positions
         p = torch.sigmoid(valid_preds)
-        # Focal Loss calculation
         ce_loss = F.binary_cross_entropy_with_logits(valid_preds, valid_labels, reduction='none')
-        # pt = p if y=1, else 1-p
+
+        # p_t = p if y=1 else (1-p)
         p_t = p * valid_labels + (1 - p) * (1 - valid_labels)
-        # alpha_t = alpha if y=1, else 1-alpha
-        alpha_t = self.alpha * valid_labels + (1 - self.alpha) * (1 - valid_labels)
-        # Focal loss
-        focal_loss = alpha_t * (1 - p_t) ** self.gamma * ce_loss
-        
+
+        # Handle alpha
+        if self.alpha is None:
+            alpha_t = torch.ones_like(valid_labels)
+        elif isinstance(self.alpha, (float, int)):
+            # Scalar alpha: same for all
+            alpha_t = self.alpha * valid_labels + (1 - self.alpha) * (1 - valid_labels)
+        else:
+            # self.alpha is a tensor; must be on same device and broadcastable
+            alpha_tensor = self.alpha.to(pred.device)
+            # Expand alpha to match pred shape (broadcasting)
+            # This allows alpha of shape (1, C) for (B, C) inputs, etc.
+            alpha_expanded = torch.broadcast_to(alpha_tensor, pred.shape)
+            # Extract alpha values only at valid (non-masked) positions
+            valid_alpha = alpha_expanded[mask]
+            # Now construct alpha_t: use valid_alpha for positive samples, (1 - valid_alpha) for negative
+            alpha_t = valid_alpha * valid_labels + (1 - valid_alpha) * (1 - valid_labels)
+
+        focal_loss = alpha_t * ((1 - p_t) ** self.gamma) * ce_loss
+
         if self.reduction == 'mean':
             return focal_loss.mean()
         elif self.reduction == 'sum':
