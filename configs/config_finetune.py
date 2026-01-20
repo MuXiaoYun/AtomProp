@@ -2,6 +2,7 @@ import inspect
 import sys
 
 # config_finetune.py
+num_runs = 10
 
 # Model settings
 geat_num_layers = 4
@@ -32,12 +33,12 @@ exclude_list = ["mol_id", "name", "num"]
 # Training settings
 no_pretrain = True
 pretrained_path = 'trained_models/pretrain_final/model_epoch15.pth'
-logdir = "finetune_focal_1024"
+logdir = "finetune_nopre"
 
 batch_size = 128
 test_batch_size = 128
-num_epochs = 200
-random_state = 42
+num_epochs = 100
+random_state = 0
 
 # Cross-validation
 gamma = 1.5
@@ -48,13 +49,13 @@ aggr = 'mean'  # options: 'mean', 'sum', 'max', 'attention'
 head_hidden_dim = 2048
 
 # Optimizer settings
-lr_embedding_layer_backbone = 5e-5
+lr_embedding_layer_backbone = 1e-4
 lr_head = 1e-3
 
 # Scheduler settings
 T_max = num_epochs
 eta_min_embedding_layer_backbone = 5e-7
-eta_min_head = 1e-5
+eta_min_head = 1e-6
 
 def print_all_params():
     """Print all configuration parameters defined in this module."""

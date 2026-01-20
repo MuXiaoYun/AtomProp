@@ -177,6 +177,7 @@ def train(train_dataloader, val_dataloader, test_dataloader, model_components, o
             
             loss = train_criterion(preds.reshape(-1, len(y_cols)), batch.y.reshape(-1, len(y_cols))) - cfg.norm_lambda * torch.mean(torch.abs(preds.reshape(-1, len(y_cols))-0.5))
             loss.backward()
+            
             for optimizer in optimizers:
                 optimizer.step()
             
@@ -375,96 +376,97 @@ def main(ft_dataset=None):
     
     # 4. Train
     all_results = []
-    if local_rank == 0:
-        print(f"\nStarting...")
-    
-    train_inds, valid_inds, test_inds = splitter.split(dc_dataset)
-    
-    train_smiles = [dc_dataset.ids[i] for i in train_inds]
-    train_labels = dc_dataset.X[train_inds]
-    val_smiles = [dc_dataset.ids[i] for i in valid_inds]
-    val_labels = dc_dataset.X[valid_inds]
-    test_smiles = [dc_dataset.ids[i] for i in test_inds]
-    test_labels = dc_dataset.X[test_inds]
-    
-    if local_rank == 0:
-        print(f"Training set size: {len(train_smiles)}")
-        print(f"Validation set size: {len(val_smiles)}")
-        print(f"Test set size: {len(test_smiles)}")
-    
-    train_dataset = create_dataset_from_smiles_labels(train_smiles, train_labels)
-    val_dataset = create_dataset_from_smiles_labels(val_smiles, val_labels)
-    test_dataset = create_dataset_from_smiles_labels(test_smiles, test_labels)
-    
-    if local_rank == 0:
-        print(f"Valid training graphs: {len(train_dataset)}")
-        print(f"Valid validation graphs: {len(val_dataset)}")
-        print(f"Valid test graphs: {len(test_dataset)}")
-    
-    # Use DistributedSampler for all datasets
-    train_sampler = DistributedSampler(train_dataset, shuffle=True)
-    val_sampler = DistributedSampler(val_dataset, shuffle=False)
-    test_sampler = DistributedSampler(test_dataset, shuffle=False)
-    
-    train_dataloader = DataLoader(train_dataset, batch_size=cfg.batch_size, sampler=train_sampler, collate_fn=Batch.from_data_list, num_workers=0)
-    val_dataloader = DataLoader(val_dataset, batch_size=cfg.batch_size, sampler=val_sampler, collate_fn=Batch.from_data_list, num_workers=0)
-    test_dataloader = DataLoader(test_dataset, batch_size=cfg.test_batch_size, sampler=test_sampler, collate_fn=Batch.from_data_list, num_workers=0)
-    
-    embedding_layer = embedding_layer.to(device)
-    backbone = backbone.to(device)
-    head = head.to(device)
-    if cfg.aggr == 'attention':
-        aggrmodel = aggrmodel.to(device)
-    
-    # Wrap with DDP, enable find_unused_parameters
-    embedding_layer = DDP(embedding_layer, device_ids=[local_rank], find_unused_parameters=True)
-    backbone = DDP(backbone, device_ids=[local_rank], find_unused_parameters=True)
-    head = DDP(head, device_ids=[local_rank], find_unused_parameters=True)
-    if cfg.aggr == 'attention':
-        aggrmodel = DDP(aggrmodel, device_ids=[local_rank], find_unused_parameters=True)
-    
-    # Optimizers
-    optimizer_embedding_layer_backbone = torch.optim.Adam([
-        {'params': embedding_layer.parameters(), 'lr': cfg.lr_embedding_layer_backbone},
-        {'params': backbone.parameters(), 'lr': cfg.lr_embedding_layer_backbone}
-    ])
-    optimizer_head = torch.optim.Adam(head.parameters(), lr=cfg.lr_head)
-    optimizers = [optimizer_embedding_layer_backbone, optimizer_head]
-    
-    # Schedulers
-    scheduler_embedding_layer_backbone = torch.optim.lr_scheduler.CosineAnnealingLR(
-        optimizer_embedding_layer_backbone, T_max=cfg.T_max, eta_min=cfg.eta_min_embedding_layer_backbone
-    )
-    scheduler_head = torch.optim.lr_scheduler.CosineAnnealingLR(
-        optimizer_head, T_max=cfg.T_max, eta_min=cfg.eta_min_head
-    )
-    schedulers = [scheduler_embedding_layer_backbone, scheduler_head]
-    
-    model_components = (embedding_layer, backbone, head, aggrmodel)
-    
-    try:
-        result = train(
-            train_dataloader=train_dataloader,
-            val_dataloader=val_dataloader,
-            test_dataloader=test_dataloader,
-            model_components=model_components,
-            optimizers=optimizers,
-            schedulers=schedulers,
-            device=device,
-            num_epochs=cfg.num_epochs,
-            y_cols=y_cols,
-            logdir=cfg.logdir,
-            no_pretrain=cfg.no_pretrain,
-            aggr=cfg.aggr
+    for run_num in range(cfg.num_runs):
+        if local_rank == 0:
+            print(f"\nStarting run {run_num}...")
+        
+        train_inds, valid_inds, test_inds = splitter.split(dataset=dc_dataset, seed=cfg.random_state+run_num)
+        
+        train_smiles = [dc_dataset.ids[i] for i in train_inds]
+        train_labels = dc_dataset.X[train_inds]
+        val_smiles = [dc_dataset.ids[i] for i in valid_inds]
+        val_labels = dc_dataset.X[valid_inds]
+        test_smiles = [dc_dataset.ids[i] for i in test_inds]
+        test_labels = dc_dataset.X[test_inds]
+        
+        if local_rank == 0:
+            print(f"Training set size: {len(train_smiles)}")
+            print(f"Validation set size: {len(val_smiles)}")
+            print(f"Test set size: {len(test_smiles)}")
+        
+        train_dataset = create_dataset_from_smiles_labels(train_smiles, train_labels)
+        val_dataset = create_dataset_from_smiles_labels(val_smiles, val_labels)
+        test_dataset = create_dataset_from_smiles_labels(test_smiles, test_labels)
+        
+        if local_rank == 0:
+            print(f"Valid training graphs: {len(train_dataset)}")
+            print(f"Valid validation graphs: {len(val_dataset)}")
+            print(f"Valid test graphs: {len(test_dataset)}")
+        
+        # Use DistributedSampler for all datasets
+        train_sampler = DistributedSampler(train_dataset, shuffle=True)
+        val_sampler = DistributedSampler(val_dataset, shuffle=False)
+        test_sampler = DistributedSampler(test_dataset, shuffle=False)
+        
+        train_dataloader = DataLoader(train_dataset, batch_size=cfg.batch_size, sampler=train_sampler, collate_fn=Batch.from_data_list, num_workers=0)
+        val_dataloader = DataLoader(val_dataset, batch_size=cfg.batch_size, sampler=val_sampler, collate_fn=Batch.from_data_list, num_workers=0)
+        test_dataloader = DataLoader(test_dataset, batch_size=cfg.test_batch_size, sampler=test_sampler, collate_fn=Batch.from_data_list, num_workers=0)
+        
+        embedding_layer = embedding_layer.to(device)
+        backbone = backbone.to(device)
+        head = head.to(device)
+        if cfg.aggr == 'attention':
+            aggrmodel = aggrmodel.to(device)
+        
+        # Wrap with DDP, enable find_unused_parameters
+        embedding_layer = DDP(embedding_layer, device_ids=[local_rank], find_unused_parameters=True)
+        backbone = DDP(backbone, device_ids=[local_rank], find_unused_parameters=True)
+        head = DDP(head, device_ids=[local_rank], find_unused_parameters=True)
+        if cfg.aggr == 'attention':
+            aggrmodel = DDP(aggrmodel, device_ids=[local_rank], find_unused_parameters=True)
+        
+        # Optimizers
+        optimizer_embedding_layer_backbone = torch.optim.Adam([
+            {'params': embedding_layer.parameters(), 'lr': cfg.lr_embedding_layer_backbone},
+            {'params': backbone.parameters(), 'lr': cfg.lr_embedding_layer_backbone}
+        ])
+        optimizer_head = torch.optim.Adam(head.parameters(), lr=cfg.lr_head)
+        optimizers = [optimizer_embedding_layer_backbone, optimizer_head]
+        
+        # Schedulers
+        scheduler_embedding_layer_backbone = torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimizer_embedding_layer_backbone, T_max=cfg.T_max, eta_min=cfg.eta_min_embedding_layer_backbone
         )
-        if local_rank == 0:
-            all_results.append(result)
-    except KeyboardInterrupt:
-        if local_rank == 0:
-            print(f"\nTraining interrupted. Saving current progress...")
-    except Exception as e:
-        if local_rank == 0:
-            print(f"\nError: {e}")
+        scheduler_head = torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimizer_head, T_max=cfg.T_max, eta_min=cfg.eta_min_head
+        )
+        schedulers = [scheduler_embedding_layer_backbone, scheduler_head]
+        
+        model_components = (embedding_layer, backbone, head, aggrmodel)
+        
+        try:
+            result = train(
+                train_dataloader=train_dataloader,
+                val_dataloader=val_dataloader,
+                test_dataloader=test_dataloader,
+                model_components=model_components,
+                optimizers=optimizers,
+                schedulers=schedulers,
+                device=device,
+                num_epochs=cfg.num_epochs,
+                y_cols=y_cols,
+                logdir=cfg.logdir,
+                no_pretrain=cfg.no_pretrain,
+                aggr=cfg.aggr
+            )
+            if local_rank == 0:
+                all_results.append(result)
+        except KeyboardInterrupt:
+            if local_rank == 0:
+                print(f"\nTraining interrupted. Saving current progress...")
+        except Exception as e:
+            if local_rank == 0:
+                print(f"\nError: {e}")
 
     # Only rank 0 collects and saves results
     if local_rank == 0:
@@ -495,7 +497,6 @@ def main(ft_dataset=None):
             summary = {
                 'timestamp': datetime.now().isoformat(),
                 'dataset': cfg.data_path,
-                'frac_test': cfg.frac_test,
                 'num_epochs': cfg.num_epochs,
                 'batch_size': cfg.batch_size,
                 'cfg.no_pretrain': cfg.no_pretrain,

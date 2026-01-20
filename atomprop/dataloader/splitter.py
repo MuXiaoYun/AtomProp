@@ -83,9 +83,6 @@ class ScaffoldSplitter(Splitter):
                 val_inds.extend(scaffold_set)
             else:
                 test_inds.extend(scaffold_set)
-        print("train size:", len(train_inds))
-        print("val size:", len(val_inds))
-        print("test size:", len(test_inds))
         return train_inds, val_inds, test_inds
 
     def _generate_scaffolds(self,
