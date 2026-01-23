@@ -238,6 +238,23 @@ def train(train_dataloader, val_dataloader, test_dataloader, model_components, o
     if writer is not None:
         writer.close()
     
+    # Sync best_val_auc across all ranks before test
+    best_val_auc_tensor = torch.tensor([best_val_auc], device=device)
+    dist.broadcast(best_val_auc_tensor, src=0)
+    best_val_auc_global = best_val_auc_tensor.item()
+
+    if best_val_auc_global < 1e-3:
+        if local_rank == 0:
+            print("Scaffold Split produced invalid Validation Set!")
+        return {
+            'best_val_auc': 0.0,
+            'best_epoch': -1,
+            'test_auc': 0.0,
+            'test_loss': 0.0,
+            'test_task_aucs': [],
+            'test_predictions_path': ""
+        }
+
     # Test phase (only rank 0 saves results)
     if local_rank == 0:
         print(f"\n--- Testing ---")
@@ -503,12 +520,12 @@ def main(ft_dataset=None):
                 'aggr': cfg.aggr,
                 'results': all_results,
                 'summary_stats': {
-                    'mean_val_auc': float(np.mean(val_aucs)),
-                    'std_val_auc': float(np.std(val_aucs)),
-                    'mean_test_auc': float(np.mean(test_aucs)),
-                    'std_test_auc': float(np.std(test_aucs)),
-                    'min_test_auc': float(np.min(test_aucs)),
-                    'max_test_auc': float(np.max(test_aucs)),
+                    'mean_val_auc': float(np.nanmean(val_aucs)),
+                    'std_val_auc': float(np.nanstd(val_aucs)),
+                    'mean_test_auc': float(np.nanmean(test_aucs)),
+                    'std_test_auc': float(np.nanstd(test_aucs)),
+                    'min_test_auc': float(np.nanmin(test_aucs)),
+                    'max_test_auc': float(np.nanmax(test_aucs)),
                 }
             }
             

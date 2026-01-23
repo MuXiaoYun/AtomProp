@@ -15,7 +15,7 @@ pretrain_file_type = 'txt'
 shuffle = False
 random_state = 42
 
-logdir = "pretrain_pubchem"
+logdir = "pretrain_molebert"
 
 # Model settings
 geat_num_layers = 5
@@ -37,7 +37,7 @@ use_edge_embedding = False
 dataset_size = -1
 chunk_size = 65536
 max_atom_num = 128
-batch_size = 160
+batch_size = 96
 
 # Weight settings
 fix_uncertainty = False

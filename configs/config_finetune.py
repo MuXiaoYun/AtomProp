@@ -49,12 +49,12 @@ aggr = 'mean'  # options: 'mean', 'sum', 'max', 'attention'
 head_hidden_dim = 2048
 
 # Optimizer settings
-lr_embedding_layer_backbone = 1e-4
+lr_embedding_layer_backbone = 1e-5
 lr_head = 1e-3
 
 # Scheduler settings
 T_max = num_epochs
-eta_min_embedding_layer_backbone = 5e-7
+eta_min_embedding_layer_backbone = 1e-7
 eta_min_head = 1e-6
 
 def print_all_params():
