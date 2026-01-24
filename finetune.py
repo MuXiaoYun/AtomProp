@@ -108,10 +108,10 @@ def evaluate_model(model_components, dataloader, criterion, y_cols, device, aggr
     return avg_loss, mean_auc, task_aucs, all_preds, all_labels
 
 
-def train(train_dataloader, val_dataloader, test_dataloader, model_components, optimizers, schedulers, device, num_epochs, y_cols, logdir, no_pretrain, aggr='attention'):
+def train(train_dataloader, val_dataloader, test_dataloader, model_components, optimizers, schedulers, device, num_epochs, y_cols, logdir, no_pretrain, run_num, aggr='attention'):
     """Train on single GPU/CPU"""
     embedding_layer, backbone, head, aggrmodel = model_components
-    writer = SummaryWriter(log_dir=f'runs/finetune_{logdir}')
+    writer = SummaryWriter(log_dir=f'runs/finetune_{logdir}/run{run_num}')
     
     best_val_auc = 0.0
     best_epoch = -1
@@ -404,6 +404,7 @@ def main(ft_dataset=None):
                 y_cols=y_cols,
                 logdir=cfg.logdir,
                 no_pretrain=cfg.no_pretrain,
+                run_num=run_num,
                 aggr=cfg.aggr
             )
             all_results.append(result)
