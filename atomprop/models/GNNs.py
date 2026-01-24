@@ -9,13 +9,14 @@ from torch_geometric.nn import MessagePassing
 import torch.nn.functional as F
 from atomprop.embeddings.AtomEmbedding import BondTypes, BondDirections, AtomChirals
 
-class MaskedBCELoss(nn.Module):
-    def __init__(self, reduction='mean'):
-        super(MaskedBCELoss, self).__init__()
+class MaskedBCELossWithLogits(nn.Module):
+    def __init__(self, ignore_index=-1, reduction='mean'):
+        super(MaskedBCELossWithLogits, self).__init__()
         self.reduction = reduction
+        self.ignore_index = ignore_index
         
     def forward(self, pred, label):
-        mask = (label != -1)
+        mask = (label != self.ignore_index)
         valid_labels = label[mask].float()
         valid_preds = pred[mask]
         
@@ -27,21 +28,11 @@ class MaskedBCELoss(nn.Module):
         return loss
 
 class MaskedFocalLoss(nn.Module):
-    def __init__(self, alpha=None, gamma=2.0, reduction='mean'):
-        """
-        Args:
-            alpha: Can be:
-                - None: no alpha balancing
-                - float: scalar alpha (e.g., 0.25)
-                - torch.Tensor: tensor of shape broadcastable to (N, *), 
-                  where each element is the alpha for positive class at that position.
-                  Must be in [0, 1].
-            gamma: float, focusing parameter
-            reduction: 'none', 'mean', or 'sum'
-        """
+    def __init__(self, ignore_index=-1, alpha=None, gamma=2.0, reduction='mean'):
         super(MaskedFocalLoss, self).__init__()
         self.gamma = gamma
         self.reduction = reduction
+        self.ignore_index = ignore_index
         
         if alpha is not None and not isinstance(alpha, (float, int)) and not isinstance(alpha, torch.Tensor):
             raise TypeError("alpha must be None, float, int, or torch.Tensor")
@@ -49,12 +40,7 @@ class MaskedFocalLoss(nn.Module):
         self.alpha = alpha  # could be scalar or tensor
 
     def forward(self, pred, label):
-        """
-        pred: logits tensor of shape (N, *)
-        label: label tensor of shape (N, *), values in {0, 1, -1}
-               -1 indicates missing/ignored labels
-        """
-        mask = (label != -1)
+        mask = (label != self.ignore_index)
         if mask.sum() == 0:
             return torch.zeros((), device=pred.device, dtype=pred.dtype)
 
@@ -96,28 +82,11 @@ class MaskedFocalLoss(nn.Module):
         
 class MaskedCrossEntropyLoss(nn.Module):
     def __init__(self, ignore_index=-1, reduction='mean'):
-        """
-        Masked CrossEntropy Loss for multi-class classification with missing labels.
-        
-        Args:
-            ignore_index: Value that indicates missing/invalid labels (default: -1)
-            reduction: Reduction method: 'mean', 'sum', or 'none'
-        """
         super(MaskedCrossEntropyLoss, self).__init__()
         self.ignore_index = ignore_index
         self.reduction = reduction
         
     def forward(self, pred, label):
-        """
-        Compute masked cross-entropy loss.
-        
-        Args:
-            pred: Logits tensor of shape (N, C) or (N, C, *), where C is number of classes
-            label: Label tensor of shape (N, *) with values in {0, 1, ..., C-1, ignore_index}
-        
-        Returns:
-            Loss value
-        """
         # Create mask for valid labels (non-ignore_index)
         mask = (label != self.ignore_index)
         
@@ -145,6 +114,40 @@ class MaskedCrossEntropyLoss(nn.Module):
             reduction=self.reduction
         )
         return loss
+    
+class MaskedMSELoss(nn.Module):
+    def __init__(self, ignore_index=-1, reduction='mean'):
+        super(MaskedMSELoss, self).__init__()
+        self.ignore_index = ignore_index
+        self.reduction = reduction
+        
+    def forward(self, pred, target):
+        # Create mask: True where target is valid (not equal to ignore_index)
+        mask = (target != self.ignore_index)
+        
+        # If no valid targets, return zero loss with proper gradient support
+        if mask.sum() == 0:
+            if self.reduction == 'none':
+                return torch.zeros_like(pred)
+            else:
+                return torch.tensor(0.0, device=pred.device, dtype=pred.dtype, requires_grad=True)
+        
+        # Extract valid predictions and targets
+        valid_pred = pred[mask]
+        valid_target = target[mask]
+        
+        # Compute squared error
+        sq_error = (valid_pred - valid_target) ** 2
+        
+        # Apply reduction
+        if self.reduction == 'none':
+            return sq_error
+        elif self.reduction == 'sum':
+            return sq_error.sum()
+        elif self.reduction == 'mean':
+            return sq_error.mean()
+        else:
+            raise ValueError(f"Invalid reduction mode: {self.reduction}")
 
 class GCNconv(MessagePassing):
     """

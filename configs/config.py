@@ -9,8 +9,8 @@ from_scratch = True
 from_model_path = "trained_models/pretrain_final/model_epoch7.pth" # if not from_scratch
 
 # Dataset and I/O
-# data_path = "data/zinc15/dataset/zinc_standard_agent/processed/smiles.csv"
-data_path = "data/pubchem/pubchem-10m.txt.clean"
+data_path = "data/zinc15/dataset/zinc_standard_agent/processed/smiles.csv"
+# data_path = "data/pubchem/pubchem-10m.txt.clean"
 pretrain_file_type = 'txt'
 shuffle = False
 random_state = 42
@@ -37,14 +37,14 @@ use_edge_embedding = False
 dataset_size = -1
 chunk_size = 65536
 max_atom_num = 128
-batch_size = 96
+batch_size = 128
 
 # Weight settings
 fix_uncertainty = False
 fixed_log_vars = torch.tensor([-3.2157, 0.5324, -0.4459, -0.6287, -1.8934, 2.7381], dtype=torch.float32)
 
 # Training settings
-num_epochs = 8
+num_epochs = 16
 weight_type = "UW"
 record_freq = 100
 

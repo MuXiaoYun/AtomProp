@@ -10,8 +10,8 @@ from rdkit import RDLogger
 RDLogger.DisableLog('rdApp.*')
 
 molecule_num = -1  # -1 means load full dataset
-data_path = "data/pubchem/pubchem-10m.txt" #each row is a SMILES
-xyz_path = "data/pubchem/pubchem-xyzs.txt" #output file path
+data_path = "data/zinc15/dataset/zinc_standard_agent/processed/smiles.csv" #each row is a SMILES
+xyz_path = "data/zinc15/dataset/zinc_standard_agent/processed/zinc.xyz" #output file path
 skipUnkekulizable = False  # whether to skip unkekulizable molecules
 
 # Count how many molecules have been processed from output file

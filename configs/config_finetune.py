@@ -2,6 +2,7 @@ import inspect
 import sys
 
 # config_finetune.py
+device = "cuda:0"
 num_runs = 10
 
 # Model settings
@@ -22,13 +23,10 @@ FFN_num_experts = 8
 FFN_top_k = 2
 use_edge_embedding = False
 
-# Regularization settings
-norm_lambda = 0
-
 # Data settings
 data_path = "./data/moleculenet/tox21/tox21.csv"
 x_col = "smiles"
-exclude_list = ["mol_id", "name", "num"]
+exclude_list = ["mol_id", "name", "num", "iupac", "Compound ID", "CMPD_CHEMBLID"] # columns that are not x or y
 
 # Training settings
 no_pretrain = True
@@ -75,11 +73,16 @@ def print_all_params():
     print("================================")
         
 config_dict = {
+    ## classification tasks
     "tox21": "./data/moleculenet/tox21/tox21.csv",
     "toxcast": "./data/moleculenet/toxcast/toxcast_data.csv",
     "sider": "./data/moleculenet/sider/sider.csv",
     "clintox": "./data/moleculenet/clintox/clintox.csv",
-    "bbbp": "./data/moleculenet/bbbp/BBBP.csv"
+    "bbbp": "./data/moleculenet/bbbp/BBBP.csv",
+    ## regression tasks
+    "freesolv": "./data/moleculenet/freesolv/SAMPL.csv",
+    "esol": "./data/moleculenet/esol/delaney-processed.csv",
+    "lipo": "./data/moleculenet/lipo/Lipophilicity.csv",
 }
 
 def set_data_path(dataset_name):

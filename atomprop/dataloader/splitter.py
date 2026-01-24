@@ -57,12 +57,13 @@ class ScaffoldSplitter(Splitter):
         
         train_size = frac_train * len(dataset)
         val_size = frac_valid * len(dataset)
+        test_size = frac_test * len(dataset)
         
         if balance:
             big_sets = []
             small_sets = []
             for scaffold_set in scaffold_sets:
-                if len(scaffold_set) > val_size / 2:
+                if len(scaffold_set) > val_size / 2 or len(scaffold_set) > test_size / 2:
                     big_sets.append(scaffold_set)
                 else:
                     small_sets.append(scaffold_set)
