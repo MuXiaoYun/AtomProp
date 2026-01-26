@@ -64,8 +64,7 @@ def evaluate_model(model_components, dataloader, criterion, y_cols, device, aggr
             batch = batch.to(device)
             emb = embedding_layer(batch.x.squeeze())
             emb = backbone(Data(x=emb, edge_index=batch.edge_index, edge_attr=batch.edge_attr), batch=batch.batch)
-            graph_emb = aggrmodel(emb, batch.batch)
-            preds = head(graph_emb)
+            preds = head(emb, batch.batch)
             
             loss = criterion(preds.reshape(-1, len(y_cols)), batch.y.reshape(-1, len(y_cols)))
             total_loss += loss.item()
@@ -149,10 +148,14 @@ def train(train_dataloader, val_dataloader, test_dataloader, model_components, o
             for optimizer in optimizers:
                 optimizer.zero_grad()
             
-            emb = embedding_layer(batch.x.squeeze())
-            emb = backbone(Data(x=emb, edge_index=batch.edge_index, edge_attr=batch.edge_attr), batch=batch.batch)
-            graph_emb = aggrmodel(emb, batch.batch)
-            preds = head(graph_emb)
+            if epoch < cfg.freeze:
+                with torch.no_grad():
+                    emb = embedding_layer(batch.x.squeeze())
+                    emb = backbone(Data(x=emb, edge_index=batch.edge_index, edge_attr=batch.edge_attr), batch=batch.batch)
+            else:
+                emb = embedding_layer(batch.x.squeeze())
+                emb = backbone(Data(x=emb, edge_index=batch.edge_index, edge_attr=batch.edge_attr), batch=batch.batch)
+            preds = head(emb, batch=batch.batch)
             
             loss = train_criterion(preds.reshape(-1, len(y_cols)), batch.y.reshape(-1, len(y_cols)))
             loss.backward()
@@ -322,25 +325,32 @@ def main(ft_dataset=None):
                     FFN_top_k=cfg.FFN_top_k,
                     use_edge_embedding=cfg.use_edge_embedding)
         aggrmodel = GNNAggr(embed_dim=cfg.embed_dim, aggr=cfg.aggr, layers=1)
+
+        head = DownstreamHead(
+            input_dim=cfg.embed_dim,
+            hidden_dim=cfg.head_hidden_dim,
+            output_dim=len(y_cols),
+            bottle_neck_dim=256,
+            bottle_neck_layers=2,
+            mlp_num_layers=cfg.head_layers,
+            attn_num_layers=cfg.downstream_head_attn_num_layers,
+            dropout=cfg.head_dropout,
+            batch_norm=True,
+            output_activation=None
+        )
         
-        head = MLP(input_dim=cfg.embed_dim, hidden_dim=cfg.head_hidden_dim, output_dim=len(y_cols),
-                        num_layers=2, dropout=cfg.head_dropout, batch_norm=True, output_activation=None)
+        # head = MLP(input_dim=cfg.embed_dim, 
+        #            hidden_dim=cfg.head_hidden_dim, 
+        #            output_dim=len(y_cols),
+        #            num_layers=cfg.head_layers, 
+        #            dropout=cfg.head_dropout, 
+        #            batch_norm=True, 
+        #            output_activation=None)
         
         if cfg.no_pretrain == False:
             ckpt = torch.load(cfg.pretrained_path, weights_only=False, map_location=device)
             embedding_layer.load_state_dict(remove_module_prefix(ckpt['embedding_layer_state_dict']))
             backbone.load_state_dict(remove_module_prefix(ckpt['backbone_state_dict']))
-        
-        # head = DownstreamHead(
-        #     input_dim=cfg.embed_dim,
-        #     hidden_dim=cfg.head_hidden_dim,
-        #     output_dim=len(y_cols),
-        #     mlp_num_layers=2,
-        #     attn_num_layers=cfg.downstream_head_attn_num_layers,
-        #     dropout=cfg.head_dropout,
-        #     batch_norm=True,
-        #     output_activation=None
-        # )
         
         print(f"embedding_layer Parameters: {sum(p.numel() for p in embedding_layer.parameters() if p.requires_grad)}")
         print(f"backbone Parameters: {sum(p.numel() for p in backbone.parameters() if p.requires_grad)}")
@@ -367,7 +377,6 @@ def main(ft_dataset=None):
         print(f"Valid validation graphs: {len(val_dataset)}")
         print(f"Valid test graphs: {len(test_dataset)}")
         
-        # Use standard DataLoader without DistributedSampler
         train_dataloader = DataLoader(train_dataset, batch_size=cfg.batch_size, shuffle=True, collate_fn=Batch.from_data_list, num_workers=0)
         val_dataloader = DataLoader(val_dataset, batch_size=cfg.batch_size, shuffle=False, collate_fn=Batch.from_data_list, num_workers=0)
         test_dataloader = DataLoader(test_dataset, batch_size=cfg.test_batch_size, shuffle=False, collate_fn=Batch.from_data_list, num_workers=0)

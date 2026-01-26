@@ -29,15 +29,15 @@ x_col = "smiles"
 exclude_list = ["mol_id", "name", "num", "iupac", "Compound ID", "CMPD_CHEMBLID"] # columns that are not x or y
 
 # Training settings
-no_pretrain = True
-pretrained_path = 'trained_models/pretrain_final_true/model_epoch15.pth'
+no_pretrain = False
+pretrained_path = 'trained_models/model_epoch15.pth'
 logdir = "finetune_weights"
 logdir += "_nopre" if no_pretrain else "_pre"
 
 batch_size = 128
 test_batch_size = 128
 num_epochs = 100
-tolerance = 10
+tolerance = 20
 random_state = 0
 
 # Cross-validation
@@ -46,7 +46,8 @@ gamma = 1.0
 # Model architecture
 embed_dim = 512
 aggr = 'mean'  # options: 'mean', 'sum', 'max', 'attention'
-head_hidden_dim = 2048
+head_layers = 2
+head_hidden_dim = 1024
 
 # Optimizer settings
 lr_embedding_layer_backbone = 1e-5
@@ -54,7 +55,7 @@ lr_head = 1e-3
 
 # Scheduler settings
 T_max = 30
-freeze = 10
+freeze = 20  # number of epochs to freeze embedding layer and backbone
 eta_min_embedding_layer_backbone = 5e-6
 eta_min_head = 5e-4
 
