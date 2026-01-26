@@ -23,7 +23,6 @@ import configs.config_finetune as cfg
 from atomprop.utils.head import DownstreamHead
 from atomprop.utils.utils import remove_module_prefix
 
-# Removed all DDP and distributed imports and functions
 criterion = MaskedBCELossWithLogits()
 
 def create_dataset_from_smiles_labels(smiles_list, labels_list):
@@ -116,6 +115,7 @@ def train(train_dataloader, val_dataloader, test_dataloader, model_components, o
     best_val_auc = 0.0
     best_epoch = -1
     global_step = 0
+    tolerating = 0
     
     # calculate negative ratio as alphas
     pos_count = torch.zeros(len(y_cols), device='cpu')
@@ -131,6 +131,7 @@ def train(train_dataloader, val_dataloader, test_dataloader, model_components, o
         total_valid += valid_mask.sum(dim=0).cpu()
     neg_ratio = neg_count / total_valid
     train_criterion = MaskedFocalLoss(alpha=neg_ratio, gamma=cfg.gamma, reduction='mean')
+    # train_criterion = MaskedBCELossWithLogits()
     
     for epoch in range(num_epochs):
         embedding_layer.train()
@@ -200,6 +201,12 @@ def train(train_dataloader, val_dataloader, test_dataloader, model_components, o
             }, save_path)
             
             print(f"Best model saved at epoch {best_epoch} with validation AUC: {best_val_auc:.4f}")
+            tolerating = 0
+        else:
+            tolerating += 1
+            if tolerating >= cfg.tolerance:
+                print("Tolerance reached.")
+                break
     
     writer.close()
 

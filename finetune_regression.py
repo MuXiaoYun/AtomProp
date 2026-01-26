@@ -61,7 +61,7 @@ def compute_scaler_stats(labels):
         if len(valid_vals) == 0:
             mean_val, scale_val = 0.0, 1.0
         elif len(valid_vals) == 1:
-            mean_val, scale_val = valid_val[0], 1.0
+            mean_val, scale_val = valid_vals[0], 1.0
         else:
             mean_val = np.mean(valid_vals)
             scale_val = np.std(valid_vals)
@@ -192,6 +192,7 @@ def train(train_dataloader, val_dataloader, test_dataloader, model_components, o
     best_val_rmse = float('inf')
     best_epoch = -1
     global_step = 0
+    tolerating = 0
 
     for epoch in range(num_epochs):
         embedding_layer.train()
@@ -258,6 +259,12 @@ def train(train_dataloader, val_dataloader, test_dataloader, model_components, o
                 'optimizer_aggr_state_dict': optimizers[2].state_dict() if len(optimizers) > 2 else None,
             }, save_path)
             print(f"Best model saved at epoch {best_epoch} with validation RMSE: {best_val_rmse:.6f}")
+            tolerating = 0
+        else:
+            tolerating += 1
+            if tolerating >= cfg.tolerance:
+                print("Tolerance reached.")
+                break
 
     writer.close()
 

@@ -4,7 +4,7 @@ import sys
 # config_finetune.py
 
 # Device
-device_str = "cuda:6"
+device_str = "cuda:0"
 
 # Model settings
 geat_num_layers = 4

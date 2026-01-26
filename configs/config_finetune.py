@@ -11,7 +11,7 @@ aggr_num_layers = 2
 num_heads = 8
 global_num_heads = 8
 output_negative_slope = 0.2
-geat_dropout = 0
+geat_dropout = 0.2
 head_dropout = 0.3
 
 downstream_head_attn_num_layers = 2
@@ -30,16 +30,18 @@ exclude_list = ["mol_id", "name", "num", "iupac", "Compound ID", "CMPD_CHEMBLID"
 
 # Training settings
 no_pretrain = True
-pretrained_path = 'trained_models/pretrain_final/model_epoch15.pth'
-logdir = "finetune_nopre"
+pretrained_path = 'trained_models/pretrain_final_true/model_epoch15.pth'
+logdir = "finetune_weights"
+logdir += "_nopre" if no_pretrain else "_pre"
 
 batch_size = 128
 test_batch_size = 128
 num_epochs = 100
+tolerance = 10
 random_state = 0
 
 # Cross-validation
-gamma = 1.5
+gamma = 1.0
 
 # Model architecture
 embed_dim = 512
@@ -51,9 +53,10 @@ lr_embedding_layer_backbone = 1e-5
 lr_head = 1e-3
 
 # Scheduler settings
-T_max = num_epochs
-eta_min_embedding_layer_backbone = 1e-7
-eta_min_head = 1e-6
+T_max = 30
+freeze = 10
+eta_min_embedding_layer_backbone = 5e-6
+eta_min_head = 5e-4
 
 def print_all_params():
     """Print all configuration parameters defined in this module."""
