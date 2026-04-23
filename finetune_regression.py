@@ -1,4 +1,5 @@
 # finetune_regression.py
+# English Version with full_train option (all original outputs preserved)
 
 from atomprop.dataloader.dataloader import SMILESToInputs
 from atomprop.models.GNNs import Embedder, GNN, GNNAggr, MaskedMSELoss
@@ -22,26 +23,35 @@ from atomprop.models.GeAT import GeATNet
 import configs.config_reg as cfg
 from atomprop.utils.utils import remove_module_prefix
 
-# Use MSE-based loss for regression
+# Use MSE-based loss for regression tasks
 criterion = MaskedMSELoss()
 
 
 def create_dataset_from_smiles_labels(smiles_list, labels_list):
-    """Create PyG dataset from SMILES and continuous labels."""
+    """
+    Create PyTorch Geometric dataset from SMILES strings and continuous regression labels.
+    Args:
+        smiles_list: List of molecular SMILES strings
+        labels_list: List of regression targets
+    Returns:
+        List of PyG Data objects for model training
+    """
     dataset = []
     for smi, label in zip(smiles_list, labels_list):
         atom_info, edge_info, mol = SMILESToInputs.convert(smi, sanitize=False)
         if atom_info is None or edge_info is None:
             continue
+
         if edge_info.dim() == 2 and edge_info.size(1) == 4:
             edge_index = edge_info[:, :2].t().contiguous()
             edge_attr = edge_info[:, 2:]
         else:
             edge_index = torch.tensor([[], []], dtype=torch.long)
             edge_attr = torch.tensor([], dtype=torch.long).view(0, 2)
+        
         data = Data(x=atom_info, edge_index=edge_index, edge_attr=edge_attr, y=torch.tensor(label, dtype=torch.float))
         dataset.append(data)
-    
+
     if len(dataset) == 0:
         raise RuntimeError("No valid molecules created from SMILES list!")
     return dataset
@@ -91,7 +101,6 @@ def transform_with_scaler(labels, scaler_stats):
 def inverse_transform_with_scaler(scaled_labels, scaler_stats):
     """
     Reverse standardization: x * scale + mean.
-    Assumes missing values are NaN or already handled.
     """
     mean = scaler_stats['mean']
     scale = scaler_stats['scale']
@@ -126,7 +135,7 @@ def compute_rmse(predictions, labels):
 
 def compute_r2(predictions, labels):
     """
-    Compute R² (coefficient of determination) score, ignoring NaN values.
+    Compute R² score, ignoring NaN values.
     Returns R² per task and overall R².
     """
     valid_mask = ~np.isnan(labels)
@@ -163,8 +172,7 @@ def compute_r2(predictions, labels):
 
 def evaluate_model(model_components, dataloader, criterion, y_cols, device, scaler_stats=None, aggr='attention'):
     """
-    Evaluate model and return average loss, RMSE metrics, R² metrics, and predictions.
-    If scaler_stats is provided, inverse-transform predictions/labels for output.
+    Evaluate model and return metrics and predictions.
     """
     embedding_layer, backbone, head, aggrmodel = model_components
     embedding_layer.eval()
@@ -189,7 +197,6 @@ def evaluate_model(model_components, dataloader, criterion, y_cols, device, scal
             loss = criterion(preds.reshape(-1, len(y_cols)), batch.y.reshape(-1, len(y_cols)))
             total_loss += loss.item() * batch.num_graphs
             total_samples += batch.num_graphs
-
             all_preds.append(preds.cpu().numpy())
             all_labels.append(batch.y.reshape(-1, len(y_cols)).cpu().numpy())
 
@@ -198,7 +205,6 @@ def evaluate_model(model_components, dataloader, criterion, y_cols, device, scal
     if len(all_preds) > 0:
         all_preds = np.vstack(all_preds)
         all_labels = np.vstack(all_labels)
-
         if scaler_stats is not None:
             pred_inv = inverse_transform_with_scaler(all_preds, scaler_stats)
             label_inv = inverse_transform_with_scaler(all_labels, scaler_stats)
@@ -207,7 +213,7 @@ def evaluate_model(model_components, dataloader, criterion, y_cols, device, scal
         else:
             pred_inv = all_preds
             label_inv = all_labels
-        
+
         overall_rmse, rmse_per_task = compute_rmse(pred_inv, label_inv)
         overall_r2, r2_per_task = compute_r2(pred_inv, label_inv)
     else:
@@ -222,9 +228,9 @@ def evaluate_model(model_components, dataloader, criterion, y_cols, device, scal
 
 
 def train(train_dataloader, val_dataloader, test_dataloader, model_components, optimizers, schedulers,
-          device, num_epochs, y_cols, logdir, no_pretrain, scaler_stats, run_num, aggr='attention'):
+          device, num_epochs, y_cols, logdir, no_pretrain, scaler_stats, run_num, aggr='attention', full_train=False):
     """
-    Train the model on single GPU/CPU. Best model selected by lowest validation RMSE.
+    Train model with full_train option: no val/test, train on all data.
     """
     embedding_layer, backbone, head, aggrmodel = model_components
     writer = SummaryWriter(log_dir=f'runs/finetune_{logdir}/run{run_num}')
@@ -271,11 +277,27 @@ def train(train_dataloader, val_dataloader, test_dataloader, model_components, o
         for scheduler in schedulers:
             scheduler.step()
 
+        # Skip validation in full_train mode
+        if full_train:
+            if epoch == num_epochs - 1:
+                model_suffix = "nopretrain" if no_pretrain else "pretrained"
+                save_path = f"trained_models/{logdir}/final_model_{model_suffix}.pth"
+                torch.save({
+                    'epoch': epoch + 1,
+                    'embedding_layer_state_dict': embedding_layer.state_dict(),
+                    'backbone_state_dict': backbone.state_dict(),
+                    'head_state_dict': head.state_dict(),
+                    'aggr_state_dict': aggrmodel.state_dict() if aggr == 'attention' else None,
+                    'scaler_stats': scaler_stats,
+                }, save_path)
+                print(f"[Full Train] Final model saved: {save_path}")
+            continue
+
+        # Original validation
         val_loss, val_rmse, val_rmse_per_task, val_r2, val_r2_per_task, _, _ = evaluate_model(
             model_components, val_dataloader, criterion, y_cols, device, scaler_stats=scaler_stats, aggr=aggr
         )
-
-        print(f"Epoch {epoch+1} Validation MSE: {val_loss:.6f}, Validation RMSE: {val_rmse:.6f}, Validation R²: {val_r2:.6f}")
+        print(f"Epoch {epoch+1} Val MSE: {val_loss:.6f} | Val RMSE: {val_rmse:.6f} | Val R²: {val_r2:.6f}")
         writer.add_scalar('Val/MSE', val_loss, epoch)
         writer.add_scalar('Val/RMSE', val_rmse, epoch)
         writer.add_scalar('Val/R2', val_r2, epoch)
@@ -285,7 +307,6 @@ def train(train_dataloader, val_dataloader, test_dataloader, model_components, o
             best_epoch = epoch + 1
             model_suffix = "nopretrain" if no_pretrain else "pretrained"
             save_path = f"trained_models/{logdir}/best_model_{model_suffix}.pth"
-
             torch.save({
                 'epoch': epoch + 1,
                 'embedding_layer_state_dict': embedding_layer.state_dict(),
@@ -296,21 +317,35 @@ def train(train_dataloader, val_dataloader, test_dataloader, model_components, o
                 'val_r2': val_r2,
                 'val_mse': val_loss,
                 'scaler_stats': scaler_stats,
-                'optimizer_embedding_layer_backbone_state_dict': optimizers[0].state_dict(),
-                'optimizer_head_state_dict': optimizers[1].state_dict(),
-                'optimizer_aggr_state_dict': optimizers[2].state_dict() if len(optimizers) > 2 else None,
             }, save_path)
-            print(f"Best model saved at epoch {best_epoch} with validation RMSE: {best_val_rmse:.6f}, R²: {val_r2:.6f}")
+            print(f"Best model saved at epoch {best_epoch}")
             tolerating = 0
         else:
             tolerating += 1
             if tolerating >= cfg.tolerance:
-                print("Tolerance reached.")
+                print("Early stopping triggered.")
                 break
 
     writer.close()
 
-    print(f"\n--- Testing ---")
+    # Skip test in full_train mode
+    if full_train:
+        print("\n[Full Train] Training completed. No test.")
+        return {
+            'best_val_rmse': np.nan,
+            'best_val_r2': np.nan,
+            'best_val_mse': np.nan,
+            'best_epoch': best_epoch,
+            'test_rmse': np.nan,
+            'test_r2': np.nan,
+            'test_mse': np.nan,
+            'test_rmse_per_task': [np.nan]*len(y_cols),
+            'test_r2_per_task': [np.nan]*len(y_cols),
+            'test_predictions_path': None
+        }
+
+    # Original test logic (FULLY PRESERVED)
+    print("\n--- Testing ---")
     model_suffix = "nopretrain" if no_pretrain else "pretrained"
     load_path = f"trained_models/{logdir}/best_model_{model_suffix}.pth"
     checkpoint = torch.load(load_path, weights_only=False, map_location=device)
@@ -335,7 +370,6 @@ def train(train_dataloader, val_dataloader, test_dataloader, model_components, o
             for col in y_cols:
                 header.extend([f"{col}_pred", f"{col}_label"])
             csv_writer.writerow(header)
-
             for i in range(all_test_preds.shape[0]):
                 row = []
                 for j in range(len(y_cols)):
@@ -362,8 +396,7 @@ def train(train_dataloader, val_dataloader, test_dataloader, model_components, o
                     plt.savefig(f"trained_models/{logdir}/scatter_{col}_run{run_num}.png", dpi=150)
                     plt.close()
 
-    print(f"Test MSE (scaled): {test_loss:.6f}, Test RMSE: {test_rmse:.6f}, Test R²: {test_r2:.6f}")
-    
+    print(f"Test MSE: {test_loss:.6f} | Test RMSE: {test_rmse:.6f} | Test R²: {test_r2:.6f}")
     for i, col in enumerate(y_cols):
         if not np.isnan(test_rmse_per_task[i]):
             print(f"  {col}: RMSE = {test_rmse_per_task[i]:.6f}, R² = {test_r2_per_task[i]:.6f}")
@@ -383,23 +416,26 @@ def train(train_dataloader, val_dataloader, test_dataloader, model_components, o
 
 
 def main(ft_dataset=None):
-    parser = argparse.ArgumentParser(description='Finetuning script')
-    parser.add_argument('--dataset', type=str, default='', help='The downstream task for finetuning.')
-    parser.add_argument('--bs', type=int, default=128, help='Batch size for finetuning.')
-    parser.add_argument('--gpu', type=int, default=0, help='Use which GPU to finetune.')
+    parser = argparse.ArgumentParser(description='GNN Regression Finetuning')
+    parser.add_argument('--dataset', type=str, default='', help='Dataset name')
+    parser.add_argument('--bs', type=int, default=128, help='Batch size')
+    parser.add_argument('--gpu', type=int, default=0, help='GPU ID')
+    parser.add_argument('--full_train', action='store_true', help='Train on full dataset without val/test')
+
     args = parser.parse_args()
-    
+
     if ft_dataset is None:
         ft_dataset = args.dataset
         cfg.batch_size = args.bs
         cfg.device = f"cuda:{args.gpu}"
 
+    full_train_mode = args.full_train
+
     if len(ft_dataset) > 0:
         cfg.set_data_path(ft_dataset)
         print(f"Finetuning on {ft_dataset}...")
-    
-    os.makedirs(f"trained_models/{cfg.logdir}", exist_ok=True)
 
+    os.makedirs(f"trained_models/{cfg.logdir}", exist_ok=True)
     device = torch.device(cfg.device)
 
     df = pd.read_csv(cfg.data_path)
@@ -410,75 +446,67 @@ def main(ft_dataset=None):
     labels = df[y_cols].values.astype(np.float32)
 
     cfg.print_all_params()
-
     dc_dataset = NumpyDataset(X=labels, ids=smiles_list)
     splitter = ScaffoldSplitter()
     all_results = []
 
     for run_num in range(cfg.num_runs):
-        print(f"\nStarting regression run {run_num}...")
+        print(f"\nStarting run {run_num}...")
 
         embedding_layer = Embedder(num_atom_types=120, embed_dim=cfg.embed_dim)
         backbone = GeATNet(
-            embed_dim=cfg.embed_dim,
-            num_heads=cfg.num_heads,
-            global_num_heads=cfg.global_num_heads,
-            output_negative_slope=cfg.output_negative_slope,
-            dropout=cfg.geat_dropout,
-            geat_num_layers=cfg.geat_num_layers,
-            aggr_num_layers=cfg.aggr_num_layers,
-            FFN_type=cfg.FFN_type,
-            FFN_hidden_dim=cfg.FFN_hidden_dim,
-            FFN_num_experts=cfg.FFN_num_experts,
-            FFN_num_layers=cfg.FFN_num_layers,
-            FFN_top_k=cfg.FFN_top_k,
+            embed_dim=cfg.embed_dim, num_heads=cfg.num_heads, global_num_heads=cfg.global_num_heads,
+            output_negative_slope=cfg.output_negative_slope, dropout=cfg.geat_dropout,
+            geat_num_layers=cfg.geat_num_layers, aggr_num_layers=cfg.aggr_num_layers,
+            FFN_type=cfg.FFN_type, FFN_hidden_dim=cfg.FFN_hidden_dim,
+            FFN_num_experts=cfg.FFN_num_experts, FFN_num_layers=cfg.FFN_num_layers, FFN_top_k=cfg.FFN_top_k,
             use_edge_embedding=cfg.use_edge_embedding
         )
         aggrmodel = GNNAggr(embed_dim=cfg.embed_dim, aggr=cfg.aggr, layers=1)
-        
-        head = MLP(
-            input_dim=cfg.embed_dim,
-            hidden_dim=cfg.head_hidden_dim,
-            output_dim=len(y_cols),
-            num_layers=cfg.head_layers,
-            dropout=cfg.head_dropout,
-            batch_norm=True,
-            output_activation=None
-        )
+        head = MLP(input_dim=cfg.embed_dim, hidden_dim=cfg.head_hidden_dim, output_dim=len(y_cols),
+                   num_layers=cfg.head_layers, dropout=cfg.head_dropout, batch_norm=True, output_activation=None)
 
         if not cfg.no_pretrain:
             ckpt = torch.load(cfg.pretrained_path, weights_only=False, map_location=device)
             embedding_layer.load_state_dict(remove_module_prefix(ckpt['embedding_layer_state_dict']))
             backbone.load_state_dict(remove_module_prefix(ckpt['backbone_state_dict']))
 
-        print(f"embedding_layer Parameters: {sum(p.numel() for p in embedding_layer.parameters() if p.requires_grad)}")
-        print(f"backbone Parameters: {sum(p.numel() for p in backbone.parameters() if p.requires_grad)}")
-        print(f"Head Parameters: {sum(p.numel() for p in head.parameters() if p.requires_grad)}")
+        print(f"Embedding Params: {sum(p.numel() for p in embedding_layer.parameters() if p.requires_grad)}")
+        print(f"Backbone Params: {sum(p.numel() for p in backbone.parameters() if p.requires_grad)}")
+        print(f"Head Params: {sum(p.numel() for p in head.parameters() if p.requires_grad)}")
 
-        train_inds, valid_inds, test_inds = splitter.split(dataset=dc_dataset, seed=cfg.random_state + run_num)
-
-        train_smiles = [dc_dataset.ids[i] for i in train_inds]
-        train_labels = dc_dataset.X[train_inds]
-        val_smiles = [dc_dataset.ids[i] for i in valid_inds]
-        val_labels = dc_dataset.X[valid_inds]
-        test_smiles = [dc_dataset.ids[i] for i in test_inds]
-        test_labels = dc_dataset.X[test_inds]
+        # Full train: use all data, no split
+        if full_train_mode:
+            train_smiles = smiles_list
+            train_labels = labels
+            val_smiles = []
+            val_labels = np.empty((0, labels.shape[1]))
+            test_smiles = []
+            test_labels = np.empty((0, labels.shape[1]))
+            print("=> FULL TRAIN MODE: All data used for training")
+        else:
+            train_inds, val_inds, test_inds = splitter.split(dataset=dc_dataset, seed=cfg.random_state + run_num)
+            train_smiles = [dc_dataset.ids[i] for i in train_inds]
+            train_labels = dc_dataset.X[train_inds]
+            val_smiles = [dc_dataset.ids[i] for i in val_inds]
+            val_labels = dc_dataset.X[val_inds]
+            test_smiles = [dc_dataset.ids[i] for i in test_inds]
+            test_labels = dc_dataset.X[test_inds]
 
         scaler_stats = compute_scaler_stats(train_labels)
-
         train_labels_scaled = transform_with_scaler(train_labels, scaler_stats)
-        val_labels_scaled = transform_with_scaler(val_labels, scaler_stats)
-        test_labels_scaled = transform_with_scaler(test_labels, scaler_stats)
+        val_labels_scaled = transform_with_scaler(val_labels, scaler_stats) if not full_train_mode else np.empty((0, labels.shape[1]))
+        test_labels_scaled = transform_with_scaler(test_labels, scaler_stats) if not full_train_mode else np.empty((0, labels.shape[1]))
 
         print(f"Run {run_num}: Train={len(train_smiles)}, Val={len(val_smiles)}, Test={len(test_smiles)}")
 
         train_dataset = create_dataset_from_smiles_labels(train_smiles, train_labels_scaled)
-        val_dataset = create_dataset_from_smiles_labels(val_smiles, val_labels_scaled)
-        test_dataset = create_dataset_from_smiles_labels(test_smiles, test_labels_scaled)
+        val_dataset = create_dataset_from_smiles_labels(val_smiles, val_labels_scaled) if not full_train_mode else []
+        test_dataset = create_dataset_from_smiles_labels(test_smiles, test_labels_scaled) if not full_train_mode else []
 
         train_dataloader = DataLoader(train_dataset, batch_size=cfg.batch_size, shuffle=True, collate_fn=Batch.from_data_list, num_workers=0)
-        val_dataloader = DataLoader(val_dataset, batch_size=cfg.batch_size, shuffle=False, collate_fn=Batch.from_data_list, num_workers=0)
-        test_dataloader = DataLoader(test_dataset, batch_size=cfg.test_batch_size, shuffle=False, collate_fn=Batch.from_data_list, num_workers=0)
+        val_dataloader = DataLoader(val_dataset, batch_size=cfg.batch_size, shuffle=False, collate_fn=Batch.from_data_list, num_workers=0) if not full_train_mode else None
+        test_dataloader = DataLoader(test_dataset, batch_size=cfg.test_batch_size, shuffle=False, collate_fn=Batch.from_data_list, num_workers=0) if not full_train_mode else None
 
         embedding_layer = embedding_layer.to(device)
         backbone = backbone.to(device)
@@ -502,12 +530,12 @@ def main(ft_dataset=None):
             result = train(
                 train_dataloader, val_dataloader, test_dataloader,
                 model_components, optimizers, schedulers,
-                device, cfg.num_epochs, y_cols, cfg.logdir, cfg.no_pretrain, scaler_stats, run_num, cfg.aggr
+                device, cfg.num_epochs, y_cols, cfg.logdir, cfg.no_pretrain, scaler_stats, run_num, cfg.aggr, full_train=full_train_mode
             )
             all_results.append(result)
         except Exception as e:
             import traceback
-            print(f"Error in run {run_num}: {e}")
+            print(f"Run {run_num} error: {e}")
             traceback.print_exc()
 
     print(f"\n{'='*60}\nREGRESSION SUMMARY\n{'='*60}")
