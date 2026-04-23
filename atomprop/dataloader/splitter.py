@@ -23,6 +23,7 @@ class ScaffoldSplitter(Splitter):
         frac_valid: float = 0.1,
         frac_test: float = 0.1,
         seed: Optional[int] = None,
+        strategy: str = "random",
         log_every_n: Optional[int] = 1000
     ) -> Tuple[List[int], List[int], List[int]]:
         """
@@ -40,7 +41,10 @@ class ScaffoldSplitter(Splitter):
         frac_valid: float, (default 0.1)
         frac_test: float, (default 0.1)
         seed: int, optional (default None)
-            Random seed to use (only in use if balance is True).
+            Random seed to use.
+        strategy: str,
+            "random": random scaffold split
+            "balance": balanced scaffold split
         log_every_n: int, optional (default 1000)
             Controls the logger by dictating how often logger outputs
             will be produced.
@@ -50,26 +54,71 @@ class ScaffoldSplitter(Splitter):
         Tuple[List[int], List[int], List[int]]
             A tuple of train indices, valid indices, and test indices.
         """
-        rng = np.random.RandomState(seed)
-        scaffold_sets_init = self._generate_scaffolds(dataset=dataset, log_every_n=log_every_n)
-        scaffold_indices = rng.permutation(len(scaffold_sets_init))
-        scaffold_sets = [scaffold_sets_init[i] for i in scaffold_indices]
+        train_size = np.floor(frac_train * len(dataset))
+        val_size = np.floor(frac_valid * len(dataset))
+        test_size = len(dataset) - train_size - val_size
         
-        train_size = frac_train * len(dataset)
-        val_size = frac_valid * len(dataset)
-        test_size = frac_test * len(dataset)
+        if strategy == "random":
+            rng = np.random.RandomState(seed)
+            scaffold_sets_init = self._generate_scaffolds(dataset=dataset, log_every_n=log_every_n)
+            scaffold_indices = rng.permutation(len(scaffold_sets_init))
+            scaffold_sets = [scaffold_sets_init[i] for i in scaffold_indices]
+                
+            train_inds = []
+            val_inds = []
+            test_inds = []
+            for scaffold_set in scaffold_sets:
+                if len(val_inds) + len(scaffold_set) <= val_size:
+                    val_inds.extend(scaffold_set)
+                elif len(test_inds) + len(scaffold_set) <= test_size:
+                    test_inds.extend(scaffold_set)
+                else:
+                    train_inds.extend(scaffold_set)
+            return train_inds, val_inds, test_inds
+
+        elif strategy == "balance":
+            scaffold_sets_init = self._generate_scaffolds(dataset=dataset, log_every_n=log_every_n)
+            big_sets = []
+            small_sets = []
             
-        train_inds = []
-        val_inds = []
-        test_inds = []
-        for scaffold_set in scaffold_sets:
-            if len(val_inds) + len(scaffold_set) <= val_size:
-                val_inds.extend(scaffold_set)
-            elif len(test_inds) + len(scaffold_set) <= test_size:
-                test_inds.extend(scaffold_set)
-            else:
-                train_inds.extend(scaffold_set)
-        return train_inds, val_inds, test_inds
+            for set in scaffold_sets_init:
+                if len(set) > min(val_size, test_size)/2:
+                    big_sets.append(set)
+                else:
+                    small_sets.append(set)
+            random.seed(seed)
+            random.shuffle(big_sets)
+            random.shuffle(small_sets)
+            scaffold_sets = big_sets + small_sets
+                
+            train_inds = []
+            val_inds = []
+            test_inds = []
+            for scaffold_set in scaffold_sets:
+                if len(train_inds) + len(scaffold_set) <= train_size:
+                    train_inds.extend(scaffold_set)
+                elif len(val_inds) + len(scaffold_set) <= val_size:
+                    val_inds.extend(scaffold_set)
+                else:
+                    test_inds.extend(scaffold_set)
+            return train_inds, val_inds, test_inds
+        elif strategy == "vanilla":
+            scaffold_sets_init = self._generate_scaffolds(dataset=dataset, log_every_n=log_every_n)
+            scaffold_sets = sorted(scaffold_sets_init, key=len, reverse=True)
+                
+            train_inds = []
+            val_inds = []
+            test_inds = []
+            for scaffold_set in scaffold_sets:
+                if len(train_inds) + len(scaffold_set) <= train_size:
+                    train_inds.extend(scaffold_set)
+                elif len(val_inds) + len(scaffold_set) <= val_size:
+                    val_inds.extend(scaffold_set)
+                else:
+                    test_inds.extend(scaffold_set)
+            return train_inds, val_inds, test_inds
+        else:
+            raise ValueError("Unknown Split Type.")
 
     def _generate_scaffolds(self,
                            dataset: Dataset,

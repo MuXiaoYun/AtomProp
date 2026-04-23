@@ -1,64 +1,64 @@
 import inspect
 import sys
 
-# config_finetune.py
-
-# Device
-device_str = "cuda:0"
+draw_plot = True
+device = "cuda:0"
+num_runs = 3
 
 # Model settings
 geat_num_layers = 4
 aggr_num_layers = 2
-downstream_head_attn_num_layers = 2
 num_heads = 8
 global_num_heads = 8
 output_negative_slope = 0.2
-geat_dropout = 0.1
-FFN_type = "MOE"
+geat_dropout = 0.2
+
+FFN_type = "MLP"
 FFN_num_layers = 2
 FFN_hidden_dim = 1024
 FFN_num_experts = 8
 FFN_top_k = 2
 use_edge_embedding = False
 
-# Regularization settings
-norm_lambda = 0
-
 # Data settings
-data_path = "./data/moleculenet/tox21/tox21.csv"
+data_path = "./data/data/理想气体生成焓.csv"
 x_col = "smiles"
-exclude_list = ["mol_id", "name", "num"]
+exclude_list = ["cpFullname","cpZhFullname","propZhFullname"] # columns that are not x or y
 
 # Training settings
-no_pretrain = False
-pretrained_path = 'trained_models/pretrain_final/model_epoch7.pth'
-logdir = "finetune_pre"
+no_pretrain = True
+pretrained_path = 'trained_models/pretrain_final_true/model_epoch15.pth'
+logdir = "finetune_0409"
+logdir += "_nopre" if no_pretrain else "_pre"
 
 batch_size = 128
 test_batch_size = 128
-num_epochs = 200
-random_state = 42
-head_dropout = 0.1
+num_epochs = 100
+tolerance = 10
+random_state = 0
 
 # Cross-validation
-k_folds = 5
-frac_test = 0.1
+gamma = 1.0
 
 # Model architecture
 embed_dim = 512
-aggr = 'attention'  # options: 'mean', 'sum', 'max', 'attention'
-head_hidden_dim = 512
+aggr = 'mean'  # options: 'mean', 'sum', 'max', 'attention'
+head_type = "mlp"
+head_dropout = 0.3
+head_layers = 2
+head_hidden_dim = 2048
 
 # Optimizer settings
-lr_embedding_layer_backbone = 2e-5
-lr_head = 1e-3
-lr_aggr = 1e-3
+lr_embedding_layer_backbone = 1e-5
+wd_emb_backbone = 1e-4
+lr_head = 1e-4
+wd_head = 1e-4
 
 # Scheduler settings
-T_max = num_epochs
-eta_min_embedding_layer_backbone = 5e-7
-eta_min_head = 1e-5
-eta_min_aggr = 1e-5
+T_max = 100
+freeze = 0  # number of epochs to freeze embedding layer and backbone
+eta_min_embedding_layer_backbone = 5e-6
+eta_min_head = 5e-5
 
 def print_all_params():
     """Print all configuration parameters defined in this module."""
@@ -82,7 +82,10 @@ config_dict = {
     "toxcast": "./data/moleculenet/toxcast/toxcast_data.csv",
     "sider": "./data/moleculenet/sider/sider.csv",
     "clintox": "./data/moleculenet/clintox/clintox.csv",
-    "bbbp": "./data/moleculenet/bbbp/BBBP.csv"
+    "bbbp": "./data/moleculenet/bbbp/BBBP.csv",
+    "bace": "./data/moleculenet/bace/bace.csv",
+    "hiv": "./data/moleculenet/hiv/HIV.csv",
+    "muv": "./data/moleculenet/muv/muv.csv",
 }
 
 def set_data_path(dataset_name):

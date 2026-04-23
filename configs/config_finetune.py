@@ -3,7 +3,7 @@ import sys
 
 # config_finetune.py
 device = "cuda:0"
-num_runs = 10
+num_runs = 3
 
 # Model settings
 geat_num_layers = 4
@@ -12,9 +12,6 @@ num_heads = 8
 global_num_heads = 8
 output_negative_slope = 0.2
 geat_dropout = 0.2
-head_dropout = 0.3
-
-downstream_head_attn_num_layers = 2
 
 FFN_type = "MLP"
 FFN_num_layers = 2
@@ -26,18 +23,18 @@ use_edge_embedding = False
 # Data settings
 data_path = "./data/moleculenet/tox21/tox21.csv"
 x_col = "smiles"
-exclude_list = ["mol_id", "name", "num", "iupac", "Compound ID", "CMPD_CHEMBLID"] # columns that are not x or y
+exclude_list = ["mol_id", "name", "num", "iupac", "Compound ID", "CMPD_CHEMBLID", "CID", "activity"] # columns that are not x or y
 
 # Training settings
-no_pretrain = False
-pretrained_path = 'trained_models/model_epoch15.pth'
-logdir = "finetune_weights"
+no_pretrain = True
+pretrained_path = 'trained_models/pretrain_final_true/model_epoch15.pth'
+logdir = "finetune_0127"
 logdir += "_nopre" if no_pretrain else "_pre"
 
 batch_size = 128
 test_batch_size = 128
 num_epochs = 100
-tolerance = 20
+tolerance = 10
 random_state = 0
 
 # Cross-validation
@@ -46,18 +43,22 @@ gamma = 1.0
 # Model architecture
 embed_dim = 512
 aggr = 'mean'  # options: 'mean', 'sum', 'max', 'attention'
+head_type = "mlp"
+head_dropout = 0.3
 head_layers = 2
-head_hidden_dim = 1024
+head_hidden_dim = 2048
 
 # Optimizer settings
 lr_embedding_layer_backbone = 1e-5
-lr_head = 1e-3
+wd_emb_backbone = 1e-4
+lr_head = 1e-4
+wd_head = 1e-4
 
 # Scheduler settings
-T_max = 30
-freeze = 20  # number of epochs to freeze embedding layer and backbone
+T_max = 100
+freeze = 0  # number of epochs to freeze embedding layer and backbone
 eta_min_embedding_layer_backbone = 5e-6
-eta_min_head = 5e-4
+eta_min_head = 5e-5
 
 def print_all_params():
     """Print all configuration parameters defined in this module."""
@@ -77,16 +78,14 @@ def print_all_params():
     print("================================")
         
 config_dict = {
-    ## classification tasks
     "tox21": "./data/moleculenet/tox21/tox21.csv",
     "toxcast": "./data/moleculenet/toxcast/toxcast_data.csv",
     "sider": "./data/moleculenet/sider/sider.csv",
     "clintox": "./data/moleculenet/clintox/clintox.csv",
     "bbbp": "./data/moleculenet/bbbp/BBBP.csv",
-    ## regression tasks
-    "freesolv": "./data/moleculenet/freesolv/SAMPL.csv",
-    "esol": "./data/moleculenet/esol/delaney-processed.csv",
-    "lipo": "./data/moleculenet/lipo/Lipophilicity.csv",
+    "bace": "./data/moleculenet/bace/bace.csv",
+    "hiv": "./data/moleculenet/hiv/HIV.csv",
+    "muv": "./data/moleculenet/muv/muv.csv",
 }
 
 def set_data_path(dataset_name):

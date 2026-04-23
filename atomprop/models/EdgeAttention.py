@@ -21,8 +21,8 @@ class EdgeAttention(nn.Module):
                  num_bond_types: int, 
                  output_negative_slope: float = 0.2,
                  attention_type: str = default_attention_type,
-                 mlp_hidden_dim: int = 1024,
-                 mlp_num_layers: int = 2,
+                 mlp_hidden_dim: int = 256,
+                 mlp_num_layers: int = 1,
                  use_edge_embedding: bool = False):  
         super(EdgeAttention, self).__init__()  
         self.atom_d = atom_embedding_dim  

@@ -9,6 +9,20 @@ from torch_geometric.nn import MessagePassing
 import torch.nn.functional as F
 from atomprop.embeddings.AtomEmbedding import BondTypes, BondDirections, AtomChirals
 
+class MaskedRankLoss(nn.Module):
+    def __init__(self, ignore_index=-1):
+        super(MaskedRankLoss, self).__init__()
+        self.ignore_index = ignore_index
+        
+    def forward(self, pred, label):
+        mask = (label != self.ignore_index)
+        valid_labels = label[mask].float()
+        valid_preds = pred[mask]
+        positive_mask = (valid_labels == 1)
+        negative_mask = (valid_labels == 0)
+        score = torch.sigmoid(torch.mean(valid_preds[positive_mask]) - torch.mean(valid_labels[negative_mask]))
+        return score
+
 class MaskedBCELossWithLogits(nn.Module):
     def __init__(self, ignore_index=-1, reduction='mean'):
         super(MaskedBCELossWithLogits, self).__init__()
@@ -72,6 +86,7 @@ class MaskedFocalLoss(nn.Module):
             alpha_t = valid_alpha * valid_labels + (1 - valid_alpha) * (1 - valid_labels)
 
         focal_loss = alpha_t * ((1 - p_t) ** self.gamma) * ce_loss
+        focal_loss = focal_loss ** 2
 
         if self.reduction == 'mean':
             return focal_loss.mean()

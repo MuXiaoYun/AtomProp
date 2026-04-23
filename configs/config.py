@@ -15,7 +15,7 @@ pretrain_file_type = 'txt'
 shuffle = False
 random_state = 42
 
-logdir = "pretrain_molebert"
+logdir = "pretrain"
 
 # Model settings
 geat_num_layers = 5
@@ -44,7 +44,7 @@ fix_uncertainty = False
 fixed_log_vars = torch.tensor([-3.2157, 0.5324, -0.4459, -0.6287, -1.8934, 2.7381], dtype=torch.float32)
 
 # Training settings
-num_epochs = 16
+num_epochs = 8
 weight_type = "UW"
 record_freq = 100
 
@@ -59,8 +59,8 @@ embed_dim = 512
 fg_list = None  # if None, use default RDKit functional groups
 
 # Optimizer & Scheduler base settings
-embedding_layer_lr = 5e-4  # embedding layer
-backbone_lr = 5e-4  # geat
+embedding_layer_lr = 1e-4  # embedding layer
+backbone_lr = 1e-4  # geat
 head_lr = 5e-4  # classification head
 weight_strategy_lr = 1e-3
 
@@ -73,13 +73,11 @@ backbone_wd = 5e-5  # geat
 head_wd = 1e-5  # classification head
 weight_strategy_wd = 0.0
 
-backbone_scheduler_max_lr = 1e-3  # special for backbone
-
 # Scheduler settings
-embedding_layer_eta_min = 1e-6
-backbone_eta_min = 1e-6
-head_eta_min = 1e-6
-weight_strategy_eta_min = 1e-6
+embedding_layer_eta_min = 1e-5
+backbone_eta_min = 1e-5
+head_eta_min = 1e-5
+weight_strategy_eta_min = 1e-5
 
 weight_strategy_pct_start = 0.05
 weight_strategy_div_factor = 10.0

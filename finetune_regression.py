@@ -19,7 +19,7 @@ import os
 import json
 from datetime import datetime
 from atomprop.models.GeAT import GeATNet
-import configs.config_finetune as cfg
+import configs.config_reg as cfg
 from atomprop.utils.utils import remove_module_prefix
 
 # Use MSE-based loss for regression
@@ -124,9 +124,46 @@ def compute_rmse(predictions, labels):
     return overall_rmse, rmse_per_task
 
 
+def compute_r2(predictions, labels):
+    """
+    Compute R² (coefficient of determination) score, ignoring NaN values.
+    Returns R² per task and overall R².
+    """
+    valid_mask = ~np.isnan(labels)
+    if not np.any(valid_mask):
+        return np.nan, np.full(predictions.shape[1], np.nan)
+    
+    r2_per_task = []
+    for col in range(predictions.shape[1]):
+        col_valid = valid_mask[:, col]
+        if np.sum(col_valid) > 0:
+            col_preds = predictions[col_valid, col]
+            col_labels = labels[col_valid, col]
+            ss_res = np.sum((col_labels - col_preds) ** 2)
+            ss_tot = np.sum((col_labels - np.mean(col_labels)) ** 2)
+            if ss_tot == 0:
+                r2 = 1.0 if ss_res == 0 else 0.0
+            else:
+                r2 = 1 - (ss_res / ss_tot)
+            r2_per_task.append(r2)
+        else:
+            r2_per_task.append(np.nan)
+    
+    all_valid_preds = predictions[valid_mask]
+    all_valid_labels = labels[valid_mask]
+    ss_res_total = np.sum((all_valid_labels - all_valid_preds) ** 2)
+    ss_tot_total = np.sum((all_valid_labels - np.mean(all_valid_labels)) ** 2)
+    if ss_tot_total == 0:
+        overall_r2 = 1.0 if ss_res_total == 0 else 0.0
+    else:
+        overall_r2 = 1 - (ss_res_total / ss_tot_total)
+    
+    return overall_r2, np.array(r2_per_task)
+
+
 def evaluate_model(model_components, dataloader, criterion, y_cols, device, scaler_stats=None, aggr='attention'):
     """
-    Evaluate model and return average loss, RMSE metrics, and predictions.
+    Evaluate model and return average loss, RMSE metrics, R² metrics, and predictions.
     If scaler_stats is provided, inverse-transform predictions/labels for output.
     """
     embedding_layer, backbone, head, aggrmodel = model_components
@@ -172,13 +209,16 @@ def evaluate_model(model_components, dataloader, criterion, y_cols, device, scal
             label_inv = all_labels
         
         overall_rmse, rmse_per_task = compute_rmse(pred_inv, label_inv)
+        overall_r2, r2_per_task = compute_r2(pred_inv, label_inv)
     else:
         pred_inv = np.array([])
         label_inv = np.array([])
         overall_rmse = np.nan
         rmse_per_task = np.full(len(y_cols), np.nan)
+        overall_r2 = np.nan
+        r2_per_task = np.full(len(y_cols), np.nan)
 
-    return avg_loss, overall_rmse, rmse_per_task, pred_inv, label_inv
+    return avg_loss, overall_rmse, rmse_per_task, overall_r2, r2_per_task, pred_inv, label_inv
 
 
 def train(train_dataloader, val_dataloader, test_dataloader, model_components, optimizers, schedulers,
@@ -231,13 +271,14 @@ def train(train_dataloader, val_dataloader, test_dataloader, model_components, o
         for scheduler in schedulers:
             scheduler.step()
 
-        val_loss, val_rmse, val_rmse_per_task, _, _ = evaluate_model(
-            model_components, val_dataloader, criterion, y_cols, device, scaler_stats=None, aggr=aggr
+        val_loss, val_rmse, val_rmse_per_task, val_r2, val_r2_per_task, _, _ = evaluate_model(
+            model_components, val_dataloader, criterion, y_cols, device, scaler_stats=scaler_stats, aggr=aggr
         )
 
-        print(f"Epoch {epoch+1} Validation MSE: {val_loss:.6f}, Validation RMSE: {val_rmse:.6f}")
+        print(f"Epoch {epoch+1} Validation MSE: {val_loss:.6f}, Validation RMSE: {val_rmse:.6f}, Validation R²: {val_r2:.6f}")
         writer.add_scalar('Val/MSE', val_loss, epoch)
         writer.add_scalar('Val/RMSE', val_rmse, epoch)
+        writer.add_scalar('Val/R2', val_r2, epoch)
 
         if val_rmse < best_val_rmse:
             best_val_rmse = val_rmse
@@ -252,13 +293,14 @@ def train(train_dataloader, val_dataloader, test_dataloader, model_components, o
                 'head_state_dict': head.state_dict(),
                 'aggr_state_dict': aggrmodel.state_dict() if aggr == 'attention' else None,
                 'val_rmse': val_rmse,
+                'val_r2': val_r2,
                 'val_mse': val_loss,
                 'scaler_stats': scaler_stats,
                 'optimizer_embedding_layer_backbone_state_dict': optimizers[0].state_dict(),
                 'optimizer_head_state_dict': optimizers[1].state_dict(),
                 'optimizer_aggr_state_dict': optimizers[2].state_dict() if len(optimizers) > 2 else None,
             }, save_path)
-            print(f"Best model saved at epoch {best_epoch} with validation RMSE: {best_val_rmse:.6f}")
+            print(f"Best model saved at epoch {best_epoch} with validation RMSE: {best_val_rmse:.6f}, R²: {val_r2:.6f}")
             tolerating = 0
         else:
             tolerating += 1
@@ -281,7 +323,7 @@ def train(train_dataloader, val_dataloader, test_dataloader, model_components, o
 
     test_scaler_stats = checkpoint.get('scaler_stats', None)
 
-    test_loss, test_rmse, test_rmse_per_task, all_test_preds, all_test_labels = evaluate_model(
+    test_loss, test_rmse, test_rmse_per_task, test_r2, test_r2_per_task, all_test_preds, all_test_labels = evaluate_model(
         model_components, test_dataloader, criterion, y_cols, device, scaler_stats=test_scaler_stats, aggr=aggr
     )
 
@@ -304,19 +346,38 @@ def train(train_dataloader, val_dataloader, test_dataloader, model_components, o
                     row.extend([pred_str, label_str])
                 csv_writer.writerow(row)
 
-    print(f"Test MSE (scaled): {test_loss:.6f}, Test RMSE: {test_rmse:.6f}")
+        if cfg.draw_plot:
+            for j, col in enumerate(y_cols):
+                plt.figure(figsize=(8, 8))
+                valid_mask = ~np.isnan(all_test_labels[:, j])
+                if np.sum(valid_mask) > 0:
+                    plt.scatter(all_test_labels[valid_mask, j], all_test_preds[valid_mask, j], alpha=0.6)
+                    min_val = min(np.min(all_test_labels[valid_mask, j]), np.min(all_test_preds[valid_mask, j]))
+                    max_val = max(np.max(all_test_labels[valid_mask, j]), np.max(all_test_preds[valid_mask, j]))
+                    plt.plot([min_val, max_val], [min_val, max_val], 'r--', lw=2)
+                    plt.xlabel(f'Actual {col}')
+                    plt.ylabel(f'Predicted {col}')
+                    plt.title(f'{col}: Actual vs Predicted (RMSE: {test_rmse_per_task[j]:.4f}, R²: {test_r2_per_task[j]:.4f})')
+                    plt.tight_layout()
+                    plt.savefig(f"trained_models/{logdir}/scatter_{col}_run{run_num}.png", dpi=150)
+                    plt.close()
+
+    print(f"Test MSE (scaled): {test_loss:.6f}, Test RMSE: {test_rmse:.6f}, Test R²: {test_r2:.6f}")
     
     for i, col in enumerate(y_cols):
         if not np.isnan(test_rmse_per_task[i]):
-            print(f"  {col}: RMSE = {test_rmse_per_task[i]:.6f}")
+            print(f"  {col}: RMSE = {test_rmse_per_task[i]:.6f}, R² = {test_r2_per_task[i]:.6f}")
 
     return {
         'best_val_rmse': best_val_rmse,
+        'best_val_r2': checkpoint.get('val_r2', None),
         'best_val_mse': checkpoint.get('val_mse', None),
         'best_epoch': best_epoch,
         'test_rmse': test_rmse,
+        'test_r2': test_r2,
         'test_mse': test_loss,
         'test_rmse_per_task': test_rmse_per_task.tolist(),
+        'test_r2_per_task': test_r2_per_task.tolist(),
         'test_predictions_path': output_csv_path
     }
 
@@ -452,17 +513,39 @@ def main(ft_dataset=None):
     print(f"\n{'='*60}\nREGRESSION SUMMARY\n{'='*60}")
     if all_results:
         val_rmses = [r['best_val_rmse'] for r in all_results]
+        val_r2s = [r['best_val_r2'] for r in all_results]
         test_rmses = [r['test_rmse'] for r in all_results]
+        test_r2s = [r['test_r2'] for r in all_results]
         for i, r in enumerate(all_results):
-            print(f"Run {i}: Val RMSE={r['best_val_rmse']:.6f}, Test RMSE={r['test_rmse']:.6f}")
+            print(f"Run {i}: Val RMSE={r['best_val_rmse']:.6f}, Val R²={r['best_val_r2']:.6f}, Test RMSE={r['test_rmse']:.6f}, Test R²={r['test_r2']:.6f}")
         print(f"\nMean Test RMSE: {np.mean(test_rmses):.6f} ± {np.std(test_rmses):.6f}")
+        print(f"Mean Test R²: {np.mean(test_r2s):.6f} ± {np.std(test_r2s):.6f}")
+        
+        def convert_to_serializable(obj):
+            if isinstance(obj, np.integer):
+                return int(obj)
+            elif isinstance(obj, np.floating):
+                return float(obj)
+            elif isinstance(obj, np.ndarray):
+                return obj.tolist()
+            elif isinstance(obj, dict):
+                return {key: convert_to_serializable(value) for key, value in obj.items()}
+            elif isinstance(obj, list):
+                return [convert_to_serializable(item) for item in obj]
+            elif isinstance(obj, tuple):
+                return tuple(convert_to_serializable(item) for item in obj)
+            else:
+                return obj
+        
         summary = {
             'timestamp': datetime.now().isoformat(),
             'dataset': cfg.data_path,
-            'results': all_results,
+            'results': convert_to_serializable(all_results),
             'summary_stats': {
                 'mean_test_rmse': float(np.mean(test_rmses)),
-                'std_test_rmse': float(np.std(test_rmses))
+                'std_test_rmse': float(np.std(test_rmses)),
+                'mean_test_r2': float(np.mean(test_r2s)),
+                'std_test_r2': float(np.std(test_r2s))
             }
         }
         with open(f"trained_models/{cfg.logdir}/regression_summary.json", 'w') as f:

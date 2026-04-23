@@ -134,51 +134,40 @@ def create_data_splits(total_size):
     return train_indices, val_indices, test_indices
 
 def get_geat_layer_parameters(model, layer_decay=0.9):
-    """
-    Extract parameters from GeATNet with layer-wise decay.
-    Args:
-        model: GeATNet instance
-        layer_decay: decay factor for each layer (e.g., 0.9 means each layer has 90% LR of previous layer)
-    Returns:
-        List of parameter groups with different learning rates
-    """
     if hasattr(model, 'module'):
         geat_model = model.module
     else:
         geat_model = model
-    
+
     param_groups = []
-    
+
     geat_conv = geat_model.backbone
     num_layers = len(geat_conv.geat_layers)
-    
-    # Layer-wise parameters for GeAT layers
+
     for i, layer in enumerate(geat_conv.geat_layers):
-        layer_lr_scale = layer_decay ** (num_layers - 1 - i)  # Deeper layers get smaller LR
+        layer_lr_scale = layer_decay ** i
         params = []
-        
-        # Get all parameters from this layer
+
         for name, param in layer.named_parameters():
             if param.requires_grad:
                 params.append(param)
-        
-        if params:  # Only add if there are trainable parameters
+
+        if params:
             param_groups.append({
                 'params': params,
                 'lr_scale': layer_lr_scale,
                 'layer_idx': i,
                 'name': f'geat_layer_{i}'
             })
-    
-    # Parameters from norm layers in GeATConv
+
     for i, norm_layer in enumerate(geat_conv.norm_layers):
-        layer_lr_scale = layer_decay ** (num_layers - 1 - i)
+        layer_lr_scale = layer_decay ** i
         params = []
-        
+
         for name, param in norm_layer.named_parameters():
             if param.requires_grad:
                 params.append(param)
-        
+
         if params:
             param_groups.append({
                 'params': params,
@@ -186,20 +175,18 @@ def get_geat_layer_parameters(model, layer_decay=0.9):
                 'layer_idx': i,
                 'name': f'geat_norm_{i}'
             })
-    
-    # Parameters from backbone (GlobalAttnConv) - treat as additional layers
+
     neck_layers = geat_model.neck.global_attns
     neck_norm_layers = geat_model.neck.norm_layers
-    
+
     for i in range(len(neck_layers)):
-        # Global attention layers
         layer_lr_scale = layer_decay ** (num_layers + i)
         params = []
-        
+
         for name, param in neck_layers[i].named_parameters():
             if param.requires_grad:
                 params.append(param)
-        
+
         if params:
             param_groups.append({
                 'params': params,
@@ -207,13 +194,12 @@ def get_geat_layer_parameters(model, layer_decay=0.9):
                 'layer_idx': num_layers + i,
                 'name': f'global_attn_{i}'
             })
-        
-        # Norm layers for global attention
+
         params = []
         for name, param in neck_norm_layers[i].named_parameters():
             if param.requires_grad:
                 params.append(param)
-        
+
         if params:
             param_groups.append({
                 'params': params,
@@ -221,14 +207,13 @@ def get_geat_layer_parameters(model, layer_decay=0.9):
                 'layer_idx': num_layers + i,
                 'name': f'global_norm_{i}'
             })
-    
-    # Parameters from FFN (MoE) - treat as the final layers
+
     ffn_layer_idx = num_layers + len(neck_layers)
     params = []
     for name, param in geat_model.ffn.named_parameters():
         if param.requires_grad:
             params.append(param)
-    
+
     if params:
         param_groups.append({
             'params': params,
@@ -236,34 +221,33 @@ def get_geat_layer_parameters(model, layer_decay=0.9):
             'layer_idx': ffn_layer_idx,
             'name': 'ffn'
         })
-    
-    # Edge embeddings - treat as input layer (no decay)
+
     params = []
     for name, param in geat_model.edge_type_embedding.named_parameters():
         if param.requires_grad:
             params.append(param)
-    
+
     if params:
         param_groups.append({
             'params': params,
-            'lr_scale': 1.0,  # No decay for embeddings
+            'lr_scale': 1.0,
             'layer_idx': 0,
             'name': 'edge_type_embedding'
         })
-    
+
     params = []
     for name, param in geat_model.edge_direction_embedding.named_parameters():
         if param.requires_grad:
             params.append(param)
-    
+
     if params:
         param_groups.append({
             'params': params,
-            'lr_scale': 1.0,  # No decay for embeddings
+            'lr_scale': 1.0,
             'layer_idx': 0,
             'name': 'edge_direction_embedding'
         })
-    
+
     return param_groups
 
 def print_batch_progress(rank, epoch, current_batch, total_batches, loss, timer: TrainingTimer, stage="Training"):

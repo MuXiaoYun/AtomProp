@@ -64,7 +64,7 @@ def evaluate_model(model_components, dataloader, criterion, y_cols, device, aggr
             batch = batch.to(device)
             emb = embedding_layer(batch.x.squeeze())
             emb = backbone(Data(x=emb, edge_index=batch.edge_index, edge_attr=batch.edge_attr), batch=batch.batch)
-            preds = head(emb, batch.batch)
+            preds = aggrmodel(head(emb), batch.batch) if cfg.head_type=="mlp" else head(emb, batch.batch)
             
             loss = criterion(preds.reshape(-1, len(y_cols)), batch.y.reshape(-1, len(y_cols)))
             total_loss += loss.item()
@@ -155,7 +155,7 @@ def train(train_dataloader, val_dataloader, test_dataloader, model_components, o
             else:
                 emb = embedding_layer(batch.x.squeeze())
                 emb = backbone(Data(x=emb, edge_index=batch.edge_index, edge_attr=batch.edge_attr), batch=batch.batch)
-            preds = head(emb, batch=batch.batch)
+            preds = aggrmodel(head(emb), batch.batch) if cfg.head_type=="mlp" else head(emb, batch.batch)
             
             loss = train_criterion(preds.reshape(-1, len(y_cols)), batch.y.reshape(-1, len(y_cols)))
             loss.backward()
@@ -178,6 +178,11 @@ def train(train_dataloader, val_dataloader, test_dataloader, model_components, o
         val_loss, val_auc, _, _, _ = evaluate_model(
             model_components, val_dataloader, criterion, y_cols, device, cfg.aggr
         )
+        
+        test_loss, test_auc, _, _, _ = evaluate_model(
+            model_components, test_dataloader, criterion, y_cols, device, cfg.aggr
+        )
+        print(f"test:{test_auc}")
         
         print(f"Epoch {epoch+1} Validation Loss: {val_loss:.4f}, AUC: {val_auc:.4f}")
         writer.add_scalar(f'Val/Loss', val_loss, epoch)
@@ -326,26 +331,26 @@ def main(ft_dataset=None):
                     use_edge_embedding=cfg.use_edge_embedding)
         aggrmodel = GNNAggr(embed_dim=cfg.embed_dim, aggr=cfg.aggr, layers=1)
 
-        head = DownstreamHead(
-            input_dim=cfg.embed_dim,
-            hidden_dim=cfg.head_hidden_dim,
-            output_dim=len(y_cols),
-            bottle_neck_dim=256,
-            bottle_neck_layers=2,
-            mlp_num_layers=cfg.head_layers,
-            attn_num_layers=cfg.downstream_head_attn_num_layers,
-            dropout=cfg.head_dropout,
-            batch_norm=True,
-            output_activation=None
-        )
-        
-        # head = MLP(input_dim=cfg.embed_dim, 
-        #            hidden_dim=cfg.head_hidden_dim, 
-        #            output_dim=len(y_cols),
-        #            num_layers=cfg.head_layers, 
-        #            dropout=cfg.head_dropout, 
-        #            batch_norm=True, 
-        #            output_activation=None)
+        if cfg.head_type == "mlp":
+            head = MLP(input_dim=cfg.embed_dim, 
+                   hidden_dim=cfg.head_hidden_dim, 
+                   output_dim=len(y_cols),
+                   num_layers=cfg.head_layers, 
+                   dropout=cfg.head_dropout, 
+                   batch_norm=True, 
+                   output_activation=None)
+            
+        else:
+            head = DownstreamHead(
+                input_dim=cfg.embed_dim,
+                bottle_neck_dim=cfg.bottle_neck_dim,
+                bottle_neck_layers=cfg.bottle_neck_layers,
+                hidden_dim=cfg.head_hidden_dim,
+                output_dim=len(y_cols),
+                mlp_num_layers=cfg.head_layers,
+                attn_num_layers=cfg.downstream_head_attn_num_layers,
+                dropout=cfg.head_dropout,
+            )
         
         if cfg.no_pretrain == False:
             ckpt = torch.load(cfg.pretrained_path, weights_only=False, map_location=device)
@@ -390,10 +395,10 @@ def main(ft_dataset=None):
         # No DDP wrapping
         # Optimizers
         optimizer_embedding_layer_backbone = torch.optim.Adam([
-            {'params': embedding_layer.parameters(), 'lr': cfg.lr_embedding_layer_backbone},
-            {'params': backbone.parameters(), 'lr': cfg.lr_embedding_layer_backbone}
+            {'params': embedding_layer.parameters(), 'lr': cfg.lr_embedding_layer_backbone, 'weight_decay': cfg.wd_emb_backbone},
+            {'params': backbone.parameters(), 'lr': cfg.lr_embedding_layer_backbone, 'weight_decay': cfg.wd_emb_backbone}
         ])
-        optimizer_head = torch.optim.Adam(head.parameters(), lr=cfg.lr_head)
+        optimizer_head = torch.optim.Adam(head.parameters(), lr=cfg.lr_head, weight_decay=cfg.wd_head)
         optimizers = [optimizer_embedding_layer_backbone, optimizer_head]
         
         # Schedulers
