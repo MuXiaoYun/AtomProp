@@ -7,7 +7,6 @@ from PyQt5.QtWidgets import *
 from PyQt5.QtGui import *
 from PyQt5.QtCore import *
 
-# 直接使用你的项目配置
 import configs.config_reg as cfg
 
 from atomprop.dataloader.dataloader import SMILESToInputs
@@ -15,7 +14,8 @@ from atomprop.models.GNNs import Embedder, GNNAggr
 from atomprop.models.GeAT import GeATNet
 from atomprop.utils.mlp import MLP
 
-from torch_geometric.data import Data, Batch, DataLoader
+from torch_geometric.data import Data, Batch
+from torch_geometric.loader import DataLoader
 
 
 class PredictWorker(QThread):
@@ -30,7 +30,6 @@ class PredictWorker(QThread):
 
     def run(self):
         try:
-            # 模型结构完全与训练代码一致
             embedding_layer = Embedder(num_atom_types=120, embed_dim=cfg.embed_dim)
             backbone = GeATNet(
                 embed_dim=cfg.embed_dim,
@@ -113,6 +112,7 @@ class PredictGUI(QMainWindow):
         super().__init__()
         self.setWindowTitle("SMILES Prediction Tool")
         self.setGeometry(100, 100, 900, 720)
+        self.setAcceptDrops(True)
         self.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
         self.model_path = None
         self.results = []
@@ -210,16 +210,70 @@ class PredictGUI(QMainWindow):
 
     def dragEnterEvent(self, e):
         if e.mimeData().hasUrls():
-            e.accept()
+            urls = e.mimeData().urls()
+            if urls:
+                file_path = urls[0].toLocalFile()
+                if file_path.startswith('file://'):
+                    file_path = file_path[7:]
+                if file_path.lower().endswith(('.txt', '.csv')):
+                    e.accept()
+                    return
+        e.ignore()
 
     def dropEvent(self, e):
-        file_path = e.mimeData().urls()[0].toLocalFile()
-        if file_path.endswith((".txt", ".csv")):
+        urls = e.mimeData().urls()
+        if not urls:
+            return
+        
+        file_path = urls[0].toLocalFile()
+        if file_path.startswith('file://'):
+            file_path = file_path[7:]
+        
+        if not os.path.exists(file_path):
+            QMessageBox.warning(self, "Warning", f"File not found:\n{file_path}")
+            return
+        
+        if file_path.lower().endswith((".txt", ".csv")):
             try:
-                with open(file_path, encoding="utf-8") as f:
-                    self.text_input.setPlainText(f.read())
-            except:
-                pass
+                if file_path.lower().endswith('.csv'):
+                    try:
+                        df = pd.read_csv(file_path, encoding='utf-8')
+                    except UnicodeDecodeError:
+                        df = pd.read_csv(file_path, encoding='gbk')
+                    
+                    smiles_col = None
+                    for col in df.columns:
+                        col_lower = col.lower()
+                        if col_lower in ['smiles', 'smi', 'canonical_smiles', 'smiles_string']:
+                            smiles_col = col
+                            break
+                    
+                    if smiles_col is None and len(df.columns) > 0:
+                        smiles_col = df.columns[0]
+                    
+                    if smiles_col:
+                        smiles_list = df[smiles_col].astype(str).tolist()
+                        smiles_list = [s.strip() for s in smiles_list if s and s.lower() != 'nan' and s.strip()]
+                        smiles_text = '\n'.join(smiles_list)
+                        self.text_input.setPlainText(smiles_text)
+                        self.log_label.setText(f"Loaded {len(smiles_list)} SMILES from {os.path.basename(file_path)}")
+                    else:
+                        self.log_label.setText(f"Failed to find data in CSV")
+                        
+                else:
+                    with open(file_path, 'r', encoding='utf-8') as f:
+                        content = f.read()
+                    self.text_input.setPlainText(content)
+                    self.log_label.setText(f"Loaded: {os.path.basename(file_path)}")
+                
+                e.accept()
+                
+            except Exception as ex:
+                error_msg = f"Failed to load file:\n{str(ex)}"
+                self.log_label.setText("Error loading file")
+                QMessageBox.critical(self, "Error", error_msg)
+        else:
+            QMessageBox.warning(self, "Warning", "Please drop a .txt or .csv file")
 
 
 if __name__ == "__main__":

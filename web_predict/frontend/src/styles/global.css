@@ -1,0 +1,139 @@
+/* Dark theme (default) */
+:root,
+[data-theme='dark'] {
+  --bg-deep: #0b1220;
+  --bg-card: rgba(255, 255, 255, 0.04);
+  --bg-card-hover: rgba(255, 255, 255, 0.07);
+  --bg-input: rgba(0, 0, 0, 0.25);
+  --bg-table: rgba(0, 0, 0, 0.15);
+  --bg-table-header: rgba(0, 0, 0, 0.25);
+  --border-subtle: rgba(255, 255, 255, 0.08);
+  --accent: #14b8a6;
+  --accent-dim: #0d9488;
+  --accent-glow: rgba(20, 184, 166, 0.25);
+  --text-primary: #f1f5f9;
+  --text-secondary: #94a3b8;
+  --text-code: #a5f3fc;
+  --mesh-accent: rgba(20, 184, 166, 0.25);
+  --mesh-blue: rgba(59, 130, 246, 0.08);
+  --code-bg: rgba(0, 0, 0, 0.3);
+  --chart-train: #38bdf8;
+  --chart-val: #f472b6;
+  --font-sans: 'DM Sans', system-ui, sans-serif;
+  --font-mono: 'JetBrains Mono', ui-monospace, monospace;
+
+  color-scheme: dark;
+}
+
+/* Light theme */
+[data-theme='light'] {
+  --bg-deep: #f8fafc;
+  --bg-card: #ffffff;
+  --bg-card-hover: #f1f5f9;
+  --bg-input: #ffffff;
+  --bg-table: #ffffff;
+  --bg-table-header: #f1f5f9;
+  --border-subtle: #e2e8f0;
+  --accent: #0d9488;
+  --accent-dim: #0f766e;
+  --accent-glow: rgba(13, 148, 136, 0.12);
+  --text-primary: #0f172a;
+  --text-secondary: #64748b;
+  --text-code: #0f766e;
+  --mesh-accent: rgba(13, 148, 136, 0.08);
+  --mesh-blue: rgba(59, 130, 246, 0.05);
+  --code-bg: #f1f5f9;
+  --chart-train: #0284c7;
+  --chart-val: #db2777;
+
+  color-scheme: light;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  min-height: 100vh;
+  font-family: var(--font-sans);
+  background: var(--bg-deep);
+  color: var(--text-primary);
+  -webkit-font-smoothing: antialiased;
+  transition: background-color 0.25s ease, color 0.25s ease;
+}
+
+#app {
+  min-height: 100vh;
+}
+
+.el-button--primary {
+  --el-button-bg-color: var(--accent-dim);
+  --el-button-border-color: var(--accent-dim);
+  --el-button-hover-bg-color: var(--accent);
+  --el-button-hover-border-color: var(--accent);
+}
+
+[data-theme='dark'] .el-textarea__inner,
+[data-theme='dark'] .el-input__wrapper,
+[data-theme='dark'] .el-select__wrapper {
+  background: var(--bg-input) !important;
+  box-shadow: none !important;
+  border: 1px solid var(--border-subtle) !important;
+  color: var(--text-primary) !important;
+}
+
+[data-theme='light'] .el-textarea__inner,
+[data-theme='light'] .el-input__wrapper,
+[data-theme='light'] .el-select__wrapper {
+  background: var(--bg-input) !important;
+  box-shadow: 0 0 0 1px var(--border-subtle) inset !important;
+  color: var(--text-primary) !important;
+}
+
+.el-textarea__inner::placeholder {
+  color: var(--text-secondary) !important;
+}
+
+/* Solid table — no zebra stripes */
+.el-table {
+  --el-table-bg-color: var(--bg-table);
+  --el-table-tr-bg-color: var(--bg-table);
+  --el-table-header-bg-color: var(--bg-table-header);
+  --el-table-row-hover-bg-color: var(--bg-card-hover);
+  --el-table-border-color: var(--border-subtle);
+  --el-table-text-color: var(--text-primary);
+  --el-table-header-text-color: var(--text-secondary);
+}
+
+.el-table--striped .el-table__body tr.el-table__row--striped td.el-table__cell {
+  background: var(--bg-table) !important;
+}
+
+.el-upload-dragger {
+  background: transparent !important;
+  border: none !important;
+  padding: 0 !important;
+  width: 100% !important;
+  height: auto !important;
+}
+
+[data-theme='light'] .el-dialog,
+[data-theme='light'] .el-message-box {
+  --el-bg-color: #fff;
+}
+
+.card {
+  background: var(--bg-card);
+  border: 1px solid var(--border-subtle);
+  border-radius: 14px;
+  padding: 1.25rem;
+  transition: background 0.25s ease, border-color 0.25s ease;
+}
+
+[data-theme='dark'] .card {
+  backdrop-filter: blur(12px);
+}

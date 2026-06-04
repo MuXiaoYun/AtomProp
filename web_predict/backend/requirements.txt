@@ -1,0 +1,4 @@
+django>=4.2,<6
+django-cors-headers>=4.3
+pandas>=2.0
+# torch, torch-geometric, rdkit: use parent AtomProp environment

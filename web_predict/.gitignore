@@ -1,0 +1,12 @@
+# Frontend
+frontend/node_modules/
+frontend/dist/
+
+# Backend
+backend/static/dist/*
+!backend/static/dist/.gitkeep
+backend/staticfiles/
+backend/media/
+__pycache__/
+*.pyc
+.env
