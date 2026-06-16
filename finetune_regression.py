@@ -464,7 +464,14 @@ def main(ft_dataset=None):
             geat_num_layers=cfg.geat_num_layers, aggr_num_layers=cfg.aggr_num_layers,
             FFN_type=cfg.FFN_type, FFN_hidden_dim=cfg.FFN_hidden_dim,
             FFN_num_experts=cfg.FFN_num_experts, FFN_num_layers=cfg.FFN_num_layers, FFN_top_k=cfg.FFN_top_k,
-            use_edge_embedding=cfg.use_edge_embedding
+            use_edge_embedding=cfg.use_edge_embedding,
+            per_layer_FFN_type=cfg.per_layer_FFN_type,
+            per_layer_FFN_hidden_dim=cfg.per_layer_FFN_hidden_dim,
+            per_layer_FFN_num_layers=cfg.per_layer_FFN_num_layers,
+            per_layer_FFN_dropout=cfg.per_layer_FFN_dropout,
+            per_layer_FFN_num_experts=cfg.per_layer_FFN_num_experts,
+            per_layer_FFN_top_k=cfg.per_layer_FFN_top_k,
+            attention_rank=cfg.attention_rank
         )
         aggrmodel = GNNAggr(embed_dim=cfg.embed_dim, aggr=cfg.aggr, layers=1)
         head = MLP(input_dim=cfg.embed_dim, hidden_dim=cfg.head_hidden_dim, output_dim=len(y_cols),
@@ -473,7 +480,16 @@ def main(ft_dataset=None):
         if not cfg.no_pretrain:
             ckpt = torch.load(cfg.pretrained_path, weights_only=False, map_location=device)
             embedding_layer.load_state_dict(remove_module_prefix(ckpt['embedding_layer_state_dict']))
-            backbone.load_state_dict(remove_module_prefix(ckpt['backbone_state_dict']))
+            backbone_state = remove_module_prefix(ckpt['backbone_state_dict'])
+            try:
+                backbone.load_state_dict(backbone_state, strict=True)
+            except RuntimeError as e:
+                print(f"[WARNING] Strict load failed (expected for architecture change): {e}")
+                print("Attempting partial load with strict=False...")
+                missing, unexpected = backbone.load_state_dict(backbone_state, strict=False)
+                print(f"Loaded backbone with {len(missing)} missing keys and {len(unexpected)} unexpected keys")
+                if missing:
+                    print(f"  First 5 missing: {missing[:5]}")
 
         print(f"Embedding Params: {sum(p.numel() for p in embedding_layer.parameters() if p.requires_grad)}")
         print(f"Backbone Params: {sum(p.numel() for p in backbone.parameters() if p.requires_grad)}")

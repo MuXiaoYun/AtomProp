@@ -6,19 +6,28 @@ device = "cuda:0"
 num_runs = 3
 
 # Model settings
-geat_num_layers = 4
+geat_num_layers = 12
 aggr_num_layers = 2
-num_heads = 8
-global_num_heads = 8
+num_heads = 16
+global_num_heads = 16
 output_negative_slope = 0.2
 geat_dropout = 0.2
 
 FFN_type = "MLP"
 FFN_num_layers = 2
-FFN_hidden_dim = 1024
+FFN_hidden_dim = 4096
 FFN_num_experts = 8
 FFN_top_k = 2
 use_edge_embedding = False
+
+# Per-layer FFN settings
+per_layer_FFN_type = "MLP"
+per_layer_FFN_num_layers = 2
+per_layer_FFN_hidden_dim = 4096
+per_layer_FFN_dropout = 0.1
+per_layer_FFN_num_experts = 8
+per_layer_FFN_top_k = 2
+attention_rank = 64
 
 # Data settings
 data_path = "./data/properties/ideal_gas_formation_enthalpy.csv"
@@ -41,7 +50,7 @@ random_state = 0
 gamma = 1.0
 
 # Model architecture
-embed_dim = 512
+embed_dim = 1024
 aggr = 'mean'  # options: 'mean', 'sum', 'max', 'attention'
 head_type = "mlp"
 head_dropout = 0.3

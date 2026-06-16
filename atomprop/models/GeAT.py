@@ -1,18 +1,25 @@
-"""  
-Module for Graph Edge Attention Transformer (GeAT) for molecular property prediction.   
-"""  
-  
-import torch  
-import torch.nn as nn  
-from atomprop.utils.mlp import MLP, MoE 
-from atomprop.embeddings.atom_embedding import BondTypes, BondDirections  
+"""
+Module for Graph Edge Attention Transformer (GeAT) for molecular property prediction.
+"""
+
+import torch
+import torch.nn as nn
+from atomprop.utils.mlp import MLP, MoE
+from atomprop.embeddings.atom_embedding import BondTypes, BondDirections
 from atomprop.models.edge_attention import EdgeAttention, MultiHeadEdgeAttention, GlobalEdgeAttn
-import torch_geometric 
-  
+import torch_geometric
+from typing import Optional
+
 class GeATLayer(nn.Module):
     """
-    Graph Edge Attention Transformer Layer using explicit Edge Attention.
-    Replaces manual attention with MultiHeadEdgeAttention_ParallelBetweenBondtypes.
+    Graph Edge Attention Transformer Layer using Pre-LN architecture (standard Transformer block).
+
+    Structure:
+        x = x + Dropout(Attention(LayerNorm(x)))
+        x = x + Dropout(FFN(LayerNorm(x)))
+
+    This replaces the old Post-LN architecture:
+        x = LayerNorm(x + Attention(x))   # no per-layer FFN
     """
 
     def __init__(
@@ -22,7 +29,14 @@ class GeATLayer(nn.Module):
         num_heads: int = 8,
         dropout: float = 0.2,
         output_negative_slope: float = 0.2,
-        use_edge_embedding: bool = False
+        use_edge_embedding: bool = False,
+        per_layer_FFN_type: str = "MLP",
+        per_layer_FFN_hidden_dim: int = 3072,
+        per_layer_FFN_num_layers: int = 2,
+        per_layer_FFN_dropout: float = 0.1,
+        per_layer_FFN_num_experts: int = 8,
+        per_layer_FFN_top_k: int = 2,
+        attention_rank: Optional[int] = None,
     ):
         super(GeATLayer, self).__init__()
         self.num_heads = num_heads
@@ -30,11 +44,14 @@ class GeATLayer(nn.Module):
         self.num_bond_types = num_bond_types
         self.use_edge_embedding = use_edge_embedding
 
+        # ---- Pre-LN for attention sub-block ----
+        self.norm1 = nn.LayerNorm(embed_dim)
+
         # Linear projections for Q, K, V (shared across heads in input)
         self.Q_w = nn.Linear(embed_dim, embed_dim * num_heads)
         self.K_w = nn.Linear(embed_dim, embed_dim * num_heads)
         self.V_w = nn.Linear(embed_dim, embed_dim * num_heads)
-        
+
         if use_edge_embedding:
             self.edge_w = nn.Linear(embed_dim, embed_dim * num_heads)
 
@@ -44,12 +61,41 @@ class GeATLayer(nn.Module):
             num_bond_types=num_bond_types,
             num_heads=num_heads,
             output_negative_slope=output_negative_slope,
-            use_edge_embedding=use_edge_embedding
+            use_edge_embedding=use_edge_embedding,
+            attention_rank=attention_rank,
         )
 
-        self.dropout_layer = nn.Dropout(dropout)
+        self.resid_dropout_attn = nn.Dropout(dropout)
         self.project = nn.Linear(embed_dim * num_heads, embed_dim)
-        self.norm_after_attn = nn.LayerNorm(embed_dim * num_heads)  # optional but stabilizing
+
+        # ---- Per-layer FFN sub-block ----
+        self.per_layer_FFN_type = per_layer_FFN_type
+        if per_layer_FFN_type != "NONE":
+            self.norm2 = nn.LayerNorm(embed_dim)
+            self.resid_dropout_ffn = nn.Dropout(dropout)
+            if per_layer_FFN_type == "MLP":
+                self.ffn = MLP(
+                    input_dim=embed_dim,
+                    hidden_dim=per_layer_FFN_hidden_dim,
+                    output_dim=embed_dim,
+                    num_layers=per_layer_FFN_num_layers,
+                    dropout=per_layer_FFN_dropout,
+                    zero_init=True,
+                )
+            elif per_layer_FFN_type == "MOE":
+                self.ffn = MoE(
+                    input_dim=embed_dim,
+                    hidden_dim=per_layer_FFN_hidden_dim,
+                    output_dim=embed_dim,
+                    num_experts=per_layer_FFN_num_experts,
+                    top_k=per_layer_FFN_top_k,
+                    expert_hidden_layers=per_layer_FFN_num_layers,
+                    dropout=per_layer_FFN_dropout,
+                    hidden_activation=nn.ReLU(),
+                    output_activation=None,
+                )
+            else:
+                raise ValueError(f"Unknown per_layer_FFN_type: {per_layer_FFN_type}")
 
     def forward(self, atom_embeddings, edge_embeddings, edge_index=None, edge_attr=None):
         """
@@ -62,10 +108,14 @@ class GeATLayer(nn.Module):
         """
         B_N = atom_embeddings.size(0)
 
+        # ---- Attention sub-block (Pre-LN) ----
+        residual = atom_embeddings
+        x = self.norm1(atom_embeddings)
+
         # Project to multi-head space
-        Q = self.Q_w(atom_embeddings)  # [B_N, embed_dim * num_heads]
-        K = self.K_w(atom_embeddings)  # [B_N, embed_dim * num_heads]
-        V = self.V_w(atom_embeddings)  # [B_N, embed_dim * num_heads]
+        Q = self.Q_w(x)  # [B_N, embed_dim * num_heads]
+        K = self.K_w(x)  # [B_N, embed_dim * num_heads]
+        V = self.V_w(x)  # [B_N, embed_dim * num_heads]
         if self.use_edge_embedding:
             E = self.edge_w(edge_embeddings)
         else:
@@ -83,7 +133,7 @@ class GeATLayer(nn.Module):
         # Apply softmax over neighbors for each target node (per head)
         row, col = edge_index
         attn_probs = torch_geometric.utils.softmax(attn_scores, col, num_nodes=B_N)  # [E, num_heads]
-        attn_probs = self.dropout_layer(attn_probs)
+        attn_probs = self.resid_dropout_attn(attn_probs)
 
         # Gather source values
         V_src = V[row]  # [E, embed_dim * num_heads]
@@ -102,13 +152,24 @@ class GeATLayer(nn.Module):
         out = out.view(B_N, self.embed_dim * self.num_heads)  # [B_N, embed_dim * num_heads]
         out = self.project(out)  # [B_N, embed_dim]
 
-        return out
-  
-class GeATConv(nn.Module):  
-    """  
-    A :class:`GeATConv` is a module for molecular representation learning using GeAT. 
-    It uses residual connections and outputs atom embeddings.  
-    """  
+        # Residual connection
+        atom_embeddings = residual + self.resid_dropout_attn(out)
+
+        # ---- FFN sub-block (Pre-LN) ----
+        if self.per_layer_FFN_type != "NONE":
+            residual = atom_embeddings
+            x = self.norm2(atom_embeddings)
+            x = self.ffn(x)
+            atom_embeddings = residual + self.resid_dropout_ffn(x)
+
+        return atom_embeddings
+
+class GeATConv(nn.Module):
+    """
+    A :class:`GeATConv` is a module for molecular representation learning using GeAT.
+    It stacks multiple GeATLayer blocks, each of which is a full Pre-LN Transformer block
+    (attention + FFN with residual connections).
+    """
     def __init__(self,
                  embed_dim: int,
                  num_bond_types: int,
@@ -116,34 +177,49 @@ class GeATConv(nn.Module):
                  output_negative_slope: float = 0.2,
                  dropout: float = 0.2,
                  geat_num_layers: int = 5,
-                 use_edge_embedding: bool = False):  
-        super(GeATConv, self).__init__()  
-        self.geat_layers = nn.ModuleList([GeATLayer(embed_dim=embed_dim,
-                                                    num_bond_types=num_bond_types,
-                                                    num_heads=num_heads,
-                                                    output_negative_slope=output_negative_slope,
-                                                    dropout=dropout,
-                                                    use_edge_embedding=use_edge_embedding) for _ in range(geat_num_layers)])  
-        self.norm_layers = nn.ModuleList([nn.LayerNorm(embed_dim) for _ in range(geat_num_layers)])  
-  
+                 use_edge_embedding: bool = False,
+                 per_layer_FFN_type: str = "MLP",
+                 per_layer_FFN_hidden_dim: int = 3072,
+                 per_layer_FFN_num_layers: int = 2,
+                 per_layer_FFN_dropout: float = 0.1,
+                 per_layer_FFN_num_experts: int = 8,
+                 per_layer_FFN_top_k: int = 2,
+                 attention_rank: Optional[int] = None):
+        super(GeATConv, self).__init__()
+        self.geat_layers = nn.ModuleList([
+            GeATLayer(
+                embed_dim=embed_dim,
+                num_bond_types=num_bond_types,
+                num_heads=num_heads,
+                output_negative_slope=output_negative_slope,
+                dropout=dropout,
+                use_edge_embedding=use_edge_embedding,
+                per_layer_FFN_type=per_layer_FFN_type,
+                per_layer_FFN_hidden_dim=per_layer_FFN_hidden_dim,
+                per_layer_FFN_num_layers=per_layer_FFN_num_layers,
+                per_layer_FFN_dropout=per_layer_FFN_dropout,
+                per_layer_FFN_num_experts=per_layer_FFN_num_experts,
+                per_layer_FFN_top_k=per_layer_FFN_top_k,
+                attention_rank=attention_rank,
+            )
+            for _ in range(geat_num_layers)
+        ])
+
     def forward(self, atom_embeddings, edge_embeddings, edge_index=None, edge_attr=None):
-        atom_embeddings_c = atom_embeddings.clone()
-        for i, layer in enumerate(self.geat_layers):
-            residual = atom_embeddings_c
-            atom_embeddings_c = layer(atom_embeddings_c, edge_embeddings, edge_index, edge_attr)
-            atom_embeddings_c = self.norm_layers[i](residual + atom_embeddings_c)
-        return atom_embeddings_c
-  
-class GlobalAttnConv(nn.Module):  
-    """  
+        for layer in self.geat_layers:
+            atom_embeddings = layer(atom_embeddings, edge_embeddings, edge_index, edge_attr)
+        return atom_embeddings
+
+class GlobalAttnConv(nn.Module):
+    """
     A :class:`GlobalAttnConv` is a module for global attention over all atoms in the molecule.
-    It uses residual connections and outputs atom embeddings.   
-    """  
-    def __init__(self, embed_dim: int, global_num_heads: int = 8, dropout: int = 0.2, attn_num_layers: int = 2):  
-        super(GlobalAttnConv, self).__init__()  
+    It uses residual connections and outputs atom embeddings.
+    """
+    def __init__(self, embed_dim: int, global_num_heads: int = 8, dropout: int = 0.2, attn_num_layers: int = 2):
+        super(GlobalAttnConv, self).__init__()
         self.global_attns = nn.ModuleList([GlobalEdgeAttn(embed_dim=embed_dim, global_num_heads=global_num_heads, dropout=dropout) for _ in range(attn_num_layers)])
         self.norm_layers = nn.ModuleList([nn.LayerNorm(embed_dim) for _ in range(attn_num_layers)])
-        
+
     def forward(self, atom_embeddings, edge_embeddings, batch=None):
         atom_embeddings_c = atom_embeddings.clone()
         for i, layer in enumerate(self.global_attns):
@@ -151,15 +227,16 @@ class GlobalAttnConv(nn.Module):
             atom_embeddings_c = layer(atom_embeddings_c, edge_embeddings, batch)
             atom_embeddings_c = self.norm_layers[i](residual + atom_embeddings_c)
         return atom_embeddings_c
-        
-class GeATNet(nn.Module):  
-    """  
-    A :class:`GeATNet` is a module for molecular embeddings generation using GeAT.  
-    1. uses multiple :class:`GeATLayer` instances to compute new embeddings for atoms based on their neighbors. To note, before each inner layer, the embeddings are residual added to the embeddings from the previous layer and then layer normalized.  
+
+class GeATNet(nn.Module):
+    """
+    A :class:`GeATNet` is a module for molecular embeddings generation using GeAT.
+    1. uses multiple :class:`GeATLayer` instances to compute new embeddings for atoms based on
+       their neighbors. Each layer is a full Pre-LN Transformer block (attention + FFN).
     2. applies an extra global attention mechanism to aggregate the information from all atoms.
-    3. FFN for all atoms to get the final atom embeddings.  
-    """  
-      
+    3. FFN for all atoms to get the final atom embeddings.
+    """
+
     def __init__(self,
                  embed_dim: int,
                  num_bond_types = None,
@@ -175,18 +252,34 @@ class GeATNet(nn.Module):
                  FFN_num_experts: int = 8,
                  FFN_top_k: int = 2,
                  gating_dropout: float = 0.2,
-                 use_edge_embedding: bool = False
-                 ):  
+                 use_edge_embedding: bool = False,
+                 per_layer_FFN_type: str = "MLP",
+                 per_layer_FFN_hidden_dim: int = 3072,
+                 per_layer_FFN_num_layers: int = 2,
+                 per_layer_FFN_dropout: float = 0.1,
+                 per_layer_FFN_num_experts: int = 8,
+                 per_layer_FFN_top_k: int = 2,
+                 attention_rank: Optional[int] = None,
+                 ):
         super(GeATNet, self).__init__()
         if num_bond_types is None:
-            num_bond_types = len(BondTypes.get_bond_types())+1  
-        self.backbone = GeATConv(embed_dim=embed_dim,
-                                 num_bond_types=num_bond_types,
-                                 num_heads=num_heads,
-                                 output_negative_slope=output_negative_slope,
-                                 dropout=dropout,
-                                 geat_num_layers=geat_num_layers,
-                                 use_edge_embedding=use_edge_embedding)  
+            num_bond_types = len(BondTypes.get_bond_types())+1
+        self.backbone = GeATConv(
+            embed_dim=embed_dim,
+            num_bond_types=num_bond_types,
+            num_heads=num_heads,
+            output_negative_slope=output_negative_slope,
+            dropout=dropout,
+            geat_num_layers=geat_num_layers,
+            use_edge_embedding=use_edge_embedding,
+            per_layer_FFN_type=per_layer_FFN_type,
+            per_layer_FFN_hidden_dim=per_layer_FFN_hidden_dim,
+            per_layer_FFN_num_layers=per_layer_FFN_num_layers,
+            per_layer_FFN_dropout=per_layer_FFN_dropout,
+            per_layer_FFN_num_experts=per_layer_FFN_num_experts,
+            per_layer_FFN_top_k=per_layer_FFN_top_k,
+            attention_rank=attention_rank,
+        )
         self.neck = GlobalAttnConv(embed_dim=embed_dim,
                                    global_num_heads=global_num_heads,
                                    dropout=dropout,
@@ -216,40 +309,40 @@ class GeATNet(nn.Module):
             raise ValueError("Unknown FFN type for GeAT.")
         self.edge_type_embedding = nn.Embedding(len(BondTypes.get_bond_types())+1, embed_dim)
         self.edge_direction_embedding = nn.Embedding(len(BondDirections.get_bond_directions())+1, embed_dim)
-        
+
         if FFN_type != "NONE":
             self.FFN_norm = nn.LayerNorm(embed_dim)
-        
+
         self.reset_parameters()
-        
+
     def reset_parameters(self):
-        """  
-        Reset parameters of the model.  
-        """  
+        """
+        Reset parameters of the model.
+        """
         nn.init.xavier_uniform_(self.edge_direction_embedding.weight)
-        nn.init.xavier_uniform_(self.edge_type_embedding.weight)      
-    
-    def forward(self, data, batch=None):  
-        """  
-        Forward pass of the GeATNet.  
-        :param data: PyG data object for graphs 
-        :param batch: Batch indices for sparse format  
-        :return: Graph emb of shape (B_N, embed_dim)  
-        """  
+        nn.init.xavier_uniform_(self.edge_type_embedding.weight)
+
+    def forward(self, data, batch=None):
+        """
+        Forward pass of the GeATNet.
+        :param data: PyG data object for graphs
+        :param batch: Batch indices for sparse format
+        :return: Graph emb of shape (B_N, embed_dim)
+        """
         x = data.x
         edge_index = data.edge_index
         edge_attr = data.edge_attr
         edge_embeddings = self.edge_type_embedding(edge_attr[:,0]) + self.edge_direction_embedding(edge_attr[:,1])
-        geat_embeddings = self.backbone(x, edge_embeddings, edge_index, edge_attr)  
+        geat_embeddings = self.backbone(x, edge_embeddings, edge_index, edge_attr)
         aggr_embeddings = self.neck(geat_embeddings, edge_embeddings, batch)
         if self.FFN_type == 'NONE':
-            return aggr_embeddings  
+            return aggr_embeddings
         output = self.FFN_norm(aggr_embeddings + self.ffn(aggr_embeddings))
         return output
 
     def print_params(self):
-        """  
-        Print the number of trainable parameters for each sub-module and total.  
+        """
+        Print the number of trainable parameters for each sub-module and total.
         """
         def count_params(module):
             return sum(p.numel() for p in module.parameters() if p.requires_grad)
@@ -264,6 +357,20 @@ class GeATNet(nn.Module):
         print(f"{'Backbone (GeATConv)':<40}: {backbone_params:>12,}")
         total_params += backbone_params
 
+        # Per-layer breakdown
+        for i, layer in enumerate(self.backbone.geat_layers):
+            layer_params = count_params(layer)
+            print(f"  Layer {i}:")
+            attn_params = (
+                count_params(layer.Q_w) + count_params(layer.K_w) +
+                count_params(layer.V_w) + count_params(layer.edge_attention) +
+                count_params(layer.project) + count_params(layer.norm1)
+            )
+            print(f"    Attention            : {attn_params:>12,}")
+            if layer.per_layer_FFN_type != "NONE":
+                ffn_params = count_params(layer.ffn) + count_params(layer.norm2)
+                print(f"    FFN                  : {ffn_params:>12,}")
+
         # Neck (GlobalAttnConv)
         neck_params = count_params(self.neck)
         print(f"{'Neck (GlobalAttnConv)':<40}: {neck_params:>12,}")
@@ -272,12 +379,12 @@ class GeATNet(nn.Module):
         if self.FFN_type != 'NONE':
             # FFN
             ffn_params = count_params(self.ffn)
-            print(f"{'FFN':<40}: {ffn_params:>12,}")
+            print(f"{'Final FFN':<40}: {ffn_params:>12,}")
             total_params += ffn_params
-            
+
             # FFN_norm
             ffn_norm_params = count_params(self.FFN_norm)
-            print(f"{'FFN norm':<40}: {ffn_norm_params:>12,}")
+            print(f"{'Final FFN norm':<40}: {ffn_norm_params:>12,}")
             total_params += ffn_norm_params
 
         # Edge type embedding

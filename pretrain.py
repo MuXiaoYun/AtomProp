@@ -65,7 +65,14 @@ backbone = GeATNet(embed_dim=embed_dim,
                FFN_num_layers=cfg.FFN_num_layers,
                FFN_top_k=cfg.FFN_top_k,
                FFN_type=cfg.FFN_type,
-               use_edge_embedding=cfg.use_edge_embedding)
+               use_edge_embedding=cfg.use_edge_embedding,
+               per_layer_FFN_type=cfg.per_layer_FFN_type,
+               per_layer_FFN_hidden_dim=cfg.per_layer_FFN_hidden_dim,
+               per_layer_FFN_num_layers=cfg.per_layer_FFN_num_layers,
+               per_layer_FFN_dropout=cfg.per_layer_FFN_dropout,
+               per_layer_FFN_num_experts=cfg.per_layer_FFN_num_experts,
+               per_layer_FFN_top_k=cfg.per_layer_FFN_top_k,
+               attention_rank=cfg.attention_rank)
 head0 = MLP(input_dim=embed_dim, hidden_dim=128, output_dim=157, num_layers=2, dropout=cfg.head_dropout) # used for atom attribute prediction
 head1 = MLP(input_dim=embed_dim, hidden_dim=128, output_dim=120, num_layers=2, dropout=cfg.head_dropout) # used for masked node prediction
 head4 = MLP(input_dim=embed_dim, hidden_dim=128, output_dim=len(fg_list), num_layers=2, dropout=cfg.head_dropout) # used for functional group prediction
@@ -143,6 +150,8 @@ def get_geat_layer_parameters(model, layer_decay=0.9):
     geat_conv = geat_model.backbone
     num_layers = len(geat_conv.geat_layers)
 
+    # Each GeATLayer now contains: Q/K/V, edge_attention, project, norm1, norm2, ffn
+    # All params in a layer get the same layer-wise LR decay
     for i, layer in enumerate(geat_conv.geat_layers):
         layer_lr_scale = layer_decay ** i
         params = []
@@ -159,22 +168,7 @@ def get_geat_layer_parameters(model, layer_decay=0.9):
                 'name': f'geat_layer_{i}'
             })
 
-    for i, norm_layer in enumerate(geat_conv.norm_layers):
-        layer_lr_scale = layer_decay ** i
-        params = []
-
-        for name, param in norm_layer.named_parameters():
-            if param.requires_grad:
-                params.append(param)
-
-        if params:
-            param_groups.append({
-                'params': params,
-                'lr_scale': layer_lr_scale,
-                'layer_idx': i,
-                'name': f'geat_norm_{i}'
-            })
-
+    # Neck layers (global attention + norm)
     neck_layers = geat_model.neck.global_attns
     neck_norm_layers = geat_model.neck.norm_layers
 
@@ -207,6 +201,7 @@ def get_geat_layer_parameters(model, layer_decay=0.9):
                 'name': f'global_norm_{i}'
             })
 
+    # Final global FFN
     ffn_layer_idx = num_layers + len(neck_layers)
     params = []
     for name, param in geat_model.ffn.named_parameters():
@@ -221,6 +216,21 @@ def get_geat_layer_parameters(model, layer_decay=0.9):
             'name': 'ffn'
         })
 
+    # Final FFN LayerNorm
+    if hasattr(geat_model, 'FFN_norm'):
+        params = []
+        for name, param in geat_model.FFN_norm.named_parameters():
+            if param.requires_grad:
+                params.append(param)
+        if params:
+            param_groups.append({
+                'params': params,
+                'lr_scale': layer_decay ** ffn_layer_idx,
+                'layer_idx': ffn_layer_idx,
+                'name': 'ffn_norm'
+            })
+
+    # Edge type embedding
     params = []
     for name, param in geat_model.edge_type_embedding.named_parameters():
         if param.requires_grad:
@@ -234,6 +244,7 @@ def get_geat_layer_parameters(model, layer_decay=0.9):
             'name': 'edge_type_embedding'
         })
 
+    # Edge direction embedding
     params = []
     for name, param in geat_model.edge_direction_embedding.named_parameters():
         if param.requires_grad:

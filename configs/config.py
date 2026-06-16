@@ -18,20 +18,31 @@ random_state = 42
 logdir = "pretrain"
 
 # Model settings
-geat_num_layers = 5
+geat_num_layers = 12
 aggr_num_layers = 2
-num_heads = 8
-global_num_heads = 8
+num_heads = 16
+global_num_heads = 16
 output_negative_slope = 0.2
 geat_dropout = 0.1
 head_dropout = 0.3
 
 FFN_type = "MLP"
 FFN_num_layers = 2
-FFN_hidden_dim = 2048
+FFN_hidden_dim = 4096
 FFN_num_experts = 8
 FFN_top_k = 2
 use_edge_embedding = False
+
+# Per-layer FFN settings (new Transformer block)
+per_layer_FFN_type = "MLP"
+per_layer_FFN_num_layers = 2
+per_layer_FFN_hidden_dim = 4096
+per_layer_FFN_dropout = 0.1
+per_layer_FFN_num_experts = 8
+per_layer_FFN_top_k = 2
+
+# Low-rank bilinear attention (64 = ~8x parameter reduction vs full)
+attention_rank = 64
 
 # Data settings
 dataset_size = -1
@@ -53,7 +64,7 @@ less_rate = 0.1
 more_rate = 0.3
 
 # Model dimensions
-embed_dim = 512
+embed_dim = 1024
 
 # Functional groups
 fg_list = None  # if None, use default RDKit functional groups

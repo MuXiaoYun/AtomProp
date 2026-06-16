@@ -2,10 +2,11 @@
 Module for Graph Edge Attention Transformer (GeAT) for molecular property prediction.  
 """  
   
-import torch  
-import torch.nn as nn  
+import torch
+import torch.nn as nn
 import torch.nn.functional as F
 from atomprop.utils.mlp import MLP
+from typing import Optional
 
 default_attention_type = 'bilinear'
  
@@ -165,7 +166,8 @@ class MultiHeadEdgeAttention_ParallelBetweenBondtypes(nn.Module):
         attention_type: str = default_attention_type,
         mlp_hidden_dim: int = 1024,
         mlp_num_layers: int = 2,
-        use_edge_embedding: bool = False
+        use_edge_embedding: bool = False,
+        attention_rank: Optional[int] = None,
     ):
         super().__init__()
         self.atom_embedding_dim = atom_embedding_dim
@@ -173,17 +175,30 @@ class MultiHeadEdgeAttention_ParallelBetweenBondtypes(nn.Module):
         self.num_heads = num_heads
         self.attention_type = attention_type
         self.use_edge_embedding = use_edge_embedding
-        
+        self.attention_rank = attention_rank
+
         if attention_type not in ['bilinear', 'mlp']:
             raise ValueError(f"attention_type must be 'bilinear' or 'mlp', got {attention_type}")
- 
+
         if attention_type == 'bilinear':
-            # [num_bond_types, num_heads, D, D]
-            self.a = nn.Parameter(
-                torch.empty(num_bond_types, num_heads, atom_embedding_dim, atom_embedding_dim)
-            )
-            # Initialize each A_t with Xavier uniform (as in GAT)
-            nn.init.xavier_uniform_(self.a.view(-1, atom_embedding_dim, atom_embedding_dim))
+            if attention_rank is not None and attention_rank > 0:
+                # Low-rank bilinear: U [T, H, D, R], V [T, H, D, R]
+                # score = sum over r: (src @ U)_r * (dst @ V)_r
+                self.U = nn.Parameter(
+                    torch.empty(num_bond_types, num_heads, atom_embedding_dim, attention_rank)
+                )
+                self.V = nn.Parameter(
+                    torch.empty(num_bond_types, num_heads, atom_embedding_dim, attention_rank)
+                )
+                nn.init.xavier_uniform_(self.U.view(-1, atom_embedding_dim, attention_rank))
+                nn.init.xavier_uniform_(self.V.view(-1, atom_embedding_dim, attention_rank))
+            else:
+                # Full bilinear: [num_bond_types, num_heads, D, D]
+                self.a = nn.Parameter(
+                    torch.empty(num_bond_types, num_heads, atom_embedding_dim, atom_embedding_dim)
+                )
+                # Initialize each A_t with Xavier uniform (as in GAT)
+                nn.init.xavier_uniform_(self.a.view(-1, atom_embedding_dim, atom_embedding_dim))
         else:
             # MLP attention: [num_bond_types, num_heads, MLP]
             self.mlps = nn.ModuleList([
@@ -247,10 +262,22 @@ class MultiHeadEdgeAttention_ParallelBetweenBondtypes(nn.Module):
                 dst_t = dst[dst_idx] 
  
             if self.attention_type == 'bilinear':
-                A_t = self.a[t]  # [H, D, D]
-                # Compute: score_{e,h} = sum_{i,j} src_{e,h,i} * A_{h,i,j} * dst_{e,h,j}
-                # Using einsum: 'ehi,hij,ehj -> eh'
-                scores_t = torch.einsum('ehi,hij,ehj->eh', src_t, A_t, dst_t)  # [E_t, H]
+                if self.attention_rank is not None and self.attention_rank > 0:
+                    # Low-rank bilinear: score = sum_r (src @ U)_r * (dst @ V)_r
+                    U_t = self.U[t]  # [H, D, R]
+                    V_t = self.V[t]  # [H, D, R]
+                    # Project src: [E_t, H, D] @ [H, D, R] -> but einstein handles different dims
+                    # src_t: [E_t, H, D], U_t: [H, D, R]
+                    # We need: for each head h, (src_t[:,h,:] @ U_t[h,:,:]) * (dst_t[:,h,:] @ V_t[h,:,:])
+                    # -> [E_t, H, R], then sum over R
+                    src_proj = torch.einsum('ehd,hdr->ehr', src_t, U_t)  # [E_t, H, R]
+                    dst_proj = torch.einsum('ehd,hdr->ehr', dst_t, V_t)  # [E_t, H, R]
+                    scores_t = (src_proj * dst_proj).sum(dim=-1)  # [E_t, H]
+                else:
+                    A_t = self.a[t]  # [H, D, D]
+                    # Compute: score_{e,h} = sum_{i,j} src_{e,h,i} * A_{h,i,j} * dst_{e,h,j}
+                    # Using einsum: 'ehi,hij,ehj -> eh'
+                    scores_t = torch.einsum('ehi,hij,ehj->eh', src_t, A_t, dst_t)  # [E_t, H]
             else:
                 # MLP attention for each head
                 scores_t = []
@@ -261,9 +288,9 @@ class MultiHeadEdgeAttention_ParallelBetweenBondtypes(nn.Module):
                     scores_h = self.mlps[t][h](concat_features).squeeze(-1)  # [E_t]
                     scores_t.append(scores_h)
                 scores_t = torch.stack(scores_t, dim=-1)  # [E_t, H]
- 
+
             attn_scores[mask_t] = scores_t
- 
+
         return attn_scores  # [E, H]
  
  
@@ -278,27 +305,41 @@ class MultiHeadEdgeAttention_SerialBetweenBondtypes(nn.Module):
     def __init__(self,
                  atom_embedding_dim: int,
                  num_bond_types: int,
-                 num_heads: int = 8, 
+                 num_heads: int = 8,
                  output_negative_slope: float = 0.2,
                  attention_type: str = default_attention_type,
                  mlp_hidden_dim: int = 1024,
                  mlp_num_layers: int = 2,
-                 use_edge_embedding: bool = False):  
-        super(MultiHeadEdgeAttention_SerialBetweenBondtypes, self).__init__()  
-        self.num_heads = num_heads  
-        self.atom_d = atom_embedding_dim  
-        self.num_bond_types = num_bond_types  
+                 use_edge_embedding: bool = False,
+                 attention_rank: Optional[int] = None):
+        super(MultiHeadEdgeAttention_SerialBetweenBondtypes, self).__init__()
+        self.num_heads = num_heads
+        self.atom_d = atom_embedding_dim
+        self.num_bond_types = num_bond_types
         self.attention_type = attention_type
         self.output_negative_slope = output_negative_slope
         self.use_edge_embedding = use_edge_embedding
-        
+        self.attention_rank = attention_rank
+
         if attention_type not in ['bilinear', 'mlp']:
             raise ValueError(f"attention_type must be 'bilinear' or 'mlp', got {attention_type}")
- 
+
         if attention_type == 'bilinear':
-            # Bilinear parameter: [D*H, D, T]
-            self.a = nn.Parameter(torch.Tensor(atom_embedding_dim * num_heads, atom_embedding_dim, num_bond_types))  
-            nn.init.xavier_uniform_(self.a, gain=1.414)
+            if attention_rank is not None and attention_rank > 0:
+                # Low-rank: separate U, V per head per bond type stored flat
+                # U: [T, H, D, R], V: [T, H, D, R]
+                self.U = nn.Parameter(
+                    torch.empty(num_bond_types, num_heads, atom_embedding_dim, attention_rank)
+                )
+                self.V = nn.Parameter(
+                    torch.empty(num_bond_types, num_heads, atom_embedding_dim, attention_rank)
+                )
+                nn.init.xavier_uniform_(self.U.view(-1, atom_embedding_dim, attention_rank))
+                nn.init.xavier_uniform_(self.V.view(-1, atom_embedding_dim, attention_rank))
+            else:
+                # Bilinear parameter: [D*H, D, T]
+                self.a = nn.Parameter(torch.Tensor(atom_embedding_dim * num_heads, atom_embedding_dim, num_bond_types))
+                nn.init.xavier_uniform_(self.a, gain=1.414)
         else:
             # MLP attention: [T, H, MLP]
             self.mlps = nn.ModuleList([
@@ -357,12 +398,19 @@ class MultiHeadEdgeAttention_SerialBetweenBondtypes(nn.Module):
                 dst_t = dst_features[mask]  # [E_t, num_heads, d]
                 
                 if self.attention_type == 'bilinear':
-                    A_t = self.a[:, :, t]  # [d*num_heads, d]
-                    # Compute attention scores for all heads simultaneously
-                    # Reshape A_t for multi-head: [num_heads, d, d]
-                    A_t_multihead = A_t.view(self.num_heads, d, d)
-                    # Using einsum: 'ehi,hij,ehj -> eh'
-                    scores_t = torch.einsum('ehi,hij,ehj->eh', src_t, A_t_multihead, dst_t)  # [E_t, num_heads]
+                    if self.attention_rank is not None and self.attention_rank > 0:
+                        # Low-rank bilinear
+                        U_t = self.U[t]  # [H, D, R]
+                        V_t = self.V[t]  # [H, D, R]
+                        src_proj = torch.einsum('ehd,hdr->ehr', src_t, U_t)
+                        dst_proj = torch.einsum('ehd,hdr->ehr', dst_t, V_t)
+                        scores_t = (src_proj * dst_proj).sum(dim=-1)
+                    else:
+                        A_t = self.a[:, :, t]  # [d*num_heads, d]
+                        # Reshape A_t for multi-head: [num_heads, d, d]
+                        A_t_multihead = A_t.view(self.num_heads, d, d)
+                        # Using einsum: 'ehi,hij,ehj -> eh'
+                        scores_t = torch.einsum('ehi,hij,ehj->eh', src_t, A_t_multihead, dst_t)  # [E_t, num_heads]
                 else:
                     # MLP attention for each head
                     scores_t_list = []
