@@ -2,7 +2,7 @@
 # English Version with full_train option (all original outputs preserved)
 
 from atomprop.dataloader.dataloader import SMILESToInputs
-from atomprop.models.GNNs import Embedder, GNN, GNNAggr, MaskedMSELoss
+from atomprop.models.gnns import Embedder, GNNAggr, MaskedMSELoss
 from atomprop.utils.mlp import MLP
 import matplotlib.pyplot as plt
 import pandas as pd
@@ -19,9 +19,10 @@ import csv
 import os
 import json
 from datetime import datetime
-from atomprop.models.GeAT import GeATNet
+from atomprop.models.geat import GeATNet
 import configs.config_reg as cfg
 from atomprop.utils.utils import remove_module_prefix
+from atomprop.paths import FIGURES_DIR, ensure_output_dirs
 
 # Use MSE-based loss for regression tasks
 criterion = MaskedMSELoss()
@@ -393,7 +394,10 @@ def train(train_dataloader, val_dataloader, test_dataloader, model_components, o
                     plt.ylabel(f'Predicted {col}')
                     plt.title(f'{col}: Actual vs Predicted (RMSE: {test_rmse_per_task[j]:.4f}, R²: {test_r2_per_task[j]:.4f})')
                     plt.tight_layout()
-                    plt.savefig(f"trained_models/{logdir}/scatter_{col}_run{run_num}.png", dpi=150)
+                    ensure_output_dirs()
+                    scatter_dir = FIGURES_DIR / logdir
+                    scatter_dir.mkdir(parents=True, exist_ok=True)
+                    plt.savefig(scatter_dir / f"scatter_{col}_run{run_num}.png", dpi=150)
                     plt.close()
 
     print(f"Test MSE: {test_loss:.6f} | Test RMSE: {test_rmse:.6f} | Test R²: {test_r2:.6f}")

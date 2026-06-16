@@ -18,6 +18,8 @@ import sys
 import multiprocessing as mp
 from itertools import product
 
+from atomprop.paths import LOGS_DIR, PROJECT_ROOT
+
 # Parameter mapping: config index -> (geat_num_layers, aggr_num_layers)
 PARAM_DICT = {
     0: (3, 1),
@@ -31,7 +33,7 @@ PARAM_DICT = {
 }
 
 DATASETS = ["tox21", "toxcast"]
-LOG_DIR = "logs"
+LOG_DIR = str(LOGS_DIR)
 
 def run_task_on_gpu(args):
     """
@@ -93,6 +95,8 @@ def run_task_on_gpu(args):
             sys.stderr = original_stderr
 
 def main():
+    os.chdir(PROJECT_ROOT)
+    sys.path.insert(0, str(PROJECT_ROOT))
     # Build 16 tasks: 8 configs × 2 datasets
     tasks = []
     for idx in range(8):
@@ -113,7 +117,7 @@ def main():
     with mp.Pool(processes=16) as pool:
         pool.map(run_task_on_gpu, tasks)
 
-    print("All tasks finished. Check logs in './logs/'")
+    print(f"All tasks finished. Check logs in '{LOG_DIR}/'")
 
 if __name__ == "__main__":
     main()

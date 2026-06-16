@@ -17,8 +17,8 @@ if str(ATOMPROP_ROOT) not in sys.path:
 
 import configs.config_reg as cfg  # noqa: E402
 from atomprop.dataloader.dataloader import SMILESToInputs  # noqa: E402
-from atomprop.models.GNNs import Embedder, GNNAggr  # noqa: E402
-from atomprop.models.GeAT import GeATNet  # noqa: E402
+from atomprop.models.gnns import Embedder, GNNAggr  # noqa: E402
+from atomprop.models.geat import GeATNet  # noqa: E402
 from atomprop.utils.mlp import MLP  # noqa: E402
 
 

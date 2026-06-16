@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "atomprop"
+version = "0.1.0"
+description = "Molecular property prediction with GeAT pretraining"
+readme = "README.md"
+requires-python = ">=3.10"
+
+[project.scripts]
+atomprop-benchmark-joback = "atomprop.benchmarks.joback_boiling_point:main"
+atomprop-benchmark-benson = "atomprop.benchmarks.benson_formation_enthalpy:main"
+
+[tool.setuptools.packages.find]
+include = ["atomprop*"]

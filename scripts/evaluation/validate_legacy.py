@@ -1,6 +1,7 @@
 from atomprop.dataloader.dataloader import SMILESToInputs
-from atomprop.models.GNNs import Embedder, GNN, GNNAggr
+from atomprop.models.gnns import Embedder, GNN, GNNAggr
 from atomprop.utils.mlp import MLP
+from atomprop.paths import PREDICTIONS_DIR, ensure_output_dirs
 import pandas as pd
 import torch
 import numpy as np
@@ -147,7 +148,8 @@ if __name__ == "__main__":
         print(f"  {name}: AUC={auc:.4f}")
     print(f"Test ROC-AUC (mean over tasks with valid AUC): {mean_auc:.4f}")
 
-    output_csv_path = "test_preds_labels.csv"
+    ensure_output_dirs()
+    output_csv_path = str(PREDICTIONS_DIR / "validate_legacy_preds_labels.csv")
     with open(output_csv_path, mode='w', newline='') as csv_file:
         csv_writer = csv.writer(csv_file)
         csv_writer.writerow(y_cols)

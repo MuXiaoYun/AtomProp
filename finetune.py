@@ -1,5 +1,5 @@
 from atomprop.dataloader.dataloader import SMILESToInputs
-from atomprop.models.GNNs import Embedder, GNN, GNNAggr, MaskedBCELossWithLogits, MaskedFocalLoss
+from atomprop.models.gnns import Embedder, GNNAggr, MaskedBCELossWithLogits, MaskedFocalLoss
 from atomprop.utils.mlp import MLP
 import matplotlib.pyplot as plt
 import pandas as pd
@@ -18,7 +18,7 @@ import csv
 import os
 import json
 from datetime import datetime
-from atomprop.models.GeAT import GeATNet
+from atomprop.models.geat import GeATNet
 import configs.config_finetune as cfg
 from atomprop.utils.head import DownstreamHead
 from atomprop.utils.utils import remove_module_prefix

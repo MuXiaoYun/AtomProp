@@ -7,21 +7,7 @@ import torch.nn as nn
 import torch_geometric
 from torch_geometric.nn import MessagePassing
 import torch.nn.functional as F
-from atomprop.embeddings.AtomEmbedding import BondTypes, BondDirections, AtomChirals
-
-class MaskedRankLoss(nn.Module):
-    def __init__(self, ignore_index=-1):
-        super(MaskedRankLoss, self).__init__()
-        self.ignore_index = ignore_index
-        
-    def forward(self, pred, label):
-        mask = (label != self.ignore_index)
-        valid_labels = label[mask].float()
-        valid_preds = pred[mask]
-        positive_mask = (valid_labels == 1)
-        negative_mask = (valid_labels == 0)
-        score = torch.sigmoid(torch.mean(valid_preds[positive_mask]) - torch.mean(valid_labels[negative_mask]))
-        return score
+from atomprop.embeddings.atom_embedding import BondTypes, BondDirections, AtomChirals
 
 class MaskedBCELossWithLogits(nn.Module):
     def __init__(self, ignore_index=-1, reduction='mean'):
@@ -94,42 +80,7 @@ class MaskedFocalLoss(nn.Module):
             return focal_loss.sum()
         else:
             return focal_loss
-        
-class MaskedCrossEntropyLoss(nn.Module):
-    def __init__(self, ignore_index=-1, reduction='mean'):
-        super(MaskedCrossEntropyLoss, self).__init__()
-        self.ignore_index = ignore_index
-        self.reduction = reduction
-        
-    def forward(self, pred, label):
-        # Create mask for valid labels (non-ignore_index)
-        mask = (label != self.ignore_index)
-        
-        # If no valid labels, return zero loss
-        if mask.sum() == 0:
-            return torch.tensor(0.0, device=pred.device, requires_grad=True)
-        
-        # Flatten the tensors if needed (for handling multi-dimensional cases)
-        if pred.dim() > 2:
-            # For semantic segmentation or similar tasks
-            N, C = pred.shape[0], pred.shape[1]
-            pred = pred.permute(0, 2, 3, *range(4, pred.dim()), 1).contiguous()
-            pred = pred.view(-1, C)  # (N*H*W*..., C)
-            label = label.view(-1)   # (N*H*W*...)
-            mask = mask.view(-1)     # (N*H*W*...)
-        
-        # Get valid elements
-        valid_labels = label[mask].long()  # Convert to long for indexing
-        valid_preds = pred[mask] if pred.dim() > 1 else pred[mask].unsqueeze(-1)
-        
-        # Apply cross entropy loss
-        loss = F.cross_entropy(
-            valid_preds, 
-            valid_labels, 
-            reduction=self.reduction
-        )
-        return loss
-    
+
 class MaskedMSELoss(nn.Module):
     def __init__(self, ignore_index=-1, reduction='mean'):
         super(MaskedMSELoss, self).__init__()

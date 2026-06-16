@@ -5,8 +5,8 @@ Module for Graph Edge Attention Transformer (GeAT) for molecular property predic
 import torch  
 import torch.nn as nn  
 from atomprop.utils.mlp import MLP, MoE 
-from atomprop.embeddings.AtomEmbedding import BondTypes, BondDirections  
-from atomprop.models.EdgeAttention import EdgeAttention, MultiHeadEdgeAttention, GlobalEdgeAttn
+from atomprop.embeddings.atom_embedding import BondTypes, BondDirections  
+from atomprop.models.edge_attention import EdgeAttention, MultiHeadEdgeAttention, GlobalEdgeAttn
 import torch_geometric 
   
 class GeATLayer(nn.Module):

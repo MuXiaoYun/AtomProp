@@ -15,7 +15,7 @@ GeAT (Graph Edge Attention Transformer) is a novel graph neural network architec
 - **GeATLayer**: Uses multi-head edge attention parallel across bond types to aggregate information from neighboring atoms, explicitly modeling chemical bonds
 - **GeATNet**: Stacks multiple GeAT layers with residual connections and layer normalization for robust feature learning. Applies global multi-head self-attention within each graph to aggregate atomic-level representations into graph-level embeddings. Uses MoE (Mixture of Experts) as final output layer.
 
-See [atomprop/models/GeAT.py](atomprop/models/GeAT.py) for implementation details.
+See [atomprop/models/geat.py](atomprop/models/geat.py) for implementation details.
 
 ### Pretraining Tasks
 
@@ -35,9 +35,42 @@ See [atomprop/tasks/tasks.py](atomprop/tasks/tasks.py) for task implementations.
 ### Training Strategy
 
 - **Multi-Task Learning**: Simultaneously optimizes multiple pretraining tasks
-- **Uncertainty Weighting**: Automatically adjusts task weights based on task uncertainty (Supports other weighting stratergies as well)
+- **Uncertainty Weighting**: Automatically adjusts task weights based on task uncertainty (supports other weighting strategies as well)
 - **One-Cycle LR**: Uses One-CycleLR scheduler for efficient training
 - **Chunked Data Loading**: Supports large-scale datasets with memory-efficient chunking
+
+## Project Layout
+
+```
+AtomProp/
+├── atomprop/              # Core library
+│   ├── benchmarks/        # Classical baseline benchmarks
+│   ├── dataloader/        # SMILES → graph conversion and splitting
+│   ├── embeddings/        # Atom/bond lookup tables
+│   ├── models/            # GeAT, GNN, heads
+│   ├── tasks/             # Pretraining task definitions
+│   └── utils/             # Shared utilities
+├── configs/               # Training configuration modules
+├── outputs/               # Script outputs (gitignored)
+│   ├── benchmarks/
+│   ├── figures/
+│   ├── generated_data/
+│   ├── logs/
+│   └── predictions/
+├── scripts/               # Secondary CLI tools
+│   ├── benchmarks/
+│   ├── data/
+│   ├── evaluation/
+│   ├── experiments/
+│   ├── inference/
+│   ├── training/
+│   └── visualization/
+├── pretrain.py            # Main pretraining entry point
+├── finetune.py            # Classification fine-tuning
+└── finetune_regression.py # Regression fine-tuning
+```
+
+Run all commands from the repository root so `configs/` and `atomprop/` imports resolve correctly.
 
 ## Installation
 
@@ -48,6 +81,9 @@ conda activate atomprop
 
 # Or install with pip
 pip install -r requirements.txt
+
+# Optional: install the package in editable mode
+pip install -e .
 ```
 
 ## Quick Start
@@ -63,18 +99,47 @@ Configure training parameters in [configs/config.py](configs/config.py).
 ### Fine-tuning on Downstream Tasks
 
 ```bash
+# Classification (MoleculeNet-style)
 python finetune.py
+
+# Regression
+python finetune_regression.py
 ```
 
-Example: See [examples/molecule_mass/train.py](examples/molecule_mass/train.py) for a complete fine-tuning example.
+Configure parameters in [configs/config_finetune.py](configs/config_finetune.py) or [configs/config_reg.py](configs/config_reg.py).
+
+### Classical Baseline Benchmarks
+
+```bash
+# Joback boiling point benchmark (replaces contribute_feidian.py)
+python scripts/benchmarks/joback_boiling_point.py
+
+# Benson formation enthalpy benchmark (replaces contribute_lxqtsc.py)
+python scripts/benchmarks/benson_formation_enthalpy.py
+```
+
+Place property datasets under `data/properties/`:
+
+- `boiling_point.csv` (legacy: `data/data/沸点.csv`)
+- `ideal_gas_formation_enthalpy.csv` (legacy: `data/data/理想气体生成焓.csv`)
+
+Results are written to `outputs/benchmarks/`.
 
 ### Data Preprocessing
 
-Generate xyzs for SMILES file.
-
 ```bash
-python preprocess.py
+python scripts/data/preprocess.py
+python scripts/data/datawash.py <input_file>
+python scripts/data/generate_vapor_pressure.py
 ```
+
+### Web UI
+
+See [web_predict/README.md](web_predict/README.md) for the Django + Vue prediction/training interface.
+
+## Outputs
+
+Script-generated artifacts go under `outputs/` (figures, predictions, benchmark results, generated CSVs, experiment logs). Model checkpoints remain under `trained_models/` and TensorBoard logs under `runs/`.
 
 ## Citation
 

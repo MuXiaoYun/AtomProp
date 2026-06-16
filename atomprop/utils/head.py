@@ -7,7 +7,7 @@ import torch_geometric
 import torch.nn as nn
 import torch.nn.functional as F
 from atomprop.utils.mlp import MLP
-from atomprop.models.GeAT import GlobalAttnConv
+from atomprop.models.geat import GlobalAttnConv
 from typing import Optional
 
 class GatedPooling(nn.Module):

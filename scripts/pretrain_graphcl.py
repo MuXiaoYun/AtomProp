@@ -1,14 +1,13 @@
-from atomprop.tasks.tasks import NodeAttrPrediction, MaskedNodePrediction, GraphMaskContrast, BatchContrast, BondAnglePrediction, DihedralAnglePrediction, FunctionalGroupsPrediction, ScaffoldContrast
-from atomprop.dataloader.dataloader import SMILESToInputs, PyGChunkDataListLoader, xyzBatchLoader, xyzBatchLoaderContext
-from atomprop.models.GNNs import Embedder, GNN, GNNAggr
-from atomprop.models.GeAT import GeATNet
+from atomprop.tasks.tasks import NodeAttrPrediction, MaskedNodePrediction, GraphMaskContrast, BatchContrast, FunctionalGroupsPrediction, ScaffoldContrast
+from atomprop.dataloader.dataloader import SMILESToInputs, PyGChunkDataListLoader
+from atomprop.models.gnns import Embedder, GNN, GNNAggr
+from atomprop.models.geat import GeATNet
 from atomprop.utils.mlp import MLP
 from atomprop.utils.mask import MolGraphMask
-from atomprop.utils.groups import TripletGroup, QuadrupletGroup
 from atomprop.utils.features import FunctionalGroupUtils
-from atomprop.utils.weights import GradNorm, ParetoOpt, AdaptiveUncertaintyWeighting, FixedUncertaintyWeighting
+from atomprop.utils.weights import GradNorm, AdaptiveUncertaintyWeighting, FixedUncertaintyWeighting
 from atomprop.utils.scaffold import ScaffoldSimilarityMatrix
-from atomprop.embeddings.AtomEmbedding import BondTypes
+from atomprop.embeddings.atom_embedding import BondTypes
 from atomprop.utils.timer import TrainingTimer
 import matplotlib.pyplot as plt
 import pandas as pd

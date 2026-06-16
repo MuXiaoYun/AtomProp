@@ -10,8 +10,8 @@ from PyQt5.QtCore import *
 import configs.config_reg as cfg
 
 from atomprop.dataloader.dataloader import SMILESToInputs
-from atomprop.models.GNNs import Embedder, GNNAggr
-from atomprop.models.GeAT import GeATNet
+from atomprop.models.gnns import Embedder, GNNAggr
+from atomprop.models.geat import GeATNet
 from atomprop.utils.mlp import MLP
 
 from torch_geometric.data import Data, Batch

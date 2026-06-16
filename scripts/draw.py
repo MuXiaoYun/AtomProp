@@ -3,7 +3,8 @@ import numpy as np
 from scipy.ndimage import gaussian_filter1d
 import warnings
 
-# File path for the data
+from atomprop.paths import FIGURES_DIR, ensure_output_dirs
+
 filepath = "trained_models/finetune_0127_nopre_bace/test_predictions_nopretrain.csv"
 
 # Read file
@@ -173,7 +174,9 @@ plt.grid(True, alpha=0.3, linestyle='--')
 
 # Adjust layout and display
 plt.tight_layout()
-plt.savefig("smooth_density_curves.png", dpi=300, bbox_inches='tight')
+ensure_output_dirs()
+output_path = FIGURES_DIR / "smooth_density_curves.png"
+plt.savefig(output_path, dpi=300, bbox_inches='tight')
 
 # Print statistics
 print(f"\n=== Distribution Statistics ===")
@@ -185,7 +188,7 @@ print(f"Bin width: {bin_width:.4f}")
 print(f"Negative peak at value: {neg_max_bin:.4f}")
 print(f"Positive peak at value: {pos_max_bin:.4f}")
 print(f"Value range: [{data_min:.4f}, {data_max:.4f}]")
-print(f"Image saved as 'smooth_density_curves.png'")
+print(f"Image saved as '{output_path}'")
 
 # Calculate and print separation metrics
 peak_separation = abs(pos_max_bin - neg_max_bin)

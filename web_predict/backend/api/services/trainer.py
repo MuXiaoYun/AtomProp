@@ -22,14 +22,14 @@ if str(ATOMPROP_ROOT) not in sys.path:
 
 from atomprop.dataloader.dataloader import SMILESToInputs  # noqa: E402
 from atomprop.dataloader.splitter import ScaffoldSplitter  # noqa: E402
-from atomprop.models.GNNs import (  # noqa: E402
+from atomprop.models.gnns import (  # noqa: E402
     Embedder,
     GNNAggr,
     MaskedBCELossWithLogits,
     MaskedFocalLoss,
     MaskedMSELoss,
 )
-from atomprop.models.GeAT import GeATNet  # noqa: E402
+from atomprop.models.geat import GeATNet  # noqa: E402
 from atomprop.utils.mlp import MLP  # noqa: E402
 from atomprop.utils.utils import remove_module_prefix  # noqa: E402
 

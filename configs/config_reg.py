@@ -21,7 +21,7 @@ FFN_top_k = 2
 use_edge_embedding = False
 
 # Data settings
-data_path = "./data/data/理想气体生成焓.csv"
+data_path = "./data/properties/ideal_gas_formation_enthalpy.csv"
 x_col = "smiles"
 exclude_list = ["cpFullname","cpZhFullname","propZhFullname"] # columns that are not x or y
 

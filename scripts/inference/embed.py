@@ -5,8 +5,8 @@ import torch
 import torch.nn.functional as F
 from torch_geometric.data import Data
 from atomprop.dataloader.dataloader import SMILESToInputs
-from atomprop.models.GNNs import Embedder
-from atomprop.models.GeAT import GeATNet
+from atomprop.models.gnns import Embedder
+from atomprop.models.geat import GeATNet
 from atomprop.utils.utils import remove_module_prefix
 from sklearn.metrics.pairwise import cosine_similarity
 import numpy as np
