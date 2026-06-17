@@ -549,125 +549,154 @@ if __name__ == "__main__":
                 train_sample_count = 0
 
                 for batch_idx, (data_list, mols) in enumerate(train_loader):
-                    batch_data = Batch.from_data_list(data_list).to(device)
-                    
-                    for opt in optimizers.values():
-                        opt.zero_grad()
+                    # Use a stack for OOM retry: if a batch OOMs, split and retry halves
+                    pending = [(data_list, mols, True)]  # (data_list, mols, is_first_piece)
+                    sub_piece_count = 0
 
-                    atom_emb = embedding_layer(batch_data.x).squeeze()
-                    embedded_data = Data(x=atom_emb, edge_index=batch_data.edge_index, edge_attr=batch_data.edge_attr)
-                    graph_emb = backbone(embedded_data, batch=batch_data.batch)
-                    graph_emb = graph_emb.view(-1, graph_emb.size(-1))
+                    while pending:
+                        current_data, current_mols, is_first_piece = pending.pop()
+                        sub_piece_count += 1
 
-                    outputs = head0(graph_emb)
-                    outputs = outputs.view(-1, outputs.size(-1))
-                    task0.set_pred(outputs)
-                    task0.run_label(mols, device)
-                    loss_atom_attr_pred = task0.compute_loss()
-                    
-                    mask_indices = MolGraphMask.select_mask_indices(batch_data.x)
-                    masked_atom_emb = MolGraphMask.mask_atoms(atom_emb, mask_indices, torch.zeros(embed_dim))
-                    masked_embedded_data = Data(x=masked_atom_emb, edge_index=batch_data.edge_index, edge_attr=batch_data.edge_attr)
-                    graph_emb1 = backbone(masked_embedded_data, batch=batch_data.batch)
-                    graph_emb1_masked = graph_emb1.view(-1, graph_emb1.size(-1))[mask_indices]
-                    outputs1 = head1(graph_emb1_masked)
-                    outputs1 = outputs1.view(-1, outputs1.size(-1))
-                    task1.set_pred(outputs1)
-                    task1_labels = batch_data.x[:,0][mask_indices]
-                    task1.set_label(task1_labels)
-                    loss_masked_atom_type_pred = task1.compute_loss()
+                        try:
+                            batch_data = Batch.from_data_list(current_data).to(device)
 
-                    less_mask_indices = MolGraphMask.select_mask_indices(batch_data.x, mask_ratio=less_rate)
-                    less_masked_atom_emb = MolGraphMask.mask_atoms(atom_emb, less_mask_indices, torch.zeros(embed_dim))
-                    less_masked_embedded_data = Data(x=less_masked_atom_emb, edge_index=batch_data.edge_index, edge_attr=batch_data.edge_attr)
-                    less_graph_emb = backbone(less_masked_embedded_data, batch=batch_data.batch)
-                    less_graph_emb = less_graph_emb.view(-1, less_graph_emb.size(-1))
-                    less_outputs = aggrmodel(less_graph_emb, batch_data.batch)
+                            for opt in optimizers.values():
+                                opt.zero_grad()
 
-                    more_mask_indices = MolGraphMask.select_mask_indices(batch_data.x, mask_ratio=more_rate)
-                    more_masked_atom_emb = MolGraphMask.mask_atoms(atom_emb, more_mask_indices, torch.zeros(embed_dim))
-                    more_masked_embedded_data = Data(x=more_masked_atom_emb, edge_index=batch_data.edge_index, edge_attr=batch_data.edge_attr)
-                    more_graph_emb = backbone(more_masked_embedded_data, batch=batch_data.batch)
-                    more_graph_emb = more_graph_emb.view(-1, more_graph_emb.size(-1))
-                    more_outputs = aggrmodel(more_graph_emb, batch_data.batch)
+                            atom_emb = embedding_layer(batch_data.x).squeeze()
+                            embedded_data = Data(x=atom_emb, edge_index=batch_data.edge_index, edge_attr=batch_data.edge_attr)
+                            graph_emb = backbone(embedded_data, batch=batch_data.batch)
+                            graph_emb = graph_emb.view(-1, graph_emb.size(-1))
 
-                    anchor_outputs = aggrmodel(graph_emb, batch_data.batch)
-                    task2.set_embeddings(anchor_outputs, less_outputs, more_outputs)
-                    loss_triplet_contrast = task2.compute_loss()
+                            outputs = head0(graph_emb)
+                            outputs = outputs.view(-1, outputs.size(-1))
+                            task0.set_pred(outputs)
+                            task0.run_label(current_mols, device)
+                            loss_atom_attr_pred = task0.compute_loss()
 
-                    outputs1_for_contrast = aggrmodel(graph_emb1, batch_data.batch)
-                    task3.set_embeddings(anchor_outputs, outputs1_for_contrast)
-                    loss_batch_contrast = task3.compute_loss()
+                            mask_indices = MolGraphMask.select_mask_indices(batch_data.x)
+                            masked_atom_emb = MolGraphMask.mask_atoms(atom_emb, mask_indices, torch.zeros(embed_dim))
+                            masked_embedded_data = Data(x=masked_atom_emb, edge_index=batch_data.edge_index, edge_attr=batch_data.edge_attr)
+                            graph_emb1 = backbone(masked_embedded_data, batch=batch_data.batch)
+                            graph_emb1_masked = graph_emb1.view(-1, graph_emb1.size(-1))[mask_indices]
+                            outputs1 = head1(graph_emb1_masked)
+                            outputs1 = outputs1.view(-1, outputs1.size(-1))
+                            task1.set_pred(outputs1)
+                            task1_labels = batch_data.x[:,0][mask_indices]
+                            task1.set_label(task1_labels)
+                            loss_masked_atom_type_pred = task1.compute_loss()
 
-                    outputs1_fg = head4(anchor_outputs)
-                    fg_labels = FunctionalGroupUtils.batch_detect_with_rdkit_fg(mols, fg_list).to(device)
-                    task6.set_pred(outputs1_fg)
-                    task6.set_label(fg_labels)
-                    loss_functional_group_pred = task6.compute_loss()
-                    
-                    scaffold_groups = scaffold_calculator.get_scaffold_groups(mol_list=mols)
-                    task7.set_embeddings(anchor_outputs)
-                    task7.set_group_label(scaffold_groups)
-                    loss_scaffold_contrast = task7.compute_loss()
+                            less_mask_indices = MolGraphMask.select_mask_indices(batch_data.x, mask_ratio=less_rate)
+                            less_masked_atom_emb = MolGraphMask.mask_atoms(atom_emb, less_mask_indices, torch.zeros(embed_dim))
+                            less_masked_embedded_data = Data(x=less_masked_atom_emb, edge_index=batch_data.edge_index, edge_attr=batch_data.edge_attr)
+                            less_graph_emb = backbone(less_masked_embedded_data, batch=batch_data.batch)
+                            less_graph_emb = less_graph_emb.view(-1, less_graph_emb.size(-1))
+                            less_outputs = aggrmodel(less_graph_emb, batch_data.batch)
 
-                    losses = [loss_atom_attr_pred, loss_masked_atom_type_pred, loss_triplet_contrast, loss_batch_contrast, loss_functional_group_pred, loss_scaffold_contrast]
-                    loss = weight_strategy(losses) if weight_type != "GRADNORM" else weight_strategy(losses, list(embedding_layer.module.parameters())+list(backbone.module.parameters()))
-                    
-                    # backward and step
-                    if weight_type == "GRADNORM":
-                        loss, gn_loss, _ = loss
-                        loss.backward(retain_graph=True)
-                        gn_loss.backward()
-                    else:
-                        loss.backward()
-                              
-                    for opt in optimizers.values():
-                        opt.step()
-                        
-                    for name, scheduler in schedulers.items():
-                        scheduler.step()
-                    
-                    # Log layer-wise learning rates for backbone if using layer decay
-                    if cfg.use_layer_decay and cfg.layer_decay_rate > 0 and (batch_idx == 0 or (batch_idx + 1) % record_freq == 0):
-                        for param_group in optimizers["backbone"].param_groups:
-                            if 'name' in param_group:
+                            more_mask_indices = MolGraphMask.select_mask_indices(batch_data.x, mask_ratio=more_rate)
+                            more_masked_atom_emb = MolGraphMask.mask_atoms(atom_emb, more_mask_indices, torch.zeros(embed_dim))
+                            more_masked_embedded_data = Data(x=more_masked_atom_emb, edge_index=batch_data.edge_index, edge_attr=batch_data.edge_attr)
+                            more_graph_emb = backbone(more_masked_embedded_data, batch=batch_data.batch)
+                            more_graph_emb = more_graph_emb.view(-1, more_graph_emb.size(-1))
+                            more_outputs = aggrmodel(more_graph_emb, batch_data.batch)
+
+                            anchor_outputs = aggrmodel(graph_emb, batch_data.batch)
+                            task2.set_embeddings(anchor_outputs, less_outputs, more_outputs)
+                            loss_triplet_contrast = task2.compute_loss()
+
+                            outputs1_for_contrast = aggrmodel(graph_emb1, batch_data.batch)
+                            task3.set_embeddings(anchor_outputs, outputs1_for_contrast)
+                            loss_batch_contrast = task3.compute_loss()
+
+                            outputs1_fg = head4(anchor_outputs)
+                            fg_labels = FunctionalGroupUtils.batch_detect_with_rdkit_fg(current_mols, fg_list).to(device)
+                            task6.set_pred(outputs1_fg)
+                            task6.set_label(fg_labels)
+                            loss_functional_group_pred = task6.compute_loss()
+
+                            scaffold_groups = scaffold_calculator.get_scaffold_groups(mol_list=current_mols)
+                            task7.set_embeddings(anchor_outputs)
+                            task7.set_group_label(scaffold_groups)
+                            loss_scaffold_contrast = task7.compute_loss()
+
+                            losses = [loss_atom_attr_pred, loss_masked_atom_type_pred, loss_triplet_contrast, loss_batch_contrast, loss_functional_group_pred, loss_scaffold_contrast]
+                            loss = weight_strategy(losses) if weight_type != "GRADNORM" else weight_strategy(losses, list(embedding_layer.module.parameters())+list(backbone.module.parameters()))
+
+                            # backward and step
+                            if weight_type == "GRADNORM":
+                                loss, gn_loss, _ = loss
+                                loss.backward(retain_graph=True)
+                                gn_loss.backward()
+                            else:
+                                loss.backward()
+
+                            for opt in optimizers.values():
+                                opt.step()
+
+                            for name, scheduler in schedulers.items():
+                                scheduler.step()
+
+                            # Logging: only for the first piece of each original batch
+                            if is_first_piece:
+                                # Log layer-wise learning rates for backbone if using layer decay
+                                if cfg.use_layer_decay and cfg.layer_decay_rate > 0 and (batch_idx == 0 or (batch_idx + 1) % record_freq == 0):
+                                    for param_group in optimizers["backbone"].param_groups:
+                                        if 'name' in param_group:
+                                            if rank is None or rank == 0:
+                                                writer.add_scalar(f'LR/backbone_{param_group["name"]}', param_group['lr'], epoch * train_loader.total_batches + batch_idx)
+
+                                if batch_idx == 0 or (batch_idx + 1) % record_freq == 0:
+                                    if rank is None or rank == 0:
+                                        writer.add_scalar('Train/Loss_total', loss.item(), epoch * train_loader.total_batches + batch_idx)
+                                        writer.add_scalar('Train/Loss_atom_attr', loss_atom_attr_pred.item(), epoch * train_loader.total_batches + batch_idx)
+                                        writer.add_scalar('Train/Loss_masked_atom', loss_masked_atom_type_pred.item(), epoch * train_loader.total_batches + batch_idx)
+                                        writer.add_scalar('Train/Loss_triplet', loss_triplet_contrast.item(), epoch * train_loader.total_batches + batch_idx)
+                                        writer.add_scalar('Train/Loss_batch_contrast', loss_batch_contrast.item(), epoch * train_loader.total_batches + batch_idx)
+                                        writer.add_scalar('Train/Loss_functional_group', loss_functional_group_pred.item(), epoch * train_loader.total_batches + batch_idx)
+                                        writer.add_scalar('Train/Loss_scaffold_contrast', loss_scaffold_contrast.item(), epoch * train_loader.total_batches + batch_idx)
+                                        # Log weights
+                                        try:
+                                            for i in range(len(tasks)):
+                                                if weight_type == "GRADNORM":
+                                                    item_name = "Uncertainty"
+                                                    item = weight_strategy.module.task_weights[i].item()
+                                                elif weight_type == "UW":
+                                                    item_name = "TaskWeight"
+                                                    item = weight_strategy.module.log_vars[i].item()
+                                                writer.add_scalar(f'Weight/{item_name}{i}', item, epoch * train_loader.total_batches + batch_idx)
+                                        except Exception as e:
+                                            print("TRAINING ERROR!")
+                                            raise ValueError(e)
+
+                                if batch_idx == train_loader.total_batches - 1 and len(pending) == 0:
+                                    if rank is None or rank == 0:
+                                        metrics = {f"metrics_{i}": tasks[i].get_metrics() for i in range(len(tasks))}
+                                        print(f"Batch {batch_idx+1}/{train_loader.total_batches} Metrics: {metrics}")
+
+                            batch_size_current = len(current_mols)
+                            total_train_loss += loss.item() * batch_size_current
+                            train_sample_count += batch_size_current
+
+                            # Print batch progress (only on rank 0, only for the last piece)
+                            if len(pending) == 0:
+                                print_batch_progress(rank, epoch, batch_idx, train_loader.total_batches, loss.item(), timer, "Training")
+
+                                # Report OOM recovery if sub-batches were used
+                                if sub_piece_count > 1:
+                                    if rank is None or rank == 0:
+                                        print(f"  [OOM Recovery] Batch {batch_idx+1} processed in {sub_piece_count} sub-pieces")
+
+                        except RuntimeError as e:
+                            if "out of memory" in str(e) and len(current_data) > 1:
+                                torch.cuda.empty_cache()
+                                mid = len(current_data) // 2
                                 if rank is None or rank == 0:
-                                    writer.add_scalar(f'LR/backbone_{param_group["name"]}', param_group['lr'], epoch * train_loader.total_batches + batch_idx)
-                    
-                    if batch_idx == 0 or (batch_idx + 1) % record_freq == 0:
-                        if rank is None or rank == 0:
-                            writer.add_scalar('Train/Loss_total', loss.item(), epoch * train_loader.total_batches + batch_idx)
-                            writer.add_scalar('Train/Loss_atom_attr', loss_atom_attr_pred.item(), epoch * train_loader.total_batches + batch_idx)
-                            writer.add_scalar('Train/Loss_masked_atom', loss_masked_atom_type_pred.item(), epoch * train_loader.total_batches + batch_idx)
-                            writer.add_scalar('Train/Loss_triplet', loss_triplet_contrast.item(), epoch * train_loader.total_batches + batch_idx)
-                            writer.add_scalar('Train/Loss_batch_contrast', loss_batch_contrast.item(), epoch * train_loader.total_batches + batch_idx)
-                            writer.add_scalar('Train/Loss_functional_group', loss_functional_group_pred.item(), epoch * train_loader.total_batches + batch_idx)
-                            writer.add_scalar('Train/Loss_scaffold_contrast', loss_scaffold_contrast.item(), epoch * train_loader.total_batches + batch_idx)
-                            # Log weights
-                            try:
-                                for i in range(len(tasks)):
-                                    if weight_type == "GRADNORM":
-                                        item_name = "Uncertainty"
-                                        item = weight_strategy.module.task_weights[i].item()
-                                    elif weight_type == "UW":
-                                        item_name = "TaskWeight"
-                                        item = weight_strategy.module.log_vars[i].item()
-                                    writer.add_scalar(f'Weight/{item_name}{i}', item, epoch * train_loader.total_batches + batch_idx)
-                            except Exception as e:
-                                print("TRAINING ERROR!")
-                                raise ValueError(e)      
-                    
-                    if batch_idx == train_loader.total_batches - 1:
-                        if rank is None or rank == 0:
-                            metrics = {f"metrics_{i}": tasks[i].get_metrics() for i in range(len(tasks))}
-                            print(f"Batch {batch_idx+1}/{train_loader.total_batches} Metrics: {metrics}")
-                    
-                    batch_size_current = len(mols)
-                    total_train_loss += loss.item() * batch_size_current
-                    train_sample_count += batch_size_current
-                    
-                    # Print batch progress (only on rank 0)
-                    print_batch_progress(rank, epoch, batch_idx, train_loader.total_batches, loss.item(), timer, "Training")
+                                    print(f"[OOM Recovery] Batch size {len(current_data)} OOM, retrying with {mid}...")
+                                # Push second half first, then first half (LIFO stack)
+                                pending.append((current_data[mid:], current_mols[mid:], False))
+                                pending.append((current_data[:mid], current_mols[:mid], is_first_piece and len(pending) == 0))
+                            else:
+                                raise
                 
                 avg_train_loss = total_train_loss / train_sample_count
                 train_losses.append(avg_train_loss)
