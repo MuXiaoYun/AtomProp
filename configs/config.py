@@ -109,3 +109,18 @@ def print_all_params():
     for key, val in sorted(attrs.items()):
         print(f"{key} = {repr(val)}")
     print("================================")
+
+
+# Auto-load local overrides (config_local.py) if it exists
+import os as _os
+_local_file = __file__.replace('.py', '_local.py')
+if _os.path.exists(_local_file):
+    import importlib.util as _importlib_util
+    _spec = _importlib_util.spec_from_file_location("_config_local", _local_file)
+    _local_mod = _importlib_util.module_from_spec(_spec)
+    _spec.loader.exec_module(_local_mod)
+    _current_mod = sys.modules[__name__]
+    for _attr in dir(_local_mod):
+        if not _attr.startswith('_'):
+            setattr(_current_mod, _attr, getattr(_local_mod, _attr))
+    print(f"[CONFIG] Loaded local overrides from {_local_file}")
