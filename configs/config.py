@@ -12,7 +12,9 @@ from_model_path = "trained_models/pretrain_final/model_epoch7.pth" # if not from
 data_path = "data/zinc15/dataset/zinc_standard_agent/processed/smiles.csv"
 # data_path = "data/pubchem/pubchem-10m.txt.clean"
 pretrain_file_type = 'txt'
-shuffle = False
+# Shuffle mode: "none" = sequential, "chunk" = shuffle chunks + within chunk (I/O efficient),
+#               "full" = full random permutation (slow random disk access)
+shuffle = "chunk"
 random_state = 42
 
 logdir = "pretrain"
@@ -58,6 +60,7 @@ fixed_log_vars = torch.tensor([-3.2157, 0.5324, -0.4459, -0.6287, -1.8934, 2.738
 num_epochs = 8
 weight_type = "UW"
 record_freq = 100
+skip_batch = 0  # skip the first N batches (set >0 to resume after OOM crash)
 
 # Masking rates
 less_rate = 0.1
