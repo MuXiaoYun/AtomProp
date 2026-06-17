@@ -57,7 +57,7 @@ fix_uncertainty = False
 fixed_log_vars = torch.tensor([-3.2157, 0.5324, -0.4459, -0.6287, -1.8934, 2.7381], dtype=torch.float32)
 
 # Training settings
-num_epochs = 8
+num_epochs = 20
 weight_type = "UW"
 record_freq = 100
 skip_batch = 0  # skip the first N batches (set >0 to resume after OOM crash)
