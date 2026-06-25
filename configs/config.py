@@ -7,6 +7,7 @@ import torch
 # Training
 from_scratch = True
 from_model_path = "trained_models/pretrain_final/model_epoch7.pth" # if not from_scratch
+trained_epochs = 0  # set to N to resume from epoch N (loads model_latest.pth automatically)
 
 # Dataset and I/O
 data_path = "data/zinc15/dataset/zinc_standard_agent/processed/smiles.csv"
@@ -27,6 +28,7 @@ global_num_heads = 16
 output_negative_slope = 0.2
 geat_dropout = 0.1
 head_dropout = 0.3
+use_gradient_checkpointing = True  # recompute activations in backward instead of storing (saves ~60% GPU memory)
 
 FFN_type = "MLP"
 FFN_num_layers = 2
@@ -50,6 +52,7 @@ attention_rank = 64
 dataset_size = -1
 chunk_size = 65536
 max_atom_num = 128
+cuda_memory_fraction = 0.95  # fraction of GPU memory PyTorch can use (1.0 = all; <1.0 prevents UVM swap crashes)
 batch_size = 128
 
 # Weight settings

@@ -78,6 +78,24 @@ head1 = MLP(input_dim=embed_dim, hidden_dim=128, output_dim=120, num_layers=2, d
 head4 = MLP(input_dim=embed_dim, hidden_dim=128, output_dim=len(fg_list), num_layers=2, dropout=cfg.head_dropout) # used for functional group prediction
 aggrmodel = GNNAggr(embed_dim=embed_dim, aggr='mean')
 
+
+def _backbone_forward(backbone_module, x, edge_index, edge_attr, batch):
+    """Thin wrapper for gradient checkpointing: unpacks tensors → Data → backbone."""
+    data = Data(x=x, edge_index=edge_index, edge_attr=edge_attr)
+    return backbone_module(data, batch=batch)
+
+
+def _run_backbone(backbone_module, x, edge_index, edge_attr, batch):
+    """Run backbone with optional gradient checkpointing to save GPU memory."""
+    if cfg.use_gradient_checkpointing:
+        return torch.utils.checkpoint.checkpoint(
+            _backbone_forward, backbone_module, x, edge_index, edge_attr, batch,
+            use_reentrant=False
+        )
+    else:
+        return _backbone_forward(backbone_module, x, edge_index, edge_attr, batch)
+
+
 if cfg.from_scratch == False:
     # load weights
     ckpt = torch.load(cfg.from_model_path, weights_only=False)
@@ -100,7 +118,7 @@ task_types = ["regression", "classification", "regression", "classification", "c
 weight_strategy = None
 if weight_type == "UW":
     if cfg.fix_uncertainty == True:
-        weight_strategy = FixedUncertaintyWeighting(num_tasks=len(tasks))
+        weight_strategy = FixedUncertaintyWeighting(num_tasks=len(tasks), fixed_log_vars=cfg.fixed_log_vars)
     else:
         weight_strategy = AdaptiveUncertaintyWeighting(num_tasks=len(tasks), task_types=task_types)
 elif weight_type == "GRADNORM":
@@ -128,24 +146,26 @@ def get_dataset_info(data_path):
     sample_chunk = pd.read_csv(data_path, nrows=10)
     return total_rows, sample_chunk.columns.tolist()
 
-def create_data_splits(total_size):
+def create_data_splits(total_size, epoch=0):
     indices = np.arange(total_size)
     shuffle_mode = cfg.shuffle
+    seed = cfg.random_state + epoch
 
     if shuffle_mode == "full":
         # Full random permutation — breaks chunk locality, random I/O
-        indices = np.random.permutation(indices)
+        indices = np.random.RandomState(seed).permutation(indices)
     elif shuffle_mode == "chunk":
         # Chunk-level shuffle — shuffle chunk order + shuffle within each chunk.
         # Maintains chunk-locality for efficient sequential disk reads.
+        rng = np.random.RandomState(seed)
         num_chunks = (total_size + chunk_size - 1) // chunk_size
-        chunk_order = np.random.permutation(num_chunks)
+        chunk_order = rng.permutation(num_chunks)
         shuffled = []
         for c in chunk_order:
             start = c * chunk_size
             end = min(start + chunk_size, total_size)
             chunk = indices[start:end].copy()
-            np.random.shuffle(chunk)
+            rng.shuffle(chunk)
             shuffled.append(chunk)
         indices = np.concatenate(shuffled)
     # else "none" / False: keep sequential order
@@ -299,6 +319,14 @@ def print_epoch_end(rank, epoch, avg_loss, timer: TrainingTimer, stage="Training
         print(f"{'='*70}\n")
 
 if __name__ == "__main__":
+    # Check for recommended CUDA allocator settings (reduces fragmentation OOM)
+    if "PYTORCH_CUDA_ALLOC_CONF" not in os.environ:
+        print("=" * 60)
+        print("[WARNING] PYTORCH_CUDA_ALLOC_CONF is not set.")
+        print("  CUDA memory fragmentation may cause OOM after long training.")
+        print("  Recommended: export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True")
+        print("=" * 60)
+
     # Initialize distributed training
     rank, world_size, local_rank = setup_distributed()
     
@@ -325,14 +353,15 @@ if __name__ == "__main__":
     
     if dataset_size > 0:
         total_rows = min(total_rows, dataset_size)
-    
-    train_indices, val_indices, test_indices = create_data_splits(total_rows)
-    
+
     if rank is None or rank == 0:
-        print(f"Train set size: {len(train_indices)}, Val set size: {len(val_indices)}, Test set size: {len(test_indices)}")
         print(f"Using computing device: cuda:{local_rank if rank is not None else 0}")
-    
-    device = torch.device(f"cuda:{local_rank}" if rank is not None else "cuda" if torch.cuda.is_available() else "cpu")    
+
+    device = torch.device(f"cuda:{local_rank}" if rank is not None else "cuda" if torch.cuda.is_available() else "cpu")
+
+    # Prevent CUDA UVM oversubscription: limit PyTorch to cuda_memory_fraction of GPU memory
+    if torch.cuda.is_available() and cfg.cuda_memory_fraction < 1.0:
+        torch.cuda.set_per_process_memory_fraction(cfg.cuda_memory_fraction, device)
 
     with nullcontext():
         scaffold_calculator = ScaffoldSimilarityMatrix()
@@ -344,7 +373,7 @@ if __name__ == "__main__":
         head4.to(device)
         weight_strategy.to(device)
         backbone.print_params()
-        
+
         if rank is not None and world_size > 1:
             embedding_layer = DDP(embedding_layer, device_ids=[local_rank], output_device=local_rank, find_unused_parameters=True)
             backbone = DDP(backbone, device_ids=[local_rank], output_device=local_rank, find_unused_parameters=True)
@@ -360,25 +389,27 @@ if __name__ == "__main__":
             print(f"{head0.__class__.__name__} Parameters: {sum(p.numel() for p in head0.parameters() if p.requires_grad)}")
             print(f"{head1.__class__.__name__} Parameters: {sum(p.numel() for p in head1.parameters() if p.requires_grad)}")
             print(f"{head4.__class__.__name__} Parameters: {sum(p.numel() for p in head4.parameters() if p.requires_grad)}")
-        
-        train_sampler = DistributedSampler(train_indices, num_replicas=world_size, rank=rank, shuffle=False) if rank is not None else None
-        val_sampler = DistributedSampler(val_indices, num_replicas=world_size, rank=rank, shuffle=False) if rank is not None else None
-        
+
+        # ---- Create dataloaders (split_indices rebuilt each epoch) ----
+        _train_indices_init, _val_indices_init, _ = create_data_splits(total_rows, epoch=0)
+        if rank is None or rank == 0:
+            print(f"Train set size: {len(_train_indices_init)}, Val set size: {len(_val_indices_init)}")
+
         train_loader = PyGChunkDataListLoader(
             data_path=data_path,
-            split_indices=train_indices,
+            split_indices=_train_indices_init,
             chunk_size=chunk_size,
             batch_size=batch_size,
             file_type=pretrain_file_type,
-            sampler=train_sampler
+            sampler=None  # set per epoch
         )
         val_loader = PyGChunkDataListLoader(
             data_path=data_path,
-            split_indices=val_indices,
+            split_indices=_val_indices_init,
             chunk_size=chunk_size,
             batch_size=batch_size,
             file_type=pretrain_file_type,
-            sampler=val_sampler
+            sampler=None
         )
             
         components = {
@@ -419,11 +450,15 @@ if __name__ == "__main__":
                 "cls": torch.optim.Adam,
                 "kwargs": {"lr": cfg.head_lr, "weight_decay": cfg.head_wd}
             },
-            "weight_strategy": {
+        }
+
+        # FixedUncertaintyWeighting has no trainable parameters (uses buffer),
+        # so skip its optimizer to avoid empty-param error.
+        if not (weight_type == "UW" and cfg.fix_uncertainty):
+            optimizer_configs["weight_strategy"] = {
                 "cls": torch.optim.Adam,
                 "kwargs": {"lr": cfg.weight_strategy_lr, "weight_decay": cfg.weight_strategy_wd}
             }
-        }
 
         # Get layer-wise parameter groups for GeATNet if layer decay is enabled
         if cfg.use_layer_decay and cfg.layer_decay_rate > 0:
@@ -505,14 +540,17 @@ if __name__ == "__main__":
                     "eta_min": cfg.head_eta_min
                 }
             },
-            "weight_strategy": {
+        }
+
+        # FixedUncertaintyWeighting has no trainable parameters, skip its scheduler.
+        if not (weight_type == "UW" and cfg.fix_uncertainty):
+            scheduler_configs["weight_strategy"] = {
                 "cls": torch.optim.lr_scheduler.CosineAnnealingLR,
                 "kwargs": {
                     "T_max": train_loader.total_batches * num_epochs,
                     "eta_min": cfg.weight_strategy_eta_min
                 }
-            },
-        }
+            }
 
         optimizers = {}
         schedulers = {}
@@ -520,7 +558,9 @@ if __name__ == "__main__":
         for name, module in components.items():
             opt_conf = optimizer_configs.get(name)
             if opt_conf is None:
-                raise ValueError(f"Missing optimizer configuration for component '{name}'")
+                if rank is None or rank == 0:
+                    print(f"  No optimizer configured for '{name}' (no trainable parameters), skipping.")
+                continue
 
             opt_cls = opt_conf.get("cls")
             opt_kwargs = opt_conf.get("kwargs", {})
@@ -538,39 +578,121 @@ if __name__ == "__main__":
                 sched_cls = sched_conf.get("cls")
                 sched_kwargs = sched_conf.get("kwargs", {})
                 schedulers[name] = sched_cls(optimizers[name], **sched_kwargs)
-        
-        best_val_loss = float('inf')
-        train_losses = []
-        val_losses = []
+
+        # ---- Resume from checkpoint if trained_epochs > 0 ----
+        if cfg.trained_epochs > 0:
+            _resume_path = f"trained_models/{logdir}/model_latest.pth"
+            if rank is None or rank == 0:
+                print(f"[Resume] Loading checkpoint from {_resume_path}")
+            ckpt = torch.load(_resume_path, weights_only=False, map_location=device)
+
+            embedding_layer.load_state_dict(ckpt['embedding_layer_state_dict'])
+            backbone.load_state_dict(ckpt['backbone_state_dict'])
+            head0.load_state_dict(ckpt['head0_state_dict'])
+            head1.load_state_dict(ckpt['head1_state_dict'])
+            head4.load_state_dict(ckpt['head4_state_dict'])
+
+            # Restore weight_strategy (uncertainty weights / log_vars)
+            if 'weight_strategy_state_dict' in ckpt:
+                weight_strategy.load_state_dict(ckpt['weight_strategy_state_dict'])
+                if rank is None or rank == 0:
+                    _ws = weight_strategy.module if hasattr(weight_strategy, 'module') else weight_strategy
+                    _lv = _ws.log_vars if hasattr(_ws, 'log_vars') else _ws.task_weights
+                    print(f"[Resume] weight_strategy restored from checkpoint: {_lv.data}")
+            else:
+                # Old checkpoint without weight_strategy state → fall back to cfg.fixed_log_vars
+                _ws = weight_strategy.module if hasattr(weight_strategy, 'module') else weight_strategy
+                with torch.no_grad():
+                    if hasattr(_ws, 'log_vars'):
+                        _ws.log_vars.copy_(cfg.fixed_log_vars.to(_ws.log_vars.device))
+                        if rank is None or rank == 0:
+                            print(f"[Resume] weight_strategy NOT in checkpoint — using cfg.fixed_log_vars: {cfg.fixed_log_vars}")
+                    elif hasattr(_ws, 'task_weights'):
+                        _ws.task_weights.copy_(torch.exp(-cfg.fixed_log_vars).to(_ws.task_weights.device))
+                        if rank is None or rank == 0:
+                            print(f"[Resume] weight_strategy (GradNorm) NOT in checkpoint — using exp(-fixed_log_vars): {torch.exp(-cfg.fixed_log_vars)}")
+                # Reset weight_strategy optimizer state (stale momentum/variance from old params)
+                if 'weight_strategy' in optimizers:
+                    optimizers['weight_strategy'].state.clear()
+                    if rank is None or rank == 0:
+                        print(f"[Resume] Cleared stale optimizer state for weight_strategy")
+
+            for name, opt in optimizers.items():
+                if name in ckpt.get('optimizer_state_dict', {}):
+                    opt.load_state_dict(ckpt['optimizer_state_dict'][name])
+
+            for name, sch in schedulers.items():
+                if name in ckpt.get('scheduler_state_dict', {}):
+                    sch.load_state_dict(ckpt['scheduler_state_dict'][name])
+
+            start_epoch = cfg.trained_epochs
+            best_val_loss = ckpt.get('best_val_loss', float('inf'))
+            train_losses = ckpt.get('train_losses', [])
+            val_losses = ckpt.get('val_losses', [])
+            if rank is None or rank == 0:
+                print(f"[Resume] Previously trained: {ckpt['epoch']+1} epochs, resuming from epoch {start_epoch}/{num_epochs}")
+                print(f"[Resume] best_val_loss = {best_val_loss:.6f}, LR scheduler & optimizer restored")
+        else:
+            start_epoch = 0
+            best_val_loss = float('inf')
+            train_losses = []
+            val_losses = []
+
         eps = 1e-8
-        
+
         # Only create timer for rank 0
         if rank is None or rank == 0:
             timer = TrainingTimer()
         else:
             timer = None
-        
-        for epoch in range(num_epochs):
-            # Training loop
-            if train_sampler is not None:
+
+        for epoch in range(start_epoch, num_epochs):
+            # ---- Per-epoch reshuffle: different seed each epoch ----
+            _train_idx, _val_idx, _ = create_data_splits(total_rows, epoch=epoch)
+            train_loader.split_indices = _train_idx
+            val_loader.split_indices = _val_idx
+            train_loader._base_indices = list(range(len(_train_idx)))
+            val_loader._base_indices = list(range(len(_val_idx)))
+
+            if rank is not None and world_size > 1:
+                train_sampler = DistributedSampler(_train_idx, num_replicas=world_size, rank=rank, shuffle=False)
+                val_sampler = DistributedSampler(_val_idx, num_replicas=world_size, rank=rank, shuffle=False)
                 train_sampler.set_epoch(epoch)
-            
+                val_sampler.set_epoch(epoch)
+                train_loader.sampler = train_sampler
+                val_loader.sampler = val_sampler
+            else:
+                train_sampler = None
+                val_sampler = None
+
+            # ---- Reset CUDA state at epoch start ----
+            # Defragment GPU memory before the first forward pass of this epoch.
+            # Reduces the chance of false OOM on the first batch after validation.
+            if torch.cuda.is_available():
+                try:
+                    torch.cuda.synchronize()
+                except RuntimeError:
+                    pass  # swallow pending errors; will be caught in forward
+                torch.cuda.empty_cache()
+
             try:
                 # Print epoch start information
                 print_epoch_start(rank, epoch, num_epochs, timer, "Training")
-                
+
                 embedding_layer.train()
                 backbone.train()
                 head0.train()
                 head1.train()
+                head4.train()
+                weight_strategy.train()
                 total_train_loss = 0.0
                 train_sample_count = 0
 
                 for batch_idx, (data_list, mols) in enumerate(train_loader):
-                    # Skip first N batches if configured (e.g. resume after OOM crash)
+                    # Debug-only: manually skip first N batches
                     if batch_idx < cfg.skip_batch:
                         if batch_idx == 0 and (rank is None or rank == 0):
-                            print(f"[Skip] cfg.skip_batch={cfg.skip_batch}, skipping first {cfg.skip_batch} batches")
+                            print(f"[Debug Skip] cfg.skip_batch={cfg.skip_batch}, skipping first {cfg.skip_batch} batches")
                         continue
 
                     # Stack-based OOM recovery: each item = (data_list, mols).
@@ -584,9 +706,12 @@ if __name__ == "__main__":
                         current_data, current_mols = pending.pop()
                         piece_skipped = False
 
-                        # ---- Forward + Loss + Backward + Step, all inside OOM retry ----
+                        # ---- Retry loop: forward → sync → backward ----
                         while True:
+                            # ====== PHASE 1: Forward + Loss ======
+                            # DDP-safe to recover here: no gradient all-reduce has started yet
                             oom_flag_local = False
+                            _oom_exc = None
                             try:
                                 batch_data = Batch.from_data_list(current_data).to(device)
 
@@ -594,8 +719,7 @@ if __name__ == "__main__":
                                     opt.zero_grad()
 
                                 atom_emb = embedding_layer(batch_data.x).squeeze()
-                                embedded_data = Data(x=atom_emb, edge_index=batch_data.edge_index, edge_attr=batch_data.edge_attr)
-                                graph_emb = backbone(embedded_data, batch=batch_data.batch)
+                                graph_emb = _run_backbone(backbone, atom_emb, batch_data.edge_index, batch_data.edge_attr, batch_data.batch)
                                 graph_emb = graph_emb.view(-1, graph_emb.size(-1))
 
                                 outputs = head0(graph_emb)
@@ -606,8 +730,7 @@ if __name__ == "__main__":
 
                                 mask_indices = MolGraphMask.select_mask_indices(batch_data.x)
                                 masked_atom_emb = MolGraphMask.mask_atoms(atom_emb, mask_indices, torch.zeros(embed_dim))
-                                masked_embedded_data = Data(x=masked_atom_emb, edge_index=batch_data.edge_index, edge_attr=batch_data.edge_attr)
-                                graph_emb1 = backbone(masked_embedded_data, batch=batch_data.batch)
+                                graph_emb1 = _run_backbone(backbone, masked_atom_emb, batch_data.edge_index, batch_data.edge_attr, batch_data.batch)
                                 graph_emb1_masked = graph_emb1.view(-1, graph_emb1.size(-1))[mask_indices]
                                 outputs1 = head1(graph_emb1_masked)
                                 outputs1 = outputs1.view(-1, outputs1.size(-1))
@@ -618,15 +741,13 @@ if __name__ == "__main__":
 
                                 less_mask_indices = MolGraphMask.select_mask_indices(batch_data.x, mask_ratio=less_rate)
                                 less_masked_atom_emb = MolGraphMask.mask_atoms(atom_emb, less_mask_indices, torch.zeros(embed_dim))
-                                less_masked_embedded_data = Data(x=less_masked_atom_emb, edge_index=batch_data.edge_index, edge_attr=batch_data.edge_attr)
-                                less_graph_emb = backbone(less_masked_embedded_data, batch=batch_data.batch)
+                                less_graph_emb = _run_backbone(backbone, less_masked_atom_emb, batch_data.edge_index, batch_data.edge_attr, batch_data.batch)
                                 less_graph_emb = less_graph_emb.view(-1, less_graph_emb.size(-1))
                                 less_outputs = aggrmodel(less_graph_emb, batch_data.batch)
 
                                 more_mask_indices = MolGraphMask.select_mask_indices(batch_data.x, mask_ratio=more_rate)
                                 more_masked_atom_emb = MolGraphMask.mask_atoms(atom_emb, more_mask_indices, torch.zeros(embed_dim))
-                                more_masked_embedded_data = Data(x=more_masked_atom_emb, edge_index=batch_data.edge_index, edge_attr=batch_data.edge_attr)
-                                more_graph_emb = backbone(more_masked_embedded_data, batch=batch_data.batch)
+                                more_graph_emb = _run_backbone(backbone, more_masked_atom_emb, batch_data.edge_index, batch_data.edge_attr, batch_data.batch)
                                 more_graph_emb = more_graph_emb.view(-1, more_graph_emb.size(-1))
                                 more_outputs = aggrmodel(more_graph_emb, batch_data.batch)
 
@@ -649,49 +770,26 @@ if __name__ == "__main__":
                                 task7.set_group_label(scaffold_groups)
                                 loss_scaffold_contrast = task7.compute_loss()
 
-                                # ---- Compute combined loss ----
                                 losses = [loss_atom_attr_pred, loss_masked_atom_type_pred, loss_triplet_contrast, loss_batch_contrast, loss_functional_group_pred, loss_scaffold_contrast]
                                 loss = weight_strategy(losses) if weight_type != "GRADNORM" else weight_strategy(losses, list(embedding_layer.module.parameters())+list(backbone.module.parameters()))
 
-                                # ---- Pre-backward memory gate (all ranks sync here) ----
-                                # If forward used >85% memory on any rank, all ranks split
-                                # BEFORE backward starts (DDP gradient sync not yet active).
-                                _free_mem, _total_mem = torch.cuda.mem_get_info(device)
-                                _mem_pressure = (_free_mem < _total_mem * 0.15)
-                                if rank is not None and world_size > 1:
-                                    _p = torch.tensor([1 if _mem_pressure else 0], device=device)
-                                    dist.all_reduce(_p, op=dist.ReduceOp.MAX)
-                                    _mem_pressure = (_p.item() > 0)
-                                if _mem_pressure:
-                                    raise RuntimeError(
-                                        f"out of memory: proactive split "
-                                        f"(free={_free_mem/1024**3:.1f} GiB / total={_total_mem/1024**3:.1f} GiB)"
-                                    )
-
-                                # ---- Backward ----
-                                if weight_type == "GRADNORM":
-                                    loss, gn_loss, _ = loss
-                                    loss.backward(retain_graph=True)
-                                    gn_loss.backward()
+                                # Forward succeeded
+                            except Exception as e:
+                                # Catch ALL exceptions (not just OOM RuntimeError) so every rank
+                                # reaches the sync all_reduce below — avoids single-rank silent
+                                # crashes that deadlock the remaining ranks at the barrier.
+                                _err = str(e)
+                                oom_flag_local = True
+                                is_oom = isinstance(e, RuntimeError) and ("out of memory" in _err or "CUDA error" in _err)
+                                if is_oom:
+                                    _oom_exc = e
                                 else:
-                                    loss.backward()
+                                    # Non-OOM exception: log on all ranks so we know what happened
+                                    print(f"[ERROR] Rank {rank}: Forward exception at batch {batch_idx+1}: "
+                                          f"{type(e).__name__}: {_err[:300]}")
 
-                                # ---- Optimizer & scheduler step ----
-                                for opt in optimizers.values():
-                                    opt.step()
-                                for name, scheduler in schedulers.items():
-                                    scheduler.step()
-
-                                # All succeeded
-                                break
-
-                            except RuntimeError as e:
-                                if "out of memory" in str(e):
-                                    oom_flag_local = True
-                                else:
-                                    raise
-
-                            # ---- DDP sync: any rank OOM → all ranks act ----
+                            # ====== SYNC: all ranks agree on forward OOM status ======
+                            # Safe: DDP gradient all-reduce has NOT started yet.
                             if rank is not None and world_size > 1:
                                 oom_tensor = torch.tensor([1 if oom_flag_local else 0], device=device)
                                 dist.all_reduce(oom_tensor, op=dist.ReduceOp.MAX)
@@ -700,13 +798,15 @@ if __name__ == "__main__":
                                 oom_flag_global = oom_flag_local
 
                             if oom_flag_global:
+                                # ---- Forward OOM → split or skip ----
+                                # Flush pending CUDA errors before clearing cache
+                                try:
+                                    torch.cuda.synchronize()
+                                except RuntimeError:
+                                    pass  # swallow residual errors from async ops
                                 torch.cuda.empty_cache()
-                                torch.cuda.synchronize()
 
-                                # Check if we can still split
                                 if len(current_data) <= 1:
-                                    # ---- Single molecule too large: skip it ----
-                                    # All ranks must agree to skip (no backward → DDP stays in sync)
                                     for opt in optimizers.values():
                                         opt.zero_grad()
                                     if rank is None or rank == 0:
@@ -721,7 +821,6 @@ if __name__ == "__main__":
                                     loss_scaffold_contrast = torch.tensor(0.0, device=device)
                                     break  # exit retry loop, piece_skipped=True
 
-                                # ---- Split current batch in half ----
                                 mid = len(current_data) // 2
                                 oom_split_count += 1
                                 if rank is None or rank == 0:
@@ -730,9 +829,84 @@ if __name__ == "__main__":
                                 pending.append((current_data[mid:], current_mols[mid:]))
                                 current_data = current_data[:mid]
                                 current_mols = current_mols[:mid]
-                                # continue retry loop
-                            else:
-                                raise e
+                                continue  # retry forward with half batch
+
+                            # ====== PHASE 2: Backward + Step ======
+                            # DDP gradient all-reduce starts here. Recovery is only safe in non-DDP mode.
+                            # Release cached-but-unused memory before backward to reduce OOM risk.
+                            torch.cuda.empty_cache()
+                            try:
+                                if weight_type == "GRADNORM":
+                                    loss, gn_loss, _ = loss
+                                    loss.backward(retain_graph=True)
+                                    gn_loss.backward()
+                                else:
+                                    loss.backward()
+
+                                for opt in optimizers.values():
+                                    opt.step()
+                                for name, scheduler in schedulers.items():
+                                    scheduler.step()
+
+                                break  # ALL succeeded
+
+                            except RuntimeError as e:
+                                _err = str(e)
+                                if "out of memory" in _err or "CUDA error" in _err:
+                                    if rank is not None and world_size > 1:
+                                        # DDP gradient all-reduce may already be in flight.
+                                        # Cannot recover — save state and force-exit ALL ranks.
+                                        import sys as _sys
+                                        print(f"\n{'='*60}")
+                                        print(f"[FATAL] Rank {rank}: Backward OOM at batch {batch_idx+1}, epoch {epoch+1}")
+                                        print(f"  DDP gradients may be partially synced; cannot recover in-process.")
+                                        print(f"  Saving emergency checkpoint and exiting...")
+                                        print(f"{'='*60}\n")
+                                        if rank == 0:
+                                            _emergency = {
+                                                'epoch': epoch,
+                                                'best_val_loss': best_val_loss,
+                                                'train_losses': train_losses,
+                                                'val_losses': val_losses,
+                                            }
+                                            torch.save(_emergency, f'trained_models/{logdir}/oom_backward_epoch{epoch+1}.pth')
+                                            print(f"[FATAL] Emergency state saved to trained_models/{logdir}/oom_backward_epoch{epoch+1}.pth")
+                                        # os._exit triggers NCCL teardown on other ranks immediately
+                                        # (avoids 10-min NCCL watchdog timeout)
+                                        _sys.stdout.flush()
+                                        _sys.stderr.flush()
+                                        os._exit(1)
+                                    else:
+                                        # Non-DDP: safe to split and retry from forward
+                                        try:
+                                            torch.cuda.synchronize()
+                                        except RuntimeError:
+                                            pass
+                                        torch.cuda.empty_cache()
+                                        for opt in optimizers.values():
+                                            opt.zero_grad()
+                                        if len(current_data) <= 1:
+                                            if rank is None or rank == 0:
+                                                print(f"[OOM Recovery] Batch {batch_idx+1}: single mol backward OOM, SKIPPING")
+                                            piece_skipped = True
+                                            loss = torch.tensor(0.0, device=device)
+                                            loss_atom_attr_pred = torch.tensor(0.0, device=device)
+                                            loss_masked_atom_type_pred = torch.tensor(0.0, device=device)
+                                            loss_triplet_contrast = torch.tensor(0.0, device=device)
+                                            loss_batch_contrast = torch.tensor(0.0, device=device)
+                                            loss_functional_group_pred = torch.tensor(0.0, device=device)
+                                            loss_scaffold_contrast = torch.tensor(0.0, device=device)
+                                            break
+                                        mid = len(current_data) // 2
+                                        oom_split_count += 1
+                                        if rank is None or rank == 0:
+                                            print(f"[OOM Recovery] Batch {batch_idx+1}: backward OOM, {len(current_data)} → {mid}")
+                                        pending.append((current_data[mid:], current_mols[mid:]))
+                                        current_data = current_data[:mid]
+                                        current_mols = current_mols[:mid]
+                                        continue
+                                else:
+                                    raise
 
                         # ---- Per-piece done (success or skip) ----
                         if piece_skipped:
@@ -741,6 +915,8 @@ if __name__ == "__main__":
                             batch_size_current = len(current_mols)
                             total_train_loss += loss.item() * batch_size_current
                             train_sample_count += batch_size_current
+                            # Release cached memory before next sub-batch to avoid false OOM
+                            torch.cuda.empty_cache()
 
                         # Logging (only first piece of each original batch, and only if not skipped)
                         if is_first_piece and not piece_skipped:
@@ -898,6 +1074,21 @@ if __name__ == "__main__":
                 
                 # Print epoch end information for validation
                 print_epoch_end(rank, epoch, avg_val_loss, timer, "Validation")
+
+                # ---- Reset CUDA state between epochs ----
+                # Validation uses torch.no_grad() which can leave fragmented memory.
+                # Clear cache and sync CUDA on all ranks to reduce OOM risk on the
+                # first batch of the next training epoch.
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                if rank is not None and world_size > 1:
+                    # Synchronize CUDA on all ranks to surface any pending GPU errors
+                    # before entering the next epoch's training loop.
+                    try:
+                        torch.cuda.synchronize()
+                    except RuntimeError as e:
+                        print(f"[WARNING] Rank {rank}: CUDA sync error after validation: {e}")
+                        torch.cuda.empty_cache()
                 
                 if rank is None or rank == 0:
                     writer.add_scalar('Epoch/Train_loss', avg_train_loss, epoch)
@@ -924,14 +1115,17 @@ if __name__ == "__main__":
                         "head0_state_dict": head0.state_dict(),
                         "head1_state_dict": head1.state_dict(),
                         "head4_state_dict": head4.state_dict(),
+                        'weight_strategy_state_dict': weight_strategy.state_dict(),
                         'epoch': epoch,
-                        'best_val_loss': best_val_loss
+                        'best_val_loss': best_val_loss,
+                        'train_losses': train_losses,
+                        'val_losses': val_losses,
                     }, f'trained_models/{logdir}/best_model.pth')
                     print(f"Best model saved at epoch {epoch+1} with Val Loss = {best_val_loss:.6f}")
-                
-                # Save model at each epoch
+
+                # Save model at each epoch (and as latest for resume)
                 if rank is None or rank == 0:
-                    torch.save({
+                    _ckpt = {
                         'embedding_layer_state_dict': embedding_layer.state_dict(),
                         'backbone_state_dict': backbone.state_dict(),
                         'optimizer_state_dict': {name: opt.state_dict() for name, opt in optimizers.items()},
@@ -939,14 +1133,20 @@ if __name__ == "__main__":
                         "head0_state_dict": head0.state_dict(),
                         "head1_state_dict": head1.state_dict(),
                         "head4_state_dict": head4.state_dict(),
+                        'weight_strategy_state_dict': weight_strategy.state_dict(),
                         'epoch': epoch,
-                        'val_loss': avg_val_loss
-                    }, f'trained_models/{logdir}/model_epoch{epoch}.pth')
+                        'val_loss': avg_val_loss,
+                        'best_val_loss': best_val_loss,
+                        'train_losses': train_losses,
+                        'val_losses': val_losses,
+                    }
+                    torch.save(_ckpt, f'trained_models/{logdir}/model_epoch{epoch}.pth')
+                    torch.save(_ckpt, f'trained_models/{logdir}/model_latest.pth')
                     print(f"Model at epoch {epoch+1} saved with Val Loss = {avg_val_loss:.6f}")
 
             except KeyboardInterrupt:
                 if rank is None or rank == 0:
-                    torch.save({
+                    _interrupted_ckpt = {
                         'embedding_layer_state_dict': embedding_layer.state_dict(),
                         'backbone_state_dict': backbone.state_dict(),
                         'optimizer_state_dict': {name: opt.state_dict() for name, opt in optimizers.items()},
@@ -954,10 +1154,15 @@ if __name__ == "__main__":
                         "head0_state_dict": head0.state_dict(),
                         "head1_state_dict": head1.state_dict(),
                         "head4_state_dict": head4.state_dict(),
+                        'weight_strategy_state_dict': weight_strategy.state_dict(),
                         'epoch': epoch,
-                        'best_val_loss': best_val_loss
-                    }, f'trained_models/{logdir}/interrupted_model.pth')
-                    print("Training interrupted. Model state saved to 'interrupted_model.pth'.")
+                        'best_val_loss': best_val_loss,
+                        'train_losses': train_losses,
+                        'val_losses': val_losses,
+                    }
+                    torch.save(_interrupted_ckpt, f'trained_models/{logdir}/interrupted_model.pth')
+                    torch.save(_interrupted_ckpt, f'trained_models/{logdir}/model_latest.pth')
+                    print("Training interrupted. Model state saved to 'interrupted_model.pth' and 'model_latest.pth'.")
                 break
             
         # Close tensorboard writer if exists

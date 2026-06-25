@@ -148,18 +148,20 @@ class AdaptiveUncertaintyWeighting(nn.Module):
 class FixedUncertaintyWeighting(nn.Module):
     """
     Fixed uncertainty weight strategy.
+    Stores log_vars as a non-trainable buffer so they are saved in state_dict
+    but not updated by the optimizer.
     """
-    def __init__(self, num_tasks):
+    def __init__(self, num_tasks, fixed_log_vars):
         super().__init__()
-        self.log_vars = nn.Parameter(torch.zeros(num_tasks))
-    
-    def forward(self, losses, log_vars):
+        self.register_buffer('log_vars', fixed_log_vars.clone().detach())
+
+    def forward(self, losses):
         """
         losses: list of task losses [L1, L2, ..., Ln]
-        log_vars: list of loss log vars
+        Uses fixed log_vars from the registered buffer.
         """
         total_loss = 0
         for i, loss in enumerate(losses):
-            precision = torch.exp(-log_vars[i])
+            precision = torch.exp(-self.log_vars[i])
             total_loss += precision * loss
-        return total_loss    
+        return total_loss
