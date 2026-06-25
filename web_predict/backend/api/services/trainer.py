@@ -12,7 +12,6 @@ import numpy as np
 import pandas as pd
 import torch
 import torch.nn.functional as F
-from deepchem.data import NumpyDataset
 from torch_geometric.data import Batch, Data
 from torch_geometric.loader import DataLoader
 
@@ -196,6 +195,9 @@ def _run_regression(
     smiles_list = df[params.smiles_column].astype(str).tolist()
     df[y_cols] = df[y_cols].fillna(-1)
     labels = df[y_cols].values.astype(np.float32)
+
+    # Lazy import to avoid triggering DGL at module load (DGL 2.2.1 requires PyTorch ≤ 2.3)
+    from deepchem.data import NumpyDataset
 
     dc_dataset = NumpyDataset(X=labels, ids=smiles_list)
     splitter = ScaffoldSplitter()
@@ -391,6 +393,9 @@ def _run_classification(
     smiles_list = df[params.smiles_column].astype(str).tolist()
     df[y_cols] = df[y_cols].fillna(-1).astype(float)
     labels = df[y_cols].values
+
+    # Lazy import to avoid triggering DGL at module load (DGL 2.2.1 requires PyTorch ≤ 2.3)
+    from deepchem.data import NumpyDataset
 
     dc_dataset = NumpyDataset(X=labels, ids=smiles_list)
     splitter = ScaffoldSplitter()

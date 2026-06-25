@@ -24,7 +24,10 @@ class SMILESToInputs:
         """
         mol = Chem.MolFromSmiles(smiles, sanitize=sanitize)
         if mol is None:
-            print(f"[SMILES TO INPUTS] Invalid SMILES string: {smiles}")
+            try:
+                print(f"[SMILES TO INPUTS] Invalid SMILES string: {smiles}")
+            except UnicodeEncodeError:
+                print(f"[SMILES TO INPUTS] Invalid SMILES string (unprintable)")
             return None, None, None
         if removehs:
             try:
@@ -32,7 +35,10 @@ class SMILESToInputs:
             except:
                 # This is usually because the molecule cannot be kekulized.
                 # Just do not remove Hs in this case.
-                print(f"[SMILES TO INPUTS] SMILES string {smiles} convert error: removeHs failed")
+                try:
+                    print(f"[SMILES TO INPUTS] SMILES string {smiles} convert error: removeHs failed")
+                except UnicodeEncodeError:
+                    print(f"[SMILES TO INPUTS] SMILES string (unprintable) convert error: removeHs failed")
                 if skipUnkekulizable:
                     return None, None, None
         # Get atom type indices

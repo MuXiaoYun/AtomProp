@@ -58,7 +58,7 @@ head_layers = 2
 head_hidden_dim = 2048
 
 # ---- LoRA (Low-Rank Adaptation) configuration ----
-use_lora = False              # Use LoRA for efficient fine-tuning
+use_lora = True             # Use LoRA for efficient fine-tuning
 lora_rank = 8                 # LoRA rank (typical: 4-64)
 lora_alpha = 8.0              # LoRA scaling factor
 lora_dropout = 0.0            # Dropout on LoRA branch input
