@@ -52,10 +52,19 @@ gamma = 1.0
 # Model architecture
 embed_dim = 1024
 aggr = 'mean'  # options: 'mean', 'sum', 'max', 'attention'
+# Head settings — always use simple MLP (DownstreamHead is deprecated)
 head_type = "mlp"
 head_dropout = 0.3
 head_layers = 2
 head_hidden_dim = 2048
+
+# ---- LoRA (Low-Rank Adaptation) configuration ----
+use_lora = False              # Use LoRA for efficient fine-tuning
+lora_rank = 8                 # LoRA rank (typical: 4-64)
+lora_alpha = 8.0              # LoRA scaling factor
+lora_dropout = 0.0            # Dropout on LoRA branch input
+lora_include_ffn = False      # Also adapt per-layer + final FFN weights
+lora_include_global_attn = False  # Also adapt neck global attention
 
 # Optimizer settings
 lr_embedding_layer_backbone = 1e-5

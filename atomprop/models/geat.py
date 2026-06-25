@@ -8,7 +8,7 @@ from atomprop.utils.mlp import MLP, MoE
 from atomprop.embeddings.atom_embedding import BondTypes, BondDirections
 from atomprop.models.edge_attention import EdgeAttention, MultiHeadEdgeAttention, GlobalEdgeAttn
 import torch_geometric
-from typing import Optional
+from typing import Optional, Set
 
 class GeATLayer(nn.Module):
     """
@@ -339,6 +339,87 @@ class GeATNet(nn.Module):
             return aggr_embeddings
         output = self.FFN_norm(aggr_embeddings + self.ffn(aggr_embeddings))
         return output
+
+    # ------------------------------------------------------------------
+    # LoRA (Low-Rank Adaptation) support
+    # ------------------------------------------------------------------
+
+    def apply_lora(
+        self,
+        rank: int = 8,
+        alpha: float = 8.0,
+        dropout: float = 0.0,
+        target_modules: Optional[Set[str]] = None,
+        include_ffn: bool = False,
+        include_global_attn: bool = False,
+    ):
+        """
+        Freeze all base-model parameters and inject LoRA adapters into the
+        GeATLayer blocks (and optionally FFN / global-attention layers).
+
+        Args:
+            rank: LoRA rank (typical values: 4–64).
+            alpha: LoRA scaling factor (effective scale = alpha / rank).
+            dropout: Dropout rate applied to the LoRA branch input.
+            target_modules: Attribute names of nn.Linear layers to wrap inside
+                each GeATLayer.  Default: ``{"Q_w", "K_w", "V_w", "project"}``.
+            include_ffn: If True, also wrap nn.Linear layers inside per-layer
+                FFN modules and the final FFN.
+            include_global_attn: If True, also wrap out_proj Linear inside
+                the neck's nn.MultiheadAttention layers.
+        """
+        from atomprop.utils.lora import inject_lora
+
+        if target_modules is None:
+            target_modules = {"Q_w", "K_w", "V_w", "project"}
+
+        # 1. Freeze ALL base-model parameters
+        for p in self.parameters():
+            p.requires_grad_(False)
+
+        # 2. Inject LoRA into each GeATLayer
+        for layer in self.backbone.geat_layers:
+            inject_lora(
+                layer,
+                target_names=target_modules,
+                rank=rank,
+                alpha=alpha,
+                dropout=dropout,
+                include_ffn=include_ffn,
+                include_global_attn=False,  # global attn lives in neck, not here
+            )
+
+        # 3. Optionally inject into the final FFN
+        if include_ffn and hasattr(self, "ffn"):
+            from atomprop.utils.lora import _wrap_ffn
+            _wrap_ffn(self.ffn, rank=rank, alpha=alpha, dropout=dropout)
+
+        # 4. Optionally inject into neck's global attention layers
+        if include_global_attn:
+            for attn_layer in self.neck.global_attns:
+                from atomprop.utils.lora import _wrap_global_attn
+                _wrap_global_attn(attn_layer.global_attention,
+                                  rank=rank, alpha=alpha, dropout=dropout)
+
+    def get_lora_state_dict(self) -> dict:
+        """Return a state dict of only the LoRA parameters (A, B matrices)."""
+        from atomprop.utils.lora import get_lora_state_dict
+        return get_lora_state_dict(self)
+
+    def load_lora_state_dict(self, lora_state: dict, strict: bool = True) -> None:
+        """Load LoRA parameters from a previously saved state dict."""
+        from atomprop.utils.lora import load_lora_state_dict
+        load_lora_state_dict(self, lora_state, strict=strict)
+
+    def merge_lora(self) -> None:
+        """Merge all LoRA adapters into base weights for fast inference."""
+        from atomprop.utils.lora import merge_lora_weights
+        merge_lora_weights(self)
+
+    def unmerge_lora(self) -> None:
+        """Separate LoRA adapters from base weights (for continued training)."""
+        from atomprop.utils.lora import unmerge_lora_weights
+        unmerge_lora_weights(self)
 
     def print_params(self):
         """

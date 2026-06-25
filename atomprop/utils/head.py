@@ -22,7 +22,7 @@ class GatedPooling(nn.Module):
         return torch_geometric.nn.global_add_pool(x, batch)
 
 class DownstreamHead(nn.Module):
-    def __init__(self, 
+    def __init__(self,
                  input_dim: int,
                  bottle_neck_dim: int,
                  bottle_neck_layers: int,
@@ -34,6 +34,14 @@ class DownstreamHead(nn.Module):
                  hidden_activation = F.relu,
                  output_activation = None):
         super().__init__()
+        import warnings
+        warnings.warn(
+            "DownstreamHead is deprecated. "
+            "Use a simple MLP head with LoRA backbone adapter instead. "
+            "See config_finetune.py: head_type='mlp' + use_lora=True.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
 
         self.attn = None
         if attn_num_layers > 0:

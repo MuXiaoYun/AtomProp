@@ -52,6 +52,11 @@ class TrainParams:
     learning_rate: float
     output_dir: str
     job_id: str
+    # LoRA options
+    use_lora: bool = False
+    lora_rank: int = 8
+    lora_alpha: float = 8.0
+    lora_dropout: float = 0.0
 
 
 def _get_device() -> torch.device:
@@ -125,6 +130,26 @@ def transform_with_scaler(labels: np.ndarray, scaler_stats: dict) -> np.ndarray:
     scale = np.where(scale == 0.0, 1.0, scale)
     valid_mask = labels != -1
     return np.where(valid_mask, (labels - mean) / scale, labels).astype(np.float32)
+
+
+def _build_checkpoint(embedding_layer, backbone, head, aggrmodel, scaler_stats,
+                      use_lora, task_type, target_column, **extra):
+    """Build a checkpoint dict. Uses LoRA state dict if use_lora is True."""
+    ckpt = {
+        "embedding_layer_state_dict": embedding_layer.state_dict(),
+        "head_state_dict": head.state_dict(),
+        "aggr_state_dict": aggrmodel.state_dict() if aggrmodel is not None else None,
+        "scaler_stats": scaler_stats,
+        "task_type": task_type,
+        "target_column": target_column,
+        **extra,
+    }
+    if use_lora:
+        ckpt["lora_state_dict"] = backbone.get_lora_state_dict()
+        ckpt["lora_config"] = {"rank": 8, "alpha": 8.0, "include_ffn": False, "include_global_attn": False}
+    else:
+        ckpt["backbone_state_dict"] = backbone.state_dict()
+    return ckpt
 
 
 def _load_pretrained_weights(embedding_layer, backbone, path: str, device: torch.device):
@@ -222,6 +247,15 @@ def _run_regression(
         output_activation=None,
     ).to(device)
 
+    # Apply LoRA after model creation (before optimizer so only trainable params are included)
+    if params.use_lora:
+        backbone.apply_lora(
+            rank=params.lora_rank,
+            alpha=params.lora_alpha,
+            dropout=params.lora_dropout,
+        )
+        backbone.to(device)  # move newly-created LoRA params to device
+
     if params.init_mode == "pretrain" and cfg.pretrained_path:
         p = str(ATOMPROP_ROOT / cfg.pretrained_path)
         if os.path.isfile(p):
@@ -239,10 +273,11 @@ def _run_regression(
 
     lr_ratio = cfg.lr_embedding_layer_backbone / cfg.lr_head
     lr_backbone = params.learning_rate * lr_ratio
+    backbone_trainable = [p for p in backbone.parameters() if p.requires_grad]
     opt_emb = torch.optim.Adam(
         [
             {"params": embedding_layer.parameters(), "lr": lr_backbone},
-            {"params": backbone.parameters(), "lr": lr_backbone},
+            {"params": backbone_trainable, "lr": lr_backbone},
         ],
         weight_decay=cfg.wd_emb_backbone,
     )
@@ -324,42 +359,23 @@ def _run_regression(
         if avg_val < best_val:
             best_val = avg_val
             tolerating = 0
-            torch.save(
-                {
-                    "epoch": epoch + 1,
-                    "embedding_layer_state_dict": embedding_layer.state_dict(),
-                    "backbone_state_dict": backbone.state_dict(),
-                    "head_state_dict": head.state_dict(),
-                    "aggr_state_dict": aggrmodel.state_dict()
-                    if cfg.aggr == "attention"
-                    else None,
-                    "scaler_stats": scaler_stats,
-                    "val_loss": avg_val,
-                    "task_type": "regression",
-                    "target_column": params.target_column,
-                },
-                best_path,
+            ckpt = _build_checkpoint(
+                embedding_layer, backbone, head, aggrmodel, scaler_stats,
+                params.use_lora, "regression", params.target_column,
+                epoch=epoch + 1, val_loss=avg_val,
             )
+            torch.save(ckpt, best_path)
         else:
             tolerating += 1
             if tolerating >= cfg.tolerance:
                 break
 
     if not os.path.isfile(best_path):
-        torch.save(
-            {
-                "embedding_layer_state_dict": embedding_layer.state_dict(),
-                "backbone_state_dict": backbone.state_dict(),
-                "head_state_dict": head.state_dict(),
-                "aggr_state_dict": aggrmodel.state_dict()
-                if cfg.aggr == "attention"
-                else None,
-                "scaler_stats": scaler_stats,
-                "task_type": "regression",
-                "target_column": params.target_column,
-            },
-            best_path,
+        ckpt = _build_checkpoint(
+            embedding_layer, backbone, head, aggrmodel, scaler_stats,
+            params.use_lora, "regression", params.target_column,
         )
+        torch.save(ckpt, best_path)
     return best_path
 
 
@@ -420,6 +436,15 @@ def _run_classification(
         output_activation=None,
     ).to(device)
 
+    # Apply LoRA after model creation (before optimizer so only trainable params are included)
+    if params.use_lora:
+        backbone.apply_lora(
+            rank=params.lora_rank,
+            alpha=params.lora_alpha,
+            dropout=params.lora_dropout,
+        )
+        backbone.to(device)  # move newly-created LoRA params to device
+
     if params.init_mode == "pretrain" and cfg.pretrained_path:
         p = str(ATOMPROP_ROOT / cfg.pretrained_path)
         if os.path.isfile(p):
@@ -437,10 +462,11 @@ def _run_classification(
 
     lr_ratio = cfg.lr_embedding_layer_backbone / cfg.lr_head
     lr_backbone = params.learning_rate * lr_ratio
+    backbone_trainable = [p for p in backbone.parameters() if p.requires_grad]
     opt_emb = torch.optim.Adam(
         [
             {"params": embedding_layer.parameters(), "lr": lr_backbone},
-            {"params": backbone.parameters(), "lr": lr_backbone},
+            {"params": backbone_trainable, "lr": lr_backbone},
         ],
         weight_decay=cfg.wd_emb_backbone,
     )
@@ -548,40 +574,23 @@ def _run_classification(
         if avg_val < best_val:
             best_val = avg_val
             tolerating = 0
-            torch.save(
-                {
-                    "epoch": epoch + 1,
-                    "embedding_layer_state_dict": embedding_layer.state_dict(),
-                    "backbone_state_dict": backbone.state_dict(),
-                    "head_state_dict": head.state_dict(),
-                    "aggr_state_dict": aggrmodel.state_dict()
-                    if cfg.aggr == "attention"
-                    else None,
-                    "val_loss": avg_val,
-                    "task_type": "classification",
-                    "target_column": params.target_column,
-                },
-                best_path,
+            ckpt = _build_checkpoint(
+                embedding_layer, backbone, head, aggrmodel, None,
+                params.use_lora, "classification", params.target_column,
+                epoch=epoch + 1, val_loss=avg_val,
             )
+            torch.save(ckpt, best_path)
         else:
             tolerating += 1
             if tolerating >= cfg.tolerance:
                 break
 
     if not os.path.isfile(best_path):
-        torch.save(
-            {
-                "embedding_layer_state_dict": embedding_layer.state_dict(),
-                "backbone_state_dict": backbone.state_dict(),
-                "head_state_dict": head.state_dict(),
-                "aggr_state_dict": aggrmodel.state_dict()
-                if cfg.aggr == "attention"
-                else None,
-                "task_type": "classification",
-                "target_column": params.target_column,
-            },
-            best_path,
+        ckpt = _build_checkpoint(
+            embedding_layer, backbone, head, aggrmodel, None,
+            params.use_lora, "classification", params.target_column,
         )
+        torch.save(ckpt, best_path)
     return best_path
 
 

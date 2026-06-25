@@ -26,8 +26,9 @@ def get_device() -> torch.device:
     return torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
 
-def _build_model(device: torch.device):
-    embedding_layer = Embedder(num_atom_types=120, embed_dim=cfg.embed_dim)
+def _build_base_model(device: torch.device):
+    """Build the base GeATNet model (without head) and load pretrained weights from config."""
+    embedding_layer = Embedder(num_atom_types=120, embed_dim=cfg.embed_dim).to(device)
     backbone = GeATNet(
         embed_dim=cfg.embed_dim,
         num_heads=cfg.num_heads,
@@ -42,26 +43,34 @@ def _build_model(device: torch.device):
         FFN_num_layers=cfg.FFN_num_layers,
         FFN_top_k=cfg.FFN_top_k,
         use_edge_embedding=cfg.use_edge_embedding,
-    )
-    aggrmodel = GNNAggr(embed_dim=cfg.embed_dim, aggr=cfg.aggr, layers=1)
-    head = MLP(
-        input_dim=cfg.embed_dim,
-        hidden_dim=cfg.head_hidden_dim,
-        output_dim=1,
-        num_layers=cfg.head_layers,
-        dropout=cfg.head_dropout,
-        batch_norm=True,
-        output_activation=None,
-    )
-    return embedding_layer, backbone, aggrmodel, head
+    ).to(device)
+    aggrmodel = GNNAggr(embed_dim=cfg.embed_dim, aggr=cfg.aggr, layers=1).to(device)
+
+    # Load base pretrained weights from config
+    base_path = Path(ATOMPROP_ROOT) / cfg.pretrained_path
+    if base_path.is_file():
+        base_ckpt = torch.load(base_path, map_location=device, weights_only=False)
+        from atomprop.utils.utils import remove_module_prefix
+        embedding_layer.load_state_dict(
+            remove_module_prefix(base_ckpt["embedding_layer_state_dict"]))
+        backbone.load_state_dict(
+            remove_module_prefix(base_ckpt["backbone_state_dict"]))
+    else:
+        print(f"[Predictor] Base model not found at {base_path}, using random init.")
+
+    return embedding_layer, backbone, aggrmodel
 
 
 def predict_smiles(smiles_list: list[str], model_path: str | Path) -> list[dict]:
     """
     Run batch prediction on a list of SMILES strings.
 
+    Accepts both full-model checkpoints and LoRA-only checkpoints.
+    LoRA checkpoints must contain ``lora_state_dict`` and ``head_state_dict``;
+    the base backbone + embedder are loaded from the config's pretrained_path.
+
     Returns list of dicts: {"smiles": str, "predicted_value": float}
-    Invalid SMILES are skipped (same behavior as predict_gui.py).
+    Invalid SMILES are skipped.
     """
     model_path = Path(model_path)
     if not model_path.is_file():
@@ -72,20 +81,53 @@ def predict_smiles(smiles_list: list[str], model_path: str | Path) -> list[dict]
         return []
 
     device = get_device()
-    embedding_layer, backbone, aggrmodel, head = _build_model(device)
+    embedding_layer, backbone, aggrmodel = _build_base_model(device)
 
     ckpt = torch.load(model_path, map_location=device, weights_only=False)
-    embedding_layer.load_state_dict(ckpt["embedding_layer_state_dict"])
-    backbone.load_state_dict(ckpt["backbone_state_dict"])
+
+    # Detect LoRA vs full checkpoint
+    is_lora = "lora_state_dict" in ckpt
+
+    if is_lora:
+        # LoRA checkpoint: apply LoRA to backbone, load adapter weights, then merge
+        lora_cfg = ckpt.get("lora_config", {})
+        backbone.apply_lora(
+            rank=lora_cfg.get("rank", 8),
+            alpha=lora_cfg.get("alpha", 8.0),
+            dropout=lora_cfg.get("dropout", 0.0),
+            include_ffn=lora_cfg.get("include_ffn", False),
+            include_global_attn=lora_cfg.get("include_global_attn", False),
+        )
+        backbone.load_lora_state_dict(ckpt["lora_state_dict"])
+        backbone.merge_lora()
+    else:
+        # Full checkpoint: load backbone state dict directly
+        backbone.load_state_dict(ckpt["backbone_state_dict"])
+        # Also load embedding if present (full checkpoints include it)
+        if "embedding_layer_state_dict" in ckpt:
+            embedding_layer.load_state_dict(ckpt["embedding_layer_state_dict"])
+
+    # Head: always create fresh from task output dim, load from checkpoint
+    output_dim = ckpt["head_state_dict"]["layers.%d.weight" % (cfg.head_layers - 1)].shape[0]
+    head = MLP(
+        input_dim=cfg.embed_dim,
+        hidden_dim=cfg.head_hidden_dim,
+        output_dim=output_dim,
+        num_layers=cfg.head_layers,
+        dropout=cfg.head_dropout,
+        batch_norm=True,
+        output_activation=None,
+    ).to(device)
     head.load_state_dict(ckpt["head_state_dict"])
+
     if cfg.aggr == "attention" and ckpt.get("aggr_state_dict"):
         aggrmodel.load_state_dict(ckpt["aggr_state_dict"])
 
     scaler_stats = ckpt.get("scaler_stats")
-    embedding_layer.to(device).eval()
-    backbone.to(device).eval()
-    head.to(device).eval()
-    aggrmodel.to(device).eval()
+    embedding_layer.eval()
+    backbone.eval()
+    head.eval()
+    aggrmodel.eval()
 
     dataset = []
     valid_smiles = []

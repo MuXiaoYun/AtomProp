@@ -20,7 +20,6 @@ import json
 from datetime import datetime
 from atomprop.models.geat import GeATNet
 import configs.config_finetune as cfg
-from atomprop.utils.head import DownstreamHead
 from atomprop.utils.utils import remove_module_prefix
 
 criterion = MaskedBCELossWithLogits()
@@ -64,7 +63,7 @@ def evaluate_model(model_components, dataloader, criterion, y_cols, device, aggr
             batch = batch.to(device)
             emb = embedding_layer(batch.x.squeeze())
             emb = backbone(Data(x=emb, edge_index=batch.edge_index, edge_attr=batch.edge_attr), batch=batch.batch)
-            preds = aggrmodel(head(emb), batch.batch) if cfg.head_type=="mlp" else head(emb, batch.batch)
+            preds = aggrmodel(head(emb), batch.batch)
             
             loss = criterion(preds.reshape(-1, len(y_cols)), batch.y.reshape(-1, len(y_cols)))
             total_loss += loss.item()
@@ -155,7 +154,7 @@ def train(train_dataloader, val_dataloader, test_dataloader, model_components, o
             else:
                 emb = embedding_layer(batch.x.squeeze())
                 emb = backbone(Data(x=emb, edge_index=batch.edge_index, edge_attr=batch.edge_attr), batch=batch.batch)
-            preds = aggrmodel(head(emb), batch.batch) if cfg.head_type=="mlp" else head(emb, batch.batch)
+            preds = aggrmodel(head(emb), batch.batch)
             
             loss = train_criterion(preds.reshape(-1, len(y_cols)), batch.y.reshape(-1, len(y_cols)))
             loss.backward()
@@ -195,10 +194,9 @@ def train(train_dataloader, val_dataloader, test_dataloader, model_components, o
             model_suffix = "nopretrain" if no_pretrain else "pretrained"
             save_path = f"trained_models/{logdir}/best_model_{model_suffix}.pth"
             
-            torch.save({
+            _ckpt = {
                 'epoch': epoch + 1,
                 'embedding_layer_state_dict': embedding_layer.state_dict(),
-                'backbone_state_dict': backbone.state_dict(),
                 'head_state_dict': head.state_dict(),
                 'aggr_state_dict': aggrmodel.state_dict() if cfg.aggr == 'attention' else None,
                 'val_auc': val_auc,
@@ -206,7 +204,17 @@ def train(train_dataloader, val_dataloader, test_dataloader, model_components, o
                 'optimizer_embedding_layer_backbone_state_dict': optimizers[0].state_dict(),
                 'optimizer_head_state_dict': optimizers[1].state_dict(),
                 'optimizer_aggr_state_dict': optimizers[2].state_dict() if len(optimizers) > 2 else None,
-            }, save_path)
+            }
+            if cfg.use_lora:
+                _ckpt['lora_state_dict'] = backbone.get_lora_state_dict()
+                _ckpt['lora_config'] = {
+                    'rank': cfg.lora_rank, 'alpha': cfg.lora_alpha,
+                    'include_ffn': cfg.lora_include_ffn,
+                    'include_global_attn': cfg.lora_include_global_attn,
+                }
+            else:
+                _ckpt['backbone_state_dict'] = backbone.state_dict()
+            torch.save(_ckpt, save_path)
             
             print(f"Best model saved at epoch {best_epoch} with validation AUC: {best_val_auc:.4f}")
             tolerating = 0
@@ -235,7 +243,10 @@ def train(train_dataloader, val_dataloader, test_dataloader, model_components, o
     checkpoint = torch.load(load_path, weights_only=False, map_location=device)
     
     embedding_layer.load_state_dict(checkpoint['embedding_layer_state_dict'])
-    backbone.load_state_dict(checkpoint['backbone_state_dict'])
+    if 'lora_state_dict' in checkpoint:
+        backbone.load_lora_state_dict(checkpoint['lora_state_dict'])
+    else:
+        backbone.load_state_dict(checkpoint['backbone_state_dict'])
     head.load_state_dict(checkpoint['head_state_dict'])
     if cfg.aggr == 'attention' and checkpoint['aggr_state_dict']:
         aggrmodel.load_state_dict(checkpoint['aggr_state_dict'])
@@ -338,27 +349,14 @@ def main(ft_dataset=None):
                     attention_rank=cfg.attention_rank)
         aggrmodel = GNNAggr(embed_dim=cfg.embed_dim, aggr=cfg.aggr, layers=1)
 
-        if cfg.head_type == "mlp":
-            head = MLP(input_dim=cfg.embed_dim, 
-                   hidden_dim=cfg.head_hidden_dim, 
+        head = MLP(input_dim=cfg.embed_dim,
+                   hidden_dim=cfg.head_hidden_dim,
                    output_dim=len(y_cols),
-                   num_layers=cfg.head_layers, 
-                   dropout=cfg.head_dropout, 
-                   batch_norm=True, 
+                   num_layers=cfg.head_layers,
+                   dropout=cfg.head_dropout,
+                   batch_norm=True,
                    output_activation=None)
-            
-        else:
-            head = DownstreamHead(
-                input_dim=cfg.embed_dim,
-                bottle_neck_dim=cfg.bottle_neck_dim,
-                bottle_neck_layers=cfg.bottle_neck_layers,
-                hidden_dim=cfg.head_hidden_dim,
-                output_dim=len(y_cols),
-                mlp_num_layers=cfg.head_layers,
-                attn_num_layers=cfg.downstream_head_attn_num_layers,
-                dropout=cfg.head_dropout,
-            )
-        
+
         if cfg.no_pretrain == False:
             ckpt = torch.load(cfg.pretrained_path, weights_only=False, map_location=device)
             embedding_layer.load_state_dict(remove_module_prefix(ckpt['embedding_layer_state_dict']))
@@ -373,6 +371,18 @@ def main(ft_dataset=None):
                 if missing:
                     print(f"  First 5 missing: {missing[:5]}")
         
+        # ---- Apply LoRA if configured ----
+        if cfg.use_lora:
+            backbone.apply_lora(
+                rank=cfg.lora_rank,
+                alpha=cfg.lora_alpha,
+                dropout=cfg.lora_dropout,
+                include_ffn=cfg.lora_include_ffn,
+                include_global_attn=cfg.lora_include_global_attn,
+            )
+            backbone = backbone.to(device)  # move new LoRA params to device
+            print(f"[LoRA] Applied LoRA (rank={cfg.lora_rank}, alpha={cfg.lora_alpha})")
+
         print(f"embedding_layer Parameters: {sum(p.numel() for p in embedding_layer.parameters() if p.requires_grad)}")
         print(f"backbone Parameters: {sum(p.numel() for p in backbone.parameters() if p.requires_grad)}")
         print(f"Head Parameters: {sum(p.numel() for p in head.parameters() if p.requires_grad)}")
@@ -410,9 +420,10 @@ def main(ft_dataset=None):
         
         # No DDP wrapping
         # Optimizers
+        backbone_trainable = [p for p in backbone.parameters() if p.requires_grad]
         optimizer_embedding_layer_backbone = torch.optim.Adam([
             {'params': embedding_layer.parameters(), 'lr': cfg.lr_embedding_layer_backbone, 'weight_decay': cfg.wd_emb_backbone},
-            {'params': backbone.parameters(), 'lr': cfg.lr_embedding_layer_backbone, 'weight_decay': cfg.wd_emb_backbone}
+            {'params': backbone_trainable, 'lr': cfg.lr_embedding_layer_backbone, 'weight_decay': cfg.wd_emb_backbone}
         ])
         optimizer_head = torch.optim.Adam(head.parameters(), lr=cfg.lr_head, weight_decay=cfg.wd_head)
         optimizers = [optimizer_embedding_layer_backbone, optimizer_head]

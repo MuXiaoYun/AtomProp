@@ -29,12 +29,16 @@ def _current_model() -> Path | None:
 def health(request):
     device = "cuda" if __import__("torch").cuda.is_available() else "cpu"
     model = _current_model()
+    # Base model path from config
+    import configs.config_reg as cfg_reg
+    base_model = getattr(cfg_reg, "pretrained_path", "N/A")
     return JsonResponse(
         {
             "status": "ok",
             "device": device,
             "model_loaded": model is not None,
             "model_name": model.name if model else None,
+            "base_model": base_model,
         }
     )
 

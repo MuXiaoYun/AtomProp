@@ -17,10 +17,11 @@ import {
 
 const modelLoaded = ref(false)
 const modelName = ref<string | null>(null)
+const baseModel = ref('从配置加载')
 const smilesText = ref('')
 const results = ref<PredictResult[]>([])
 const predicting = ref(false)
-const statusText = ref('就绪 — 请先加载模型')
+const statusText = ref('就绪 — 请先上传 LoRA + 预测头 .pth 文件')
 
 function parseLines(text: string): string[] {
   return text.split(/\r?\n/).map((s) => s.trim()).filter(Boolean)
@@ -31,6 +32,7 @@ async function refreshHealth() {
     const h = await fetchHealth()
     modelLoaded.value = h.model_loaded
     modelName.value = h.model_name
+    if (h.base_model) baseModel.value = h.base_model
   } catch {
     statusText.value = '无法连接后端，请确认 Django 服务已启动'
   }
@@ -132,14 +134,15 @@ onActivated(refreshHealth)
       <ModelPanel
         :model-loaded="modelLoaded"
         :model-name="modelName"
+        :base-model="baseModel"
         @loaded="onModelLoaded"
       />
       <section class="card tips-card">
         <h3>使用说明</h3>
         <ul>
-          <li>加载训练好的 <code>.pth</code> 模型</li>
+          <li>基础模型从服务器配置自动加载</li>
+          <li>上传微调后的 LoRA + 预测头 <code>.pth</code></li>
           <li>每行输入一条 SMILES，或拖入 TXT/CSV</li>
-          <li>CSV 自动识别 smiles / smi 等列名</li>
           <li>预测完成后可导出 CSV</li>
         </ul>
       </section>

@@ -35,6 +35,10 @@ def train_defaults(_request):
             "lr_embedding_ratio": cfg_reg.lr_embedding_layer_backbone / cfg_reg.lr_head,
             "tolerance": cfg_reg.tolerance,
             "batch_size": cfg_reg.batch_size,
+            "base_model_path": cfg_reg.pretrained_path,
+            "use_lora": getattr(cfg_reg, "use_lora", False),
+            "lora_rank": getattr(cfg_reg, "lora_rank", 8),
+            "lora_alpha": getattr(cfg_reg, "lora_alpha", 8.0),
         }
     )
 
@@ -186,6 +190,10 @@ def start_training(request):
             learning_rate=learning_rate,
             output_dir=str(out_dir),
             job_id=job.job_id,
+            use_lora=data.get("use_lora", "false") in ("true", "True", True, "1"),
+            lora_rank=int(data.get("lora_rank", 8)),
+            lora_alpha=float(data.get("lora_alpha", 8.0)),
+            lora_dropout=float(data.get("lora_dropout", 0.0)),
         )
 
         def on_epoch(epoch: int, total: int, train_loss: float, val_loss: float):

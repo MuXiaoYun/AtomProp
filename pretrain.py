@@ -632,6 +632,9 @@ if __name__ == "__main__":
             if rank is None or rank == 0:
                 print(f"[Resume] Previously trained: {ckpt['epoch']+1} epochs, resuming from epoch {start_epoch}/{num_epochs}")
                 print(f"[Resume] best_val_loss = {best_val_loss:.6f}, LR scheduler & optimizer restored")
+                # Mark resume point in tensorboard
+                writer.add_scalar('Resume/epoch', start_epoch, 0)
+                writer.flush()
         else:
             start_epoch = 0
             best_val_loss = float('inf')
@@ -1143,6 +1146,8 @@ if __name__ == "__main__":
                     torch.save(_ckpt, f'trained_models/{logdir}/model_epoch{epoch}.pth')
                     torch.save(_ckpt, f'trained_models/{logdir}/model_latest.pth')
                     print(f"Model at epoch {epoch+1} saved with Val Loss = {avg_val_loss:.6f}")
+                    if writer is not None:
+                        writer.flush()  # ensure tensorboard data is committed
 
             except KeyboardInterrupt:
                 if rank is None or rank == 0:
