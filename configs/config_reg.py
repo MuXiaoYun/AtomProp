@@ -11,11 +11,11 @@ aggr_num_layers = 2
 num_heads = 16
 global_num_heads = 16
 output_negative_slope = 0.2
-geat_dropout = 0.2
+geat_dropout = 0.3
 
 FFN_type = "MLP"
 FFN_num_layers = 2
-FFN_hidden_dim = 4096
+FFN_hidden_dim = 2048
 FFN_num_experts = 8
 FFN_top_k = 2
 use_edge_embedding = False
@@ -23,7 +23,7 @@ use_edge_embedding = False
 # Per-layer FFN settings
 per_layer_FFN_type = "MLP"
 per_layer_FFN_num_layers = 2
-per_layer_FFN_hidden_dim = 4096
+per_layer_FFN_hidden_dim = 2048
 per_layer_FFN_dropout = 0.1
 per_layer_FFN_num_experts = 8
 per_layer_FFN_top_k = 2
@@ -35,13 +35,13 @@ x_col = "smiles"
 exclude_list = ["cpFullname","cpZhFullname","propZhFullname"] # columns that are not x or y
 
 # Training settings
-no_pretrain = True
+no_pretrain = False
 pretrained_path = 'trained_models/pretrain_final_true/model_epoch15.pth'
 logdir = "finetune_0409"
 logdir += "_nopre" if no_pretrain else "_pre"
 
-batch_size = 128
-test_batch_size = 128
+batch_size = 64
+test_batch_size = 64
 num_epochs = 100
 tolerance = 10
 random_state = 0
@@ -50,32 +50,32 @@ random_state = 0
 gamma = 1.0
 
 # Model architecture
-embed_dim = 1024
+embed_dim = 768
 aggr = 'mean'  # options: 'mean', 'sum', 'max', 'attention'
 head_type = "mlp"
-head_dropout = 0.3
+head_dropout = 0.5
 head_layers = 2
-head_hidden_dim = 2048
+head_hidden_dim = 256
 
 # ---- LoRA (Low-Rank Adaptation) configuration ----
 use_lora = True             # Use LoRA for efficient fine-tuning
-lora_rank = 8                 # LoRA rank (typical: 4-64)
-lora_alpha = 8.0              # LoRA scaling factor
-lora_dropout = 0.0            # Dropout on LoRA branch input
+lora_rank = 16                # LoRA rank (small dataset: 8-32)
+lora_alpha = 16.0             # LoRA scaling factor (match rank for α/r=1)
+lora_dropout = 0.1            # Dropout on LoRA branch input
 lora_include_ffn = False      # Also adapt per-layer + final FFN weights
 lora_include_global_attn = False  # Also adapt neck global attention
 
 # Optimizer settings
-lr_embedding_layer_backbone = 1e-5
-wd_emb_backbone = 1e-4
-lr_head = 1e-4
-wd_head = 1e-4
+lr_embedding_layer_backbone = 5e-6
+wd_emb_backbone = 1e-3
+lr_head = 5e-5
+wd_head = 1e-3
 
 # Scheduler settings
 T_max = 100
 freeze = 0  # number of epochs to freeze embedding layer and backbone
-eta_min_embedding_layer_backbone = 5e-6
-eta_min_head = 5e-5
+eta_min_embedding_layer_backbone = 1e-6
+eta_min_head = 1e-5
 
 def print_all_params():
     """Print all configuration parameters defined in this module."""

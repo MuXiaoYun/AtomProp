@@ -1,15 +1,17 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """
-finetune_sei.py — Finetune AtomProp on SEI datasets (偏心因子 & 熔点).
+finetune_sei.py — Finetune AtomProp on SEI datasets (沸点, 偏心因子 & 熔点).
 
 Usage:
-    python finetune_sei.py                          # finetune on both datasets
+    python finetune_sei.py                          # finetune on all datasets
+    python finetune_sei.py --dataset boiling        # only 沸点
     python finetune_sei.py --dataset eccentric      # only 偏心因子
     python finetune_sei.py --dataset melting        # only 熔点
     python finetune_sei.py --epochs 200 --bs 64     # custom params
 
 Output:
+    trained_models/sei_boiling_point/best_model.pth     ← Web UI compatible
     trained_models/sei_eccentric_factor/best_model.pth   ← Web UI compatible
     trained_models/sei_melting_point/best_model.pth      ← Web UI compatible
 """
@@ -26,6 +28,8 @@ import numpy as np
 import pandas as pd
 import torch
 import torch.nn as nn
+from sklearn.metrics import r2_score
+from sklearn.model_selection import train_test_split
 from torch_geometric.data import Data, Batch
 from torch_geometric.loader import DataLoader
 from tqdm import tqdm
@@ -112,6 +116,85 @@ def inverse_transform(scaled: np.ndarray, stats: dict) -> np.ndarray:
     return scaled * stats["scale"] + stats["mean"]
 
 
+def compute_rmse(predictions: np.ndarray, labels: np.ndarray) -> float:
+    """Root Mean Square Error (in original units).  Ignores NaN."""
+    mask = ~np.isnan(labels)
+    if not np.any(mask):
+        return float("nan")
+    return float(np.sqrt(np.nanmean((predictions[mask] - labels[mask]) ** 2)))
+
+
+def compute_r2(predictions: np.ndarray, labels: np.ndarray) -> float:
+    """Coefficient of determination R² using sklearn.metrics.r2_score.
+
+    Consistent with scripts/training/finetune_vapor_pressure.py and
+    atomprop/benchmarks/base.py.  Ignores NaN.
+    """
+    mask = ~np.isnan(labels)
+    if not np.any(mask) or np.sum(mask) < 2:
+        return float("nan")
+    pred = predictions[mask]
+    lab = labels[mask]
+    return float(r2_score(lab, pred))
+
+
+@torch.no_grad()
+def evaluate_model(
+    model_components: tuple,
+    dataloader: DataLoader,
+    criterion: nn.Module,
+    scaler_stats: dict,
+    device: torch.device,
+) -> dict:
+    """Run evaluation on a validation set and return loss, RMSE, R²."""
+    embedding_layer, backbone, head, aggrmodel = model_components
+    embedding_layer.eval()
+    backbone.eval()
+    head.eval()
+    if aggrmodel is not None:
+        aggrmodel.eval()
+
+    total_loss = 0.0
+    all_preds: list[np.ndarray] = []
+    all_labels: list[np.ndarray] = []
+    total_samples = 0
+
+    for batch in dataloader:
+        batch = batch.to(device)
+        emb = embedding_layer(batch.x.squeeze())
+        emb = backbone(
+            Data(x=emb, edge_index=batch.edge_index, edge_attr=batch.edge_attr),
+            batch=batch.batch,
+        )
+        g_emb = aggrmodel(emb, batch.batch)
+        preds = head(g_emb)
+
+        loss = criterion(preds, batch.y.reshape(-1, 1))
+        total_loss += loss.item() * batch.num_graphs
+        total_samples += batch.num_graphs
+        all_preds.append(preds.cpu().numpy())
+        all_labels.append(batch.y.reshape(-1, 1).cpu().numpy())
+
+    avg_loss = total_loss / max(total_samples, 1)
+
+    if all_preds:
+        pred_arr = np.vstack(all_preds)
+        label_arr = np.vstack(all_labels)
+        # Inverse-transform to original units
+        pred_orig = inverse_transform(pred_arr, scaler_stats)
+        label_orig = inverse_transform(label_arr, scaler_stats)
+        # Where labels were -1 (missing), mark as NaN
+        pred_orig = np.where(label_arr == -1, np.nan, pred_orig)
+        label_orig = np.where(label_arr == -1, np.nan, label_orig)
+        rmse = compute_rmse(pred_orig, label_orig)
+        r2 = compute_r2(pred_orig, label_orig)
+    else:
+        rmse = float("nan")
+        r2 = float("nan")
+
+    return {"loss": avg_loss, "rmse": rmse, "r2": r2}
+
+
 def build_checkpoint(
     embedding_layer: nn.Module,
     backbone: GeATNet,
@@ -159,6 +242,7 @@ def finetune_dataset(
     value_col: str = "pvcValue",
     num_epochs: int | None = None,
     batch_size: int | None = None,
+    val_split: float = 0.1,
     device: str = "cuda:0",
 ) -> str:
     """
@@ -186,21 +270,53 @@ def finetune_dataset(
     smiles_list = df[smiles_col].astype(str).tolist()
     raw_labels = df[[value_col]].fillna(-1).values.astype(np.float32)
 
-    scaler_stats = compute_scaler_stats(raw_labels)
-    labels_scaled = transform(raw_labels, scaler_stats)
+    print(f"  Target: {value_col}  min={raw_labels[raw_labels != -1].min():.4f}  "
+          f"max={raw_labels[raw_labels != -1].max():.4f}")
 
-    print(f"  Target: {value_col}  mean={scaler_stats['mean'][0]:.4f}  "
-          f"std={scaler_stats['scale'][0]:.4f}")
+    # ── train / val split ──────────────────────────────────────────────────
+    all_indices = np.arange(len(smiles_list))
+    if val_split > 0 and len(all_indices) >= 5:
+        train_idx, val_idx = train_test_split(
+            all_indices, test_size=val_split,
+            random_state=cfg.random_state,
+        )
+    else:
+        train_idx, val_idx = all_indices, np.array([], dtype=int)
 
-    dataset = create_dataset(smiles_list, labels_scaled)
-    loader = DataLoader(
-        dataset,
+    train_smiles = [smiles_list[i] for i in train_idx]
+    train_labels = raw_labels[train_idx]
+    val_smiles = [smiles_list[i] for i in val_idx] if len(val_idx) > 0 else []
+    val_labels = raw_labels[val_idx] if len(val_idx) > 0 else np.empty((0, raw_labels.shape[1]))
+
+    print(f"  Split: train={len(train_smiles)}, val={len(val_smiles)}")
+
+    scaler_stats = compute_scaler_stats(train_labels)
+    train_labels_scaled = transform(train_labels, scaler_stats)
+    val_labels_scaled = transform(val_labels, scaler_stats) if len(val_smiles) > 0 else np.empty((0, raw_labels.shape[1]))
+
+    train_dataset = create_dataset(train_smiles, train_labels_scaled)
+    val_dataset = create_dataset(val_smiles, val_labels_scaled) if len(val_smiles) > 0 else []
+
+    train_loader = DataLoader(
+        train_dataset,
         batch_size=cfg.batch_size,
         shuffle=True,
         collate_fn=Batch.from_data_list,
         num_workers=0,
     )
-    print(f"  Valid molecules: {len(dataset)}  Batches: {len(loader)}")
+    val_loader: DataLoader | None = None
+    if len(val_dataset) > 0:
+        val_loader = DataLoader(
+            val_dataset,
+            batch_size=cfg.batch_size,
+            shuffle=False,
+            collate_fn=Batch.from_data_list,
+            num_workers=0,
+        )
+
+    print(f"  Valid molecules: train={len(train_dataset)}, val={len(val_dataset)}")
+    print(f"  Scaler — mean={scaler_stats['mean'][0]:.4f}  "
+          f"std={scaler_stats['scale'][0]:.4f}")
 
     # ── build model ───────────────────────────────────────────────────────
     embedding_layer = Embedder(num_atom_types=120, embed_dim=cfg.embed_dim).to(dev)
@@ -286,11 +402,18 @@ def finetune_dataset(
     criterion = MaskedMSELoss()
 
     # ── training loop ─────────────────────────────────────────────────────
-    best_loss = float("inf")
+    best_val_rmse = float("inf")
     best_path = os.path.join(output_dir, "best_model.pth")
     final_path = os.path.join(output_dir, "final_model.pth")
 
-    print(f"\n{'='*50}\nTraining on: {target_name}  ({len(dataset)} mols, {cfg.num_epochs} epochs)\n{'='*50}")
+    do_val = val_loader is not None
+
+    print(f"\n{'='*60}")
+    print(f"Training on: {target_name}  (train={len(train_dataset)}, val={len(val_dataset)}, "
+          f"epochs={cfg.num_epochs})")
+    print(f"{'='*60}")
+    print(f"{'Epoch':>6s}  {'Train Loss':>10s}  "
+          + (f"{'Val Loss':>10s}  {'Val RMSE':>10s}  {'Val R2':>8s}" if do_val else ""))
 
     for epoch in range(cfg.num_epochs):
         embedding_layer.train()
@@ -301,7 +424,7 @@ def finetune_dataset(
 
         epoch_loss = 0.0
         n_batches = 0
-        pbar = tqdm(loader, desc=f"Epoch {epoch+1}/{cfg.num_epochs}")
+        pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{cfg.num_epochs}")
         for batch in pbar:
             batch = batch.to(dev)
             opt_emb_backbone.zero_grad()
@@ -323,17 +446,35 @@ def finetune_dataset(
             n_batches += 1
             pbar.set_postfix({"loss": f"{loss.item():.6f}"})
 
-        avg_loss = epoch_loss / max(n_batches, 1)
+        avg_train_loss = epoch_loss / max(n_batches, 1)
         sched_emb_backbone.step()
         sched_head.step()
 
-        print(f"  Epoch {epoch+1:3d}  avg loss: {avg_loss:.6f}")
+        # ── validation ─────────────────────────────────────────────────
+        if do_val:
+            val_metrics = evaluate_model(
+                (embedding_layer, backbone, head, aggrmodel),
+                val_loader, criterion, scaler_stats, dev,
+            )
+            print(f"  Epoch {epoch+1:3d}  "
+                  f"train_loss: {avg_train_loss:.6f}  "
+                  f"val_loss: {val_metrics['loss']:.6f}  "
+                  f"val_rmse: {val_metrics['rmse']:.4f}  "
+                  f"val_r2: {val_metrics['r2']:.4f}")
 
-        if avg_loss < best_loss:
-            best_loss = avg_loss
+            is_best = val_metrics["rmse"] < best_val_rmse
+            current_metric = val_metrics["rmse"]
+        else:
+            print(f"  Epoch {epoch+1:3d}  train_loss: {avg_train_loss:.6f}")
+            is_best = avg_train_loss < best_val_rmse
+            current_metric = avg_train_loss
+
+        if is_best:
+            best_val_rmse = current_metric
             ckpt = build_checkpoint(
                 embedding_layer, backbone, head, aggrmodel,
-                scaler_stats, target_name, epoch + 1, val_loss=avg_loss,
+                scaler_stats, target_name, epoch + 1,
+                val_loss=current_metric,
             )
             torch.save(ckpt, best_path)
             print(f"  → best model saved ({best_path})")
@@ -345,6 +486,8 @@ def finetune_dataset(
     )
     torch.save(ckpt_final, final_path)
     print(f"\nFinal model → {final_path}")
+    if do_val:
+        print(f"Best val RMSE: {best_val_rmse:.4f}")
 
     return best_path
 
@@ -352,6 +495,13 @@ def finetune_dataset(
 # ── CLI ───────────────────────────────────────────────────────────────────────
 
 DATASETS = {
+    "boiling": {
+        "csv": "data/sei/沸点.csv",
+        "output": "trained_models/sei_boiling_point",
+        "target": "沸点",
+        "smiles_col": "cpSMILEs",
+        "value_col": "pvcValue",
+    },
     "eccentric": {
         "csv": "data/sei/偏心因子.csv",
         "output": "trained_models/sei_eccentric_factor",
@@ -367,12 +517,14 @@ DATASETS = {
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Finetune on SEI property datasets")
     parser.add_argument("--dataset", type=str, default="all",
-                        choices=["all", "eccentric", "melting"],
+                        choices=["all", "boiling", "eccentric", "melting"],
                         help="Which dataset to finetune (default: all)")
     parser.add_argument("--epochs", type=int, default=None,
                         help="Override num_epochs from config")
     parser.add_argument("--bs", type=int, default=None,
                         help="Override batch_size from config")
+    parser.add_argument("--val_split", type=float, default=0.1,
+                        help="Validation split ratio (default: 0.1, set to 0 for full-train)")
     parser.add_argument("--gpu", type=int, default=0,
                         help="GPU device ID (default: 0)")
     args = parser.parse_args()
@@ -381,7 +533,7 @@ if __name__ == "__main__":
     if device_str == "cpu":
         print("[WARNING] CUDA not available, using CPU (slow).")
 
-    to_run = ["eccentric", "melting"] if args.dataset == "all" else [args.dataset]
+    to_run = ["boiling", "eccentric", "melting"] if args.dataset == "all" else [args.dataset]
 
     for key in to_run:
         info = DATASETS[key]
@@ -400,13 +552,16 @@ if __name__ == "__main__":
             csv_path=str(csv_path),
             output_dir=str(PROJECT_ROOT / info["output"]),
             target_name=info["target"],
+            smiles_col=info.get("smiles_col", "smi"),
+            value_col=info.get("value_col", "pvcValue"),
             num_epochs=args.epochs,
             batch_size=args.bs,
+            val_split=args.val_split,
             device=device_str,
         )
 
-    print("\n✓ All done. Models saved to:")
+    print("\nAll done. Models saved to:")
     for key in to_run:
         info = DATASETS[key]
         p = PROJECT_ROOT / info["output"] / "best_model.pth"
-        print(f"  {p}  ({'✓' if p.is_file() else '✗ missing'})")
+        print(f"  {p}  ({'OK' if p.is_file() else 'MISSING'})")

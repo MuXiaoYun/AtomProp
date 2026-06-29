@@ -15,3 +15,5 @@ build
 *.spec
 *.egg-info
 *_local.py
+*.txt
+*.tex

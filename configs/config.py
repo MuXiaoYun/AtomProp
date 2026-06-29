@@ -2,12 +2,12 @@ import inspect
 import sys
 import torch
 
-# configs/config.py
+# configs/config_local.py
 
 # Training
 from_scratch = True
-from_model_path = "trained_models/pretrain_final/model_epoch7.pth" # if not from_scratch
-trained_epochs = 0  # set to N to resume from epoch N (loads model_latest.pth automatically)
+from_model_path = "" # if not from_scratch
+trained_epochs = 0
 
 # Dataset and I/O
 data_path = "data/zinc15/dataset/zinc_standard_agent/processed/smiles.csv"
@@ -32,7 +32,7 @@ use_gradient_checkpointing = True  # recompute activations in backward instead o
 
 FFN_type = "MLP"
 FFN_num_layers = 2
-FFN_hidden_dim = 4096
+FFN_hidden_dim = 2048
 FFN_num_experts = 8
 FFN_top_k = 2
 use_edge_embedding = False
@@ -40,7 +40,7 @@ use_edge_embedding = False
 # Per-layer FFN settings (new Transformer block)
 per_layer_FFN_type = "MLP"
 per_layer_FFN_num_layers = 2
-per_layer_FFN_hidden_dim = 4096
+per_layer_FFN_hidden_dim = 2048
 per_layer_FFN_dropout = 0.1
 per_layer_FFN_num_experts = 8
 per_layer_FFN_top_k = 2
@@ -53,24 +53,24 @@ dataset_size = -1
 chunk_size = 65536
 max_atom_num = 128
 cuda_memory_fraction = 0.95  # fraction of GPU memory PyTorch can use (1.0 = all; <1.0 prevents UVM swap crashes)
-batch_size = 128
+batch_size = 32
 
 # Weight settings
 fix_uncertainty = False
-fixed_log_vars = torch.tensor([-3.2157, 0.5324, -0.4459, -0.6287, -1.8934, 2.7381], dtype=torch.float32)
+fixed_log_vars = torch.tensor([-3.58, 0.7739, -1.78, -2.7886, -1.5247, -2.1333], dtype=torch.float32)
 
 # Training settings
 num_epochs = 20
 weight_type = "UW"
 record_freq = 100
-skip_batch = 0  # skip the first N batches (set >0 to resume after OOM crash)
+skip_batch = 0
 
 # Masking rates
 less_rate = 0.1
 more_rate = 0.3
 
 # Model dimensions
-embed_dim = 1024
+embed_dim = 768
 
 # Functional groups
 fg_list = None  # if None, use default RDKit functional groups
@@ -101,8 +101,10 @@ weight_strategy_div_factor = 10.0
 
 def print_all_params():
     """Print all configuration parameters defined in this module."""
-    # Get all variables in the current module (globals)
-    current_module = sys.modules[__name__]
+    # Get the current module using inspect
+    current_module = inspect.getmodule(inspect.currentframe().f_back)
+    # Or simpler: current_module = sys.modules[__name__.lstrip('_')]
+    
     attrs = {
         name: value
         for name, value in inspect.getmembers(current_module)
@@ -115,18 +117,3 @@ def print_all_params():
     for key, val in sorted(attrs.items()):
         print(f"{key} = {repr(val)}")
     print("================================")
-
-
-# Auto-load local overrides (config_local.py) if it exists
-import os as _os
-_local_file = __file__.replace('.py', '_local.py')
-if _os.path.exists(_local_file):
-    import importlib.util as _importlib_util
-    _spec = _importlib_util.spec_from_file_location("_config_local", _local_file)
-    _local_mod = _importlib_util.module_from_spec(_spec)
-    _spec.loader.exec_module(_local_mod)
-    _current_mod = sys.modules[__name__]
-    for _attr in dir(_local_mod):
-        if not _attr.startswith('_'):
-            setattr(_current_mod, _attr, getattr(_local_mod, _attr))
-    print(f"[CONFIG] Loaded local overrides from {_local_file}")
